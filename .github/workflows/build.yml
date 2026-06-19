@@ -1,0 +1,98 @@
+name: build
+
+# Build a frozen CAS bundle for each target OS from ONE push.
+#
+# WHY a matrix (not cross-compile): PyInstaller cannot cross-compile — a Windows .exe
+# must be produced on Windows, a macOS bundle on macOS, an ELF on Linux. The only sane
+# way to ship "an executable for each target platform" is to run the SAME build on a
+# native runner per OS. That is exactly this matrix.
+#
+# Each job: checkout -> setup-python 3.14 -> pip install pyinstaller -> pyinstaller cas.spec
+# -> upload dist/ as a per-OS artifact. The bundle is dist/cas/ (cas-gui + cas + _internal/);
+# profiles/ and platform-tools/ are NOT built here — they are operator-side external
+# siblings dropped in next to the exe at deploy time (see PACKAGING.md).
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:   # let an operator kick a build by hand
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false           # one OS failing must not cancel the others
+      matrix:
+        include:
+          - os: windows-latest   # PRIMARY: the operator rig
+            artifact: cas-windows
+          - os: ubuntu-latest     # this dev host's OS
+            artifact: cas-linux
+          - os: macos-latest      # future/optional
+            artifact: cas-macos
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          # 3.14 is the dev/build interpreter (matches the host). setup-python serves it
+          # via the python-versions manifest; if a runner image can't resolve 3.14 yet,
+          # flip allow-prereleases off has no effect (3.14 is final) — instead pin the
+          # closest available with "3.14.x" and, as a last resort, "3.13" (the app is
+          # stdlib-only + version-agnostic, so 3.13 builds a working bundle too). The
+          # FALLBACK below auto-retries on 3.13 if 3.14 is unavailable on the image.
+          python-version: "3.14"
+          allow-prereleases: true
+        id: setup_py_314
+        continue-on-error: true
+
+      - name: Set up Python 3.13 (fallback if 3.14 unavailable on the runner image)
+        if: steps.setup_py_314.outcome == 'failure'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Show interpreter
+        run: python -c "import sys; print(sys.version)"
+
+      - name: Run unit tests (stdlib unittest — no third-party runtime deps)
+        # Tests are version-agnostic and must pass before we freeze. Run from tests/ so
+        # unittest discovery is unaffected by any glob characters in the checkout path.
+        working-directory: tests
+        run: python -m unittest test_cas -v
+
+      - name: Install PyInstaller (BUILD-ONLY dependency)
+        # >= 6.11 is the first release with Python 3.14 support; pin the floor so an old
+        # cached pip can't grab a wheel that chokes on 3.14 or misses the Tk runtime hook.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "pyinstaller>=6.11"
+
+      - name: Freeze with PyInstaller
+        # Builds BOTH exes into one dist/cas/ (see cas.spec). --noconfirm so a stale
+        # build/ or dist/ from a warm cache never blocks the rebuild.
+        run: pyinstaller --noconfirm cas.spec
+
+      - name: Sanity-check the bundle was produced
+        shell: bash
+        run: |
+          echo "dist/ contents:"
+          ls -R dist || true
+          test -d dist/cas
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14

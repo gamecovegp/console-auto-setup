@@ -1,0 +1,6 @@
+Games folder mapped (Dreamcast);map;ContentPath;SAF content:// on this build -> re-pick once per unit (Method C) unless the ES-DE clonetest proves the grant unnecessary
+Graphics API (want Vulkan);show;files/emu.cfg::^pvr.rend;0=OpenGL 4=Vulkan. Golden capture 2026-06-11 still had 0; you set Vulkan in-app after - next 'getcfg flycast' pins the exact value, then clone via: run.bat setpath flycast pvr.rend <value>
+Virtual gamepad transparency;show;files/emu.cfg::VirtualGamepadTransparency;Golden capture had 100; you re-set it in-app (want overlay invisible) - next getcfg pins the value, then setpath to clone it
+Controller mapping captured;filedir;files/mappings;Physical-pad mapping file(s) (Flycast_Virtual Gamepad.cfg). Clones via Method A
+Boxart/data dir;filedir;files/data;Boxart cache + VMU/BIOS land here. Cosmetic except BIOS; clones via Method A
+All-Files-Access;perm;-;Flycast reads ROMs by plain path when ES-DE hands them over. run: run.bat grant flycast

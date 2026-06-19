@@ -1,0 +1,53 @@
+# ── Build output (regenerate with build-win.bat / build-linux.sh / build-macos.sh) ──
+/build/
+/dist/
+*.spec.bak
+
+# ── Python caches / local venvs ──
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# ── SECRETS — cas-config.json holds the NAS app password (obfuscated). NEVER commit. ──
+cas-config.json
+*.local.json
+
+# ── Golden library, payloads, captures, backups (huge; these live on the NAS, not in git) ──
+/profiles/
+/payloads/
+/golden_backup_*/
+/results/
+
+# ── Emulator cores / BIOS / app installers / frontend data / raw brand source (large binaries) ──
+/retroarch-cores/
+/Bios/
+/Apps/
+/ES-DE/
+/branding/
+
+# ── Device tools + firmware (the operator supplies these per-PC; not source) ──
+/platform-tools/
+/windows-kit/
+/provision/root/firmware/
+**/magisk-patch/
+
+# ── Binary blobs anywhere ──
+*.img
+*.apk
+*.dll
+*.exe
+*.so
+*.bin
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.7z
+
+# ── Camera / media / reports (safety — never publish) ──
+*.mp4
+*.pic
+*.mov
+*.pbix
