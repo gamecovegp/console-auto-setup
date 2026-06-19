@@ -43,9 +43,12 @@ done
 for d in $INTERNAL_DIRS; do
   # skip if absent OR empty (e.g. ES-DE before its home is actually moved to internal — avoids a
   # stale/empty capture that would create a broken empty dir on restore).
+  # EXCLUDE downloaded_media (ES-DE box art, ~12 GB) + logs: box art is a SHARED layer the PC pushes
+  # separately (push_es_media), NOT bundled per golden — only the small config (gamelists/themes/settings)
+  # belongs in the profile. toybox tar supports --exclude (verified on device).
   [ -d "/storage/emulated/0/$d" ] && [ -n "$(ls -A "/storage/emulated/0/$d" 2>/dev/null)" ] \
-    && tar -cf "$P/internal_$d.tar" -C /storage/emulated/0 "$d" 2>/dev/null \
-    && ok "captured internal:$d ($(du -sh /storage/emulated/0/$d 2>/dev/null | cut -f1))"
+    && tar -cf "$P/internal_$d.tar" --exclude=downloaded_media --exclude=logs -C /storage/emulated/0 "$d" 2>/dev/null \
+    && ok "captured internal:$d config ($(du -sh "$P/internal_$d.tar" 2>/dev/null | cut -f1); box art excluded → shared layer)"
 done
 # device-experience settings: full dumps for reference; restore applies the safe allowlist (lib-root.sh).
 mkdir -p "$P/settings"

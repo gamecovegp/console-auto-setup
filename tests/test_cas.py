@@ -554,5 +554,45 @@ class TestBatch(unittest.TestCase):
             self.assertEqual(res["DEV2"][0], "no-profile")   # None in the map -> skipped
 
 
+class TestEsMedia(unittest.TestCase):
+    """The shared ES-DE box-art layer (downloaded_media) pushes from the PC, kept out of the golden."""
+    class _MR(FakeRunner):
+        def __init__(self, has_media=False, **kw):
+            super().__init__(**kw)
+            self.has_media = has_media
+
+        def __call__(self, args, **kw):
+            if "shell" in args and args[-1].startswith("ls ") and "downloaded_media" in args[-1]:
+                return 0, ("downloaded_media\n" if self.has_media else ""), ""
+            return super().__call__(args, **kw)
+
+    def _media(self, t):
+        m = pathlib.Path(t) / "downloaded_media" / "gba"
+        m.mkdir(parents=True)
+        (m / "x.png").write_bytes(b"x")
+        return pathlib.Path(t) / "downloaded_media"
+
+    def test_pushes_when_present_and_device_empty(self):
+        with tempfile.TemporaryDirectory() as t:
+            src = self._media(t)
+            r = self._MR(has_media=False)
+            self.assertTrue(PV.push_es_media(Adb(runner=r), log=lambda m: None, media_src=str(src)))
+            self.assertTrue(any("push" in c and str(src) in " ".join(c) for c in r.calls))
+
+    def test_skips_when_device_already_has_media(self):
+        with tempfile.TemporaryDirectory() as t:
+            src = self._media(t)
+            r = self._MR(has_media=True)
+            self.assertTrue(PV.push_es_media(Adb(runner=r), log=lambda m: None, media_src=str(src)))
+            self.assertFalse(any("push" in c for c in r.calls))     # already there -> no 12 GB re-push
+
+    def test_noop_when_no_source(self):
+        with tempfile.TemporaryDirectory() as t:
+            r = self._MR()
+            self.assertFalse(PV.push_es_media(Adb(runner=r), log=lambda m: None,
+                                              media_src=str(pathlib.Path(t) / "nope")))
+            self.assertFalse(any("push" in c for c in r.calls))
+
+
 if __name__ == "__main__":
     unittest.main()

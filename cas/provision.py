@@ -5,6 +5,7 @@ The device-side engine (restore.sh / capture.sh) is unchanged; we just push + in
 CAS_PAYLOAD / CAS_MANIFEST / CAS_OUT contract. All adb pushes + device-side rc are CHECKED so a
 truncated push or a failed restore can never silently ship a broken clone.
 """
+import os
 import re
 import time
 import shutil
@@ -15,6 +16,9 @@ from . import BUNDLE, ROOT
 from . import profiles as P
 
 CORES_SRC = ROOT / "retroarch-cores"   # the curated arm64 RetroArch core set, sourced from the PC
+MEDIA_SRC = ROOT / "ES-DE" / "downloaded_media"   # shared ES-DE box-art pool (box/screenshot/marquee),
+#   pushed per-device but kept OUT of the per-profile golden (it's ~12 GB; bundling it would balloon every
+#   profile). Override the PC source with CAS_MEDIA. The golden carries only the small ES-DE config.
 
 
 def _each_device(devices, worker, parallel, max_workers=8):
@@ -53,6 +57,28 @@ def _validate_payload(pay, pkgs, log):
         log(f"payload missing apk/data for: {', '.join(missing)}")
         return False
     return True
+
+
+def push_es_media(adb, log=print, media_src=None):
+    """Push the SHARED ES-DE box-art pool (downloaded_media) from the PC straight to the device's internal
+    ES-DE home — a separate ~12 GB layer kept OUT of the per-profile golden. No-op if the PC source is
+    absent, or if the device already has media (a re-provision shouldn't re-push 12 GB). adb push to
+    /storage is fine — sdcardfs owns it, no chown. A failed push is a WARNING: box art is cosmetic, the
+    ES-DE config (gamelists/themes) already rode the golden, so the unit still works without it."""
+    src = pathlib.Path(media_src) if media_src else pathlib.Path(os.environ.get("CAS_MEDIA", str(MEDIA_SRC)))
+    if not (src.is_dir() and any(src.iterdir())):
+        return False                                    # no shared media on this PC — nothing to push
+    dst = "/storage/emulated/0/ES-DE/downloaded_media"
+    if adb.shell(f"ls {dst} 2>/dev/null")[1].strip():
+        log(f"ES-DE box art already on device — skipping the ~12 GB media push ({dst}).")
+        return True
+    log("pushing the shared ES-DE box art from the PC (large — several minutes over USB)...")
+    adb.shell("mkdir -p /storage/emulated/0/ES-DE")
+    if adb.push(str(src), "/storage/emulated/0/ES-DE/"):    # -> /storage/emulated/0/ES-DE/downloaded_media
+        log("ES-DE box art pushed.")
+        return True
+    log("warning: ES-DE box-art push failed (config is fine; box art can be pushed later).")
+    return False
 
 
 def provision(adb, profile, log=print, dry_push=False):
@@ -133,6 +159,8 @@ def provision(adb, profile, log=print, dry_push=False):
     if rc != 0:
         log(f"restore FAILED (rc={rc}) — NOT rebooting; the unit is NOT provisioned.")
         return False
+    if not dry_push and "org.es_de.frontend" in pkgs:
+        push_es_media(adb, log=log)                    # shared box-art layer (kept out of the golden)
     if not dry_push:
         adb.su(f"rm -rf {DEV}")
     adb.reboot()
