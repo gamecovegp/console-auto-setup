@@ -74,6 +74,8 @@ class App:
         self._retry_ctx = None      # (message, retry_callable) armed by an op that had failures
         self.pkg_vars = {}          # pkg -> tk.BooleanVar (manifest checkboxes)
         self.flag_vars = {}         # @flag -> tk.BooleanVar (settings/hardening/grants)
+        self.assigned = {}          # serial -> profile name (per-device; defaults to the model auto-match)
+        self.assigned_manual = set()  # serials whose profile was set by hand (deliberate; allows force)
         win.title("CAS — Console Auto Setup")
         win.geometry("1000x720")
         win.minsize(820, 470)       # keep the action bar reachable even when shrunk
@@ -258,17 +260,24 @@ class App:
         devf = ttk.LabelFrame(top, text="Connected devices", padding=6)
         devf.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 6))
         self.dev_tree = ttk.Treeview(devf, columns=("model", "sd", "profile", "state"),
-                                     show="tree headings", height=7)
+                                     show="tree headings", height=7, selectmode="extended")
         self.dev_tree.heading("#0", text="serial")
         for c, t, w in (("model", "model", 120), ("sd", "SD card", 135),
-                        ("profile", "auto profile", 110), ("state", "state", 70)):
+                        ("profile", "profile", 110), ("state", "state", 70)):
             self.dev_tree.heading(c, text=t)
             self.dev_tree.column(c, width=w)
         self.dev_tree.column("#0", width=120)
         self.dev_tree.pack(fill="both", expand=True)
-        _tip(ttk.Button(devf, text="Refresh devices", command=self.refresh_devices),
+        devbtns = ttk.Frame(devf)
+        devbtns.pack(anchor="w", fill="x", pady=(6, 0))
+        _tip(ttk.Button(devbtns, text="Refresh devices", command=self.refresh_devices),
              "Re-scan for plugged-in devices and re-match each one to its profile by model.") \
-            .pack(anchor="w", pady=(6, 0))
+            .pack(side="left")
+        _tip(ttk.Button(devbtns, text="Assign profile → selected", command=self.assign_profile),
+             "Set the profile (the one picked in the dropdown on the right) on the device row(s) selected "
+             "in this list — Ctrl/Shift-click to pick several. Asks to confirm. Each device keeps its own "
+             "profile; actions use it.") \
+            .pack(side="left", padx=(6, 0))
 
         # Profiles + manifest (right-top)
         prof = ttk.LabelFrame(top, text="Profile", padding=6)
@@ -304,10 +313,11 @@ class App:
         top.columnconfigure(1, weight=1)
         top.rowconfigure(0, weight=1)
 
-        # Action area: an "apply to ALL connected" toggle (+ a "force selected profile" sub-toggle) and the
-        # workflow buttons in order: Root -> Save a master -> Download -> Lock. Root, Download and Lock honor
-        # the toggle (run on every connected device IN PARALLEL — each AUTO-MATCHED to its own profile by
-        # model, or the forced profile if that sub-toggle is on); only Save is always single-device.
+        # Action area: ONE "apply to ALL connected" toggle + the workflow buttons in order:
+        # Root -> Save a master -> Download -> Lock. Each device carries its OWN assigned profile (the
+        # "profile" column; auto-matched by model, or hand-set via "Assign profile → selected"). Root,
+        # Download and Lock run on the SELECTED row(s) — or EVERY connected device when the toggle is on —
+        # IN PARALLEL, each using its assigned profile. Only Save is always one device.
         # Footer pinned to the window BOTTOM so the action buttons stay visible even on a short window —
         # the devices/profile/log areas above shrink instead of pushing the buttons off-screen (the cause
         # of the "buttons have no text" clip on small screens).
@@ -316,44 +326,35 @@ class App:
         act = ttk.Frame(footer, padding=(8, 0))
         act.pack(side="top", fill="x")
         self.batch_var = tk.BooleanVar(value=False)
-        _tip(ttk.Checkbutton(act, text="Apply to ALL connected devices  (Root, Download + Lock, in parallel)",
+        _tip(ttk.Checkbutton(act, text="Apply to ALL connected devices  (else: the selected row(s))",
                              variable=self.batch_var, command=self._on_batch_toggle),
-             "OFF: the action runs on the ONE device selected in the list.\n"
-             "ON: Root, Download and Lock run on EVERY connected device IN PARALLEL (all at once). By "
-             "default each device is AUTO-MATCHED to its own profile by model (the golden is never sealed); "
-             "tick 'Force selected profile' below to override.") \
-            .pack(anchor="w", pady=(2, 0))
-        self.force_profile_var = tk.BooleanVar(value=False)
-        _tip(ttk.Checkbutton(act, text="      ↳ Force the SELECTED profile on every device  "
-                                       "(default: auto-match each by model)",
-                             variable=self.force_profile_var),
-             "Only affects 'Apply to ALL'.\n"
-             "OFF (default): each connected device gets the profile whose model_match fits it; a device "
-             "with no matching profile is skipped.\n"
-             "ON: the profile picked in the dropdown is applied to EVERY device. (Root/Lock still skip a "
-             "model mismatch to avoid a wrong-init_boot brick; Download applies regardless.)") \
-            .pack(anchor="w", pady=(0, 2))
+             "OFF: Root / Download / Lock run on the device ROW(S) you select (Ctrl/Shift-click for "
+             "several).\n"
+             "ON: they run on EVERY connected device.\n"
+             "Either way they run IN PARALLEL, and EACH device uses its OWN assigned profile (the "
+             "'profile' column). The golden is never sealed.") \
+            .pack(anchor="w", pady=(2, 2))
         row2 = ttk.Frame(act)
         row2.pack(fill="x")
         self.btns = []
         for text, cmd, tip in (
             ("⓪ Root", self.root_device,
-             "Root a FRESH unit with Magisk, sourced entirely from the PC: flashes the profile's "
-             "Magisk-patched init_boot via fastboot, then installs the Magisk app FROM THE PC (not the "
-             "SD). Bootloader must be UNLOCKED; the unit reboots a couple of times. With 'Apply to ALL' "
-             "ticked, roots EVERY connected device IN PARALLEL. (Inverse of 'Lock'.)"),
+             "Root the selected device(s) — or ALL connected if the toggle is on — with Magisk, sourced "
+             "entirely from the PC: flashes each device's ASSIGNED profile's Magisk-patched init_boot, then "
+             "installs the Magisk app FROM THE PC (not the SD). Bootloaders must be UNLOCKED; units reboot a "
+             "couple of times. Runs IN PARALLEL. (Inverse of 'Lock'.)"),
             ("① Save device → profile", self.capture_update,
              "SAVE what's on the selected device INTO a profile on this PC (the master 'golden'). Always "
              "ONE device. The previous version is kept as .prev for rollback. Direction: device → PC."),
             ("② Download", self.provision_selected,
-             "DOWNLOAD a profile onto the device — installs every ticked app plus its saves/BIOS/keys, "
-             "settings, folder permissions, and homescreen layout (replaces current app data). "
-             "Direction: PC → device. With 'Apply to ALL' ticked, downloads the SELECTED profile to "
-             "EVERY connected device IN PARALLEL. (Formerly 'Provision'.)"),
+             "DOWNLOAD each device's ASSIGNED profile onto it — installs every ticked app plus its "
+             "saves/BIOS/keys, settings, folder permissions, and homescreen layout (replaces current app "
+             "data). Direction: PC → device. Runs on the selected device(s), or ALL connected if the toggle "
+             "is on, IN PARALLEL. (Formerly 'Provision'.)"),
             ("③ Lock for shipping", self.seal_device,
-             "Final step on a VERIFIED unit: HIDES Developer options, removes root (Magisk), and disables "
-             "USB debugging so it's retail-ready (adb disconnects). With 'Apply to ALL' ticked, seals every "
-             "connected device IN PARALLEL (the golden + mismatched models are skipped). (Inverse of 'Root'.)"),
+             "Final step on VERIFIED unit(s): HIDES Developer options, removes root (Magisk), and disables "
+             "USB debugging so it's retail-ready (adb disconnects). Runs on the selected device(s), or ALL "
+             "connected if the toggle is on, IN PARALLEL — the golden is skipped. (Inverse of 'Root'.)"),
         ):
             b = ttk.Button(row2, text=text, command=cmd)
             b.pack(side="left", padx=4, pady=4)
@@ -562,22 +563,40 @@ class App:
                 return
             rows = []
             for serial, state in devs:
-                model, sd, prof = "", "", ""
+                model, sd, auto = "", "", ""
                 if state == "device":
                     a = Adb(serial=serial, adb=self.adb_bin)
                     model = a.getprop("ro.product.model")
                     m = P.match_profile(model, self.profiles_root)
-                    prof = m.name if m else "(no match)"
+                    auto = m.name if m else "(no match)"
                     try:
                         sd = a.sd_info()        # SD serial + size (or 'no SD') — catches wrong/missing cards
                     except Exception:
                         sd = "?"
-                rows.append((serial, model, sd, prof, state))
-            self.win.after(0, lambda: [self.dev_tree.insert("", "end", iid=r[0], text=r[0],
-                                       values=(r[1], r[2], r[3], r[4])) for r in rows])
-            self.log("refreshed: " + ", ".join(f"{r[0]} [SD {r[2] or 'n/a'}]" for r in rows) if rows
-                     else "refreshed: 0 device(s)")
+                rows.append((serial, model, sd, auto, state))
+            self.win.after(0, lambda r=rows: self._populate_devices(r))
         threading.Thread(target=work, daemon=True).start()
+
+    def _populate_devices(self, rows):
+        """(UI thread) fill the device tree + reconcile per-device profile assignments. A device with no
+        hand-set profile tracks its live model auto-match; manual assignments are preserved; gone devices
+        are forgotten. Hand-assigned rows are tinted green."""
+        self.dev_tree.delete(*self.dev_tree.get_children())
+        present = {r[0] for r in rows}
+        for s in list(self.assigned):
+            if s not in present:
+                self.assigned.pop(s, None)
+                self.assigned_manual.discard(s)
+        for serial, model, sd, auto, state in rows:
+            if serial not in self.assigned_manual:      # auto devices follow the live model match
+                self.assigned[serial] = auto
+            shown = self.assigned.get(serial, auto)
+            tags = ("manual",) if serial in self.assigned_manual else ()
+            self.dev_tree.insert("", "end", iid=serial, text=serial,
+                                 values=(model, sd, shown, state), tags=tags)
+        self.dev_tree.tag_configure("manual", foreground="#1a6f1a")
+        self.log("refreshed: " + ", ".join(f"{r[0]} → {self.assigned.get(r[0], '?')}" for r in rows)
+                 if rows else "refreshed: 0 device(s)")
 
     # ---------- actions ----------
     def _selected_serial(self):
@@ -596,72 +615,129 @@ class App:
 
     def _on_batch_toggle(self):
         if self.batch_var.get():
-            self.status_var.set("Batch mode ON — Root, Download & Lock run on ALL connected devices IN "
-                                "PARALLEL, each AUTO-MATCHED to its own profile (tick 'Force selected "
-                                "profile' to override). Only Save stays single-device.")
+            self.status_var.set("Apply-to-ALL ON — Root, Download & Lock run on EVERY connected device IN "
+                                "PARALLEL, each with its own assigned profile. Only Save is one device.")
         else:
-            self.status_var.set("Single-device mode — actions run on the selected device.")
+            self.status_var.set("Selection mode — actions run on the device row(s) you select "
+                                "(Ctrl/Shift-click for several).")
 
     def _selected_profile(self):
         name = self.prof_var.get()
         return P.Profile(P.pathlib.Path(self.profiles_root) / name) if name else None
 
-    def _batch_target(self):
-        """For 'Apply to ALL': pick the profile to apply. Returns (profile_or_None, description), or None
-        to ABORT. Default = AUTO-MATCH each device to its own profile by model (profile=None → the backend
-        matches on ro.product.model). If 'Force selected profile' is ticked, the dropdown profile is forced
-        onto every device."""
-        if self.force_profile_var.get():
-            prof = self._selected_profile()
-            if not prof:
-                messagebox.showinfo("CAS", "'Force selected profile' is ticked but no profile is selected.\n"
-                                           "Pick a profile, or untick it to auto-match each device by model.")
-                return None
-            return (prof, f"the FORCED profile '{prof.name}'")
-        return (None, "each device's auto-matched profile (by model)")
+    def _selected_serials(self):
+        return list(self.dev_tree.selection())
 
-    def provision_selected(self):
-        if self.batch_var.get():
-            return self.provision_all()
-        serial = self._selected_serial()
-        if not serial:
-            messagebox.showinfo("CAS", "Select a device in the list first.")
+    def _action_targets(self):
+        """Serials an action runs on: ALL connected if 'Apply to ALL' is ticked, else the selected row(s).
+        Returns None (after a message) when nothing is targeted."""
+        serials = (list(self.dev_tree.get_children()) if self.batch_var.get()
+                   else list(self.dev_tree.selection()))
+        if not serials:
+            messagebox.showinfo("CAS", "Select one or more device rows (Ctrl/Shift-click), or tick "
+                                       "'Apply to ALL connected devices'.")
+            return None
+        return serials
+
+    def _profile_map(self, serials):
+        """({serial: Profile or None}, force_serials) from each device's ASSIGNED profile. A hand-assigned
+        device joins force_serials so Root/Lock may flash past a model mismatch (already confirmed at assign)."""
+        pm, force = {}, set()
+        for s in serials:
+            name = self.assigned.get(s)
+            if not name or name == "(no match)":
+                pm[s] = None
+                continue
+            pm[s] = P.Profile(P.pathlib.Path(self.profiles_root) / name)
+            if s in self.assigned_manual:
+                force.add(s)
+        return pm, force
+
+    def assign_profile(self):
+        """Assign the dropdown profile to the selected device row(s), with a Yes/No confirm (+ a warning if
+        the profile's model_match doesn't fit a selected device)."""
+        serials = list(self.dev_tree.selection())
+        if not serials:
+            messagebox.showinfo("CAS", "Select one or more device rows first (Ctrl/Shift-click).")
             return
         name = self.prof_var.get()
-        prof = P.Profile(P.pathlib.Path(self.profiles_root) / name) if name else None
-        if not prof:
-            messagebox.showinfo("CAS", "Pick a profile (or it will auto-match).")
+        if not name:
+            messagebox.showinfo("CAS", "Pick a profile in the dropdown on the right first.")
             return
-        def work():
-            ok = PV.provision(Adb(serial=serial, adb=self.adb_bin), prof, log=self.log)
-            if not ok:   # arm retry of the same device
-                self._retry_ctx = (f"Download to {serial} failed. Try again?", self.provision_selected)
-            return ok
-        self._run_bg(work, label=f"Downloading '{name}' to {serial}")
+        mm = P.Profile(P.pathlib.Path(self.profiles_root) / name).meta.get("model_match")
+        mismatched = []
+        for s in serials:
+            vals = self.dev_tree.item(s).get("values") or []
+            model = str(vals[0]) if vals else ""
+            if model and mm and not re.search(mm, model):
+                mismatched.append(f"{s} ({model})")
+        warn = ""
+        if mismatched:
+            warn = ("\n\n⚠ This profile targets '" + mm + "', but these don't match:\n  "
+                    + "\n  ".join(mismatched)
+                    + "\nRoot/Lock will FLASH this profile's init_boot on them — fine if same chipset, "
+                      "could bootloop if not. Assign anyway?")
+        if not messagebox.askyesno(
+                "CAS — assign profile",
+                f"Set profile '{name}' on {len(serials)} device(s)?\n  " + "\n  ".join(serials) + warn):
+            return
+        for s in serials:
+            self.assigned[s] = name
+            self.assigned_manual.add(s)
+            if self.dev_tree.exists(s):
+                vals = list(self.dev_tree.item(s).get("values") or ["", "", "", ""])
+                vals[2] = name
+                self.dev_tree.item(s, values=vals, tags=("manual",))
+        self.log(f"assigned profile '{name}' to: {', '.join(serials)}")
 
-    def provision_all(self, devices=None):
-        tgt = self._batch_target()
-        if tgt is None:
-            return
-        prof, desc = tgt
-        if devices is None:   # first run (not a retry) -> confirm
+    def _run_batch(self, kind, serials, devices=None):
+        """Run kind ∈ {download, root, lock} on `serials`, each with its ASSIGNED profile, IN PARALLEL —
+        with a confirm (first run), the mini-report, and per-failure retry. `devices` is set on a retry."""
+        first = devices is None
+        pm, force = self._profile_map(serials)
+        if first:
+            verb = {"download": "Download to", "root": "Root", "lock": "Seal (lock)"}[kind]
+            lines = "\n  ".join(f"{s} → {self.assigned.get(s) or '(no profile)'}" for s in serials)
+            extra = {"root": "\n\nBootloaders must be UNLOCKED; each device reboots a couple of times.",
+                     "lock": "\n\nAssumes each unit is VERIFIED. Hides Developer options, un-roots, and "
+                             "disables USB debugging. The golden is skipped.",
+                     "download": ""}[kind]
             if not messagebox.askyesno(
-                    "CAS", f"Download to ALL connected devices (in parallel) using {desc}?"):
+                    f"CAS — {verb} {len(serials)} device(s)",
+                    f"{verb} these device(s), each with its own profile? They run IN PARALLEL.\n  "
+                    + lines + extra):
                 return
+        devs = devices if devices is not None else [(s, "device") for s in serials]
+
         def work():
-            devs = devices if devices is not None else list_devices(adb=self.adb_bin)
-            res = PV.provision_all(lambda s: Adb(serial=s, adb=self.adb_bin), devs,
-                                   root=self.profiles_root, log=self.log, profile=prof)
+            if kind == "download":
+                res = PV.provision_all(lambda s: Adb(serial=s, adb=self.adb_bin), devs,
+                                       root=self.profiles_root, log=self.log, profile_map=pm)
+            elif kind == "root":
+                res = PV.root_all(lambda s: Adb(serial=s, adb=self.adb_bin),
+                                  lambda s: Fastboot(serial=s, fastboot=self.fb_bin), devs,
+                                  profiles_root=self.profiles_root, appdir=APPDIR, log=self.log,
+                                  profile_map=pm, force_serials=force)
+            else:  # lock
+                res = PV.seal_all(lambda s: Adb(serial=s, adb=self.adb_bin),
+                                  lambda s: Fastboot(serial=s, fastboot=self.fb_bin), devs,
+                                  profiles_root=self.profiles_root, appdir=APPDIR, log=self.log,
+                                  profile_map=pm, force_serials=force)
             self.win.after(0, self.refresh_devices)
             failed = [s for s, v in res.items() if v[0] in ("fail", "error")]
-            if failed:   # arm retry: re-run JUST the failed devices (succeeded ones left alone)
+            if failed:
                 self._retry_ctx = (
-                    f"{len(failed)} device(s) failed Download:\n  {', '.join(failed)}\n\n"
-                    "Retry just those? (devices that already succeeded are left as-is.)",
-                    lambda fs=failed: self.provision_all(devices=[(s, "device") for s in fs]))
+                    f"{len(failed)} device(s) failed {kind}:\n  {', '.join(failed)}\n\nRetry just those?",
+                    lambda fs=failed: self._run_batch(kind, fs, devices=[(s, "device") for s in fs]))
             return res
-        self._run_bg(work, label=f"Downloading to all connected ({desc})"
+        label = {"download": "Downloading", "root": "Rooting", "lock": "Locking"}[kind]
+        self._run_bg(work, label=f"{label} {len(serials)} device(s)"
                                  f"{' (retry)' if devices is not None else ''}")
+
+    def provision_selected(self):
+        t = self._action_targets()
+        if t:
+            self._run_batch("download", t)
 
     def capture_update(self):
         serial = self._selected_serial()
@@ -682,159 +758,15 @@ class App:
             return ok
         self._run_bg(work, label=f"Saving {serial} → {name}")
 
-    def _root_all(self, devices=None):
-        tgt = self._batch_target()
-        if tgt is None:
-            return
-        prof, desc = tgt
-        if devices is None:   # first run (not a retry) -> confirm
-            if not messagebox.askyesno(
-                    "CAS — Root ALL connected",
-                    f"Root EVERY connected device using {desc} (Magisk from the PC)?\n\n"
-                    "Each device's Magisk-patched init_boot is flashed to it; a device whose model doesn't "
-                    "match its profile is skipped (safety). Bootloaders must be UNLOCKED. Devices reboot a "
-                    "couple of times. They run IN PARALLEL. Proceed?"):
-                return
-        def work():
-            devs = devices if devices is not None else list_devices(adb=self.adb_bin)
-            res = PV.root_all(lambda s: Adb(serial=s, adb=self.adb_bin),
-                              lambda s: Fastboot(serial=s, fastboot=self.fb_bin),
-                              devs, profiles_root=self.profiles_root,
-                              appdir=APPDIR, log=self.log, profile=prof)
-            self.win.after(0, self.refresh_devices)
-            failed = [s for s, v in res.items() if v[0] in ("fail", "error")]
-            if failed:   # arm retry: re-run JUST the failed devices
-                self._retry_ctx = (
-                    f"{len(failed)} device(s) failed Root:\n  {', '.join(failed)}\n\nRetry just those?",
-                    lambda fs=failed: self._root_all(devices=[(s, "device") for s in fs]))
-            return res
-        self._run_bg(work, label=f"Rooting all connected ({desc})"
-                                 f"{' (retry)' if devices is not None else ''}")
-
     def root_device(self):
-        if self.batch_var.get():
-            return self._root_all()
-        serial = self._selected_serial()
-        if not serial:
-            messagebox.showinfo("CAS", "Select the device to root first.")
-            return
-        name = self.prof_var.get()
-        prof = P.Profile(P.pathlib.Path(self.profiles_root) / name) if name else None
-        patched_rel = prof.meta.get("patched_init_boot") if prof else None
-        if not patched_rel:
-            messagebox.showerror("CAS", "This profile has no 'patched_init_boot' set — needed to root.")
-            return
-        patched = APPDIR / patched_rel
-        magisk_rel = prof.meta.get("magisk_apk")
-        magisk = (APPDIR / magisk_rel) if magisk_rel else None
-        if not patched.exists():
-            messagebox.showerror("CAS", f"The profile's patched init_boot is missing on the PC:\n{patched}")
-            return
-        # If the device differs from the profile, DON'T block — warn and ask. Same-chipset siblings can
-        # often share one image; the user decides, and force=True lets root() proceed past its guard.
-        vals = self.dev_tree.item(serial).get("values") or []
-        model = str(vals[0]) if vals else ""
-        mm = prof.meta.get("model_match")
-        force = False
-        if model and mm and not re.search(mm, model):
-            if not messagebox.askyesno(
-                    "CAS — different device than the profile",
-                    f"⚠ This device is '{model}', but the '{name}' profile is for '{mm}'.\n\n"
-                    f"Rooting flashes this profile's Magisk-patched init_boot, which was built for a "
-                    f"DIFFERENT device. If they're the same chipset it will likely work; if NOT compatible "
-                    f"the unit can bootloop — recoverable by re-flashing its own stock init_boot.\n\n"
-                    f"Proceed with the '{name}' setup anyway?"):
-                return
-            force = True
-        elif not messagebox.askyesno(
-                "CAS — Root device",
-                "Root this device with Magisk (sourced from the PC)?\n\n"
-                "  • flashes the profile's Magisk-patched init_boot via fastboot\n"
-                "  • installs the Magisk app FROM THE PC (not the SD)\n\n"
-                "The bootloader must be UNLOCKED. The device reboots a couple of times. Proceed?"):
-            return
-        self._run_bg(lambda: PV.root(
-            Adb(serial=serial, adb=self.adb_bin),
-            Fastboot(serial=serial, fastboot=self.fb_bin),
-            patched, magisk_apk=magisk, log=self.log,
-            model_match=prof.meta.get("model_match"), force=force),
-            label=f"Rooting {serial}{' (FORCED — different device)' if force else ''}")
+        t = self._action_targets()
+        if t:
+            self._run_batch("root", t)
 
     def seal_device(self):
-        if self.batch_var.get():
-            return self._seal_all()
-        serial = self._selected_serial()
-        if not serial:
-            messagebox.showinfo("CAS", "Select the provisioned device first.")
-            return
-        name = self.prof_var.get()
-        prof = P.Profile(P.pathlib.Path(self.profiles_root) / name) if name else None
-        stock_rel = prof.meta.get("stock_init_boot") if prof else None
-        if not stock_rel:
-            messagebox.showerror("CAS", "This profile has no 'stock_init_boot' set — needed to un-root.")
-            return
-        stock = APPDIR / stock_rel
-        if not stock.exists():
-            messagebox.showerror("CAS", f"The profile's stock init_boot is missing on the PC:\n{stock}")
-            return
-        # Same as Root: if the device differs from the profile, warn + ask instead of silently refusing.
-        vals = self.dev_tree.item(serial).get("values") or []
-        model = str(vals[0]) if vals else ""
-        mm = prof.meta.get("model_match")
-        force = False
-        if model and mm and not re.search(mm, model):
-            if not messagebox.askyesno(
-                    "CAS — different device than the profile",
-                    f"⚠ This device is '{model}', but the '{name}' profile is for '{mm}'.\n\n"
-                    f"Sealing flashes this profile's STOCK init_boot (to un-root), which was built for a "
-                    f"DIFFERENT device. Same chipset will likely work; if NOT compatible the unit can "
-                    f"bootloop — recoverable by re-flashing its own stock init_boot.\n\n"
-                    f"Proceed with the '{name}' stock image anyway?"):
-                return
-            force = True
-        elif not messagebox.askyesno(
-                "CAS — Seal for retail",
-                "Seal this unit for shipping?\n\n"
-                "Assumes you have VERIFIED games boot. This will:\n"
-                "  • disable Developer options\n"
-                "  • remove Magisk (UN-ROOT via stock init_boot)\n"
-                "  • disable USB debugging (adb will disconnect)\n\n"
-                "To re-provision later you'd re-flash the patched init_boot. Proceed?"):
-            return
-        self._run_bg(lambda: PV.seal(
-            Adb(serial=serial, adb=self.adb_bin),
-            Fastboot(serial=serial, fastboot=self.fb_bin),
-            stock, log=self.log, model_match=prof.meta.get("model_match"), force=force),
-            label=f"Locking {serial} for shipping{' (FORCED — different device)' if force else ''}")
-
-    def _seal_all(self, devices=None):
-        tgt = self._batch_target()
-        if tgt is None:
-            return
-        prof, desc = tgt
-        if devices is None:   # first run (not a retry) -> confirm
-            if not messagebox.askyesno(
-                    "CAS — Lock ALL connected",
-                    f"Seal EVERY connected device for shipping using {desc}?\n\n"
-                    "Assumes you've VERIFIED each unit. For every device this hides Developer options, "
-                    "removes Magisk (UN-ROOT via stock init_boot), and disables USB debugging. The golden "
-                    "and any model that doesn't match its profile are skipped. They run IN PARALLEL. Proceed?"):
-                return
-        def work():
-            devs = devices if devices is not None else list_devices(adb=self.adb_bin)
-            res = PV.seal_all(lambda s: Adb(serial=s, adb=self.adb_bin),
-                              lambda s: Fastboot(serial=s, fastboot=self.fb_bin),
-                              devs, profiles_root=self.profiles_root,
-                              appdir=APPDIR, log=self.log, profile=prof)
-            self.win.after(0, self.refresh_devices)
-            failed = [s for s, v in res.items() if v[0] in ("fail", "error")]
-            if failed:   # arm retry: re-run JUST the failed devices
-                self._retry_ctx = (
-                    f"{len(failed)} device(s) failed Lock:\n  {', '.join(failed)}\n\nRetry just those?",
-                    lambda fs=failed: self._seal_all(devices=[(s, "device") for s in fs]))
-            return res
-        self._run_bg(work, label=f"Locking all connected ({desc})"
-                                 f"{' (retry)' if devices is not None else ''}")
+        t = self._action_targets()
+        if t:
+            self._run_batch("lock", t)
 
     def _lib_reachable(self):
         """Is the CURRENTLY-SELECTED library path (self.profiles_root) a reachable directory?

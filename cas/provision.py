@@ -140,17 +140,23 @@ def provision(adb, profile, log=print, dry_push=False):
     return True
 
 
-def provision_all(make_adb, devices, root="profiles", log=print, profile=None, parallel=True):
+def provision_all(make_adb, devices, root="profiles", log=print, profile=None, profile_map=None,
+                  parallel=True):
     """Batch DOWNLOAD: provision every connected 'device'-state unit, in PARALLEL by default (all units
-    push + restore at once). If `profile` is given, that ONE profile is applied to EVERY device; else each
-    is auto-matched by model. Returns {serial: (status, detail)}. Per-device failures are isolated."""
+    push + restore at once). Profile resolution per device: profile_map[serial] (explicit per-device) >
+    `profile` (one for all) > auto-match by model. Returns {serial: (status, detail)}; failures isolated."""
     def worker(serial, state):
         if state != "device":
             log(f"[{serial}] skip (state={state})")
             return ("skip", state)
         try:
             adb = make_adb(serial)
-            if profile is not None:
+            if profile_map is not None and serial in profile_map:
+                prof = profile_map[serial]
+                if prof is None:
+                    log(f"[{serial}] no profile assigned — skip")
+                    return ("no-profile", "")
+            elif profile is not None:
                 prof = profile
             else:
                 model = adb.getprop("ro.product.model")
@@ -379,13 +385,15 @@ def seal(adb, fastboot, stock_init_boot, log=print, wait=True, model_match=None,
 
 
 def root_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, log=print, profile=None,
-             parallel=True):
+             profile_map=None, force_serials=None, parallel=True):
     """Batch ROOT: every connected 'device'-state unit, in PARALLEL by default (all units reboot/flash at
-    once — the big win, since root is reboot-dominated). If `profile` is given it's used for EVERY device;
-    else each is auto-matched by model. Devices with no profile / no patched_init_boot / the golden are
-    skipped. Returns {serial: (status, detail)}. Per-device failures are isolated.
+    once — the big win, since root is reboot-dominated). Profile per device: profile_map[serial] > `profile`
+    > auto-match by model. force_serials = serials to flash even on a model mismatch (a deliberate, already-
+    confirmed assignment). Devices with no profile / no patched_init_boot / the golden are skipped. Returns
+    {serial: (status, detail)}, failures isolated.
     (param is profiles_root, NOT root, so it can't shadow the root() function called below.)"""
     appdir = pathlib.Path(appdir) if appdir else pathlib.Path(".")
+    force_serials = force_serials or set()
 
     def worker(serial, state):
         if state != "device":
@@ -396,7 +404,12 @@ def root_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
             if adb.is_root() and adb.is_golden():
                 log(f"[{serial}] is the GOLDEN — skipped (never re-root the master)")
                 return ("skip-golden", "")
-            if profile is not None:
+            if profile_map is not None and serial in profile_map:
+                prof = profile_map[serial]
+                if prof is None:
+                    log(f"[{serial}] no profile assigned — skip")
+                    return ("no-profile", "")
+            elif profile is not None:
                 prof = profile
             else:
                 model = adb.getprop("ro.product.model")
@@ -412,7 +425,7 @@ def root_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
             ok = root(adb, make_fb(serial), appdir / patched_rel,
                       magisk_apk=(appdir / magisk_rel) if magisk_rel else None,
                       log=lambda m, s=serial: log(f"[{s}] {m}"),
-                      model_match=prof.meta.get("model_match"))
+                      model_match=prof.meta.get("model_match"), force=(serial in force_serials))
             return ("ok" if ok else "fail", prof.name)
         except Exception as e:
             log(f"[{serial}] ERROR: {e}")
@@ -421,12 +434,14 @@ def root_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
 
 
 def seal_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, log=print, profile=None,
-             parallel=True):
+             profile_map=None, force_serials=None, parallel=True):
     """Batch SEAL: every connected 'device'-state unit, in PARALLEL by default (each un-roots + reboots at
-    once, mirroring root_all). If `profile` is given that ONE profile is used for EVERY device; else each
-    is auto-matched by model. The golden and devices with no profile / no stock_init_boot are skipped.
-    Per-device isolated. Returns {serial: (status, detail)}."""
+    once, mirroring root_all). Profile per device: profile_map[serial] > `profile` > auto-match by model.
+    force_serials = serials to seal even on a model mismatch (deliberate, already-confirmed). The golden and
+    devices with no profile / no stock_init_boot are skipped. Per-device isolated. Returns {serial: (status,
+    detail)}."""
     appdir = pathlib.Path(appdir) if appdir else pathlib.Path(".")
+    force_serials = force_serials or set()
 
     def worker(serial, state):
         if state != "device":
@@ -437,7 +452,12 @@ def seal_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
             if adb.is_root() and adb.is_golden():
                 log(f"[{serial}] is the GOLDEN — skipped (never seal the master)")
                 return ("skip-golden", "")
-            if profile is not None:
+            if profile_map is not None and serial in profile_map:
+                prof = profile_map[serial]
+                if prof is None:
+                    log(f"[{serial}] no profile assigned — skip")
+                    return ("no-profile", "")
+            elif profile is not None:
                 prof = profile
             else:
                 model = adb.getprop("ro.product.model")
@@ -451,7 +471,7 @@ def seal_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
                 return ("no-init_boot", prof.name)
             ok = seal(adb, make_fb(serial), appdir / stock_rel,
                       log=lambda m, s=serial: log(f"[{s}] {m}"),
-                      model_match=prof.meta.get("model_match"))
+                      model_match=prof.meta.get("model_match"), force=(serial in force_serials))
             return ("ok" if ok else "fail", prof.name)
         except Exception as e:
             log(f"[{serial}] ERROR: {e}")

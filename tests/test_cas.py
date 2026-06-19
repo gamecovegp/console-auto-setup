@@ -158,12 +158,12 @@ class TestConfig(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "missing.json")  # no config file
             os.environ.pop("CAS_PROFILES", None)
-            saved = C.NAS_DEFAULT
+            saved = C.nas_default_path
             try:
-                C.NAS_DEFAULT = str(pathlib.Path(t) / "no-nas-here")  # NAS not mounted
+                C.nas_default_path = lambda: str(pathlib.Path(t) / "no-nas-here")  # NAS not mounted
                 self.assertEqual(C.library_root(), APPDIR / "profiles")
             finally:
-                C.NAS_DEFAULT = saved
+                C.nas_default_path = saved
 
     def test_nas_default_used_when_reachable(self):
         from cas import config as C
@@ -171,12 +171,12 @@ class TestConfig(unittest.TestCase):
             os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "missing.json")  # no config file
             os.environ.pop("CAS_PROFILES", None)
             nas = pathlib.Path(t) / "nas-lib"; nas.mkdir()
-            saved = C.NAS_DEFAULT
+            saved = C.nas_default_path
             try:
-                C.NAS_DEFAULT = str(nas)
+                C.nas_default_path = lambda: str(nas)
                 self.assertEqual(C.library_root(), nas)          # a mounted NAS default is used by default
             finally:
-                C.NAS_DEFAULT = saved
+                C.nas_default_path = saved
 
     def test_config_library_wins_over_default(self):
         from cas import config as C
@@ -537,6 +537,21 @@ class TestBatch(unittest.TestCase):
                 lambda s: Adb(serial=s, runner=FakeRunner(model="Odin2 Mini", root=True)),
                 mkfb, [("ABC123", "device")], profiles_root=t, appdir=t, log=lambda m: None)
             self.assertIn("flash init_boot_a", "\n".join(fbs["ABC123"].cmds()))  # matched -> stock flash issued
+
+    def test_root_all_profile_map_routes_per_device_and_skips_none(self):
+        # profile_map overrides auto-match: a device whose MODEL matches nothing still gets the mapped
+        # profile; a serial mapped to None is skipped (not auto-matched).
+        with tempfile.TemporaryDirectory() as t:
+            from cas import profiles as P
+            self._profile_with_imgs(t, name="odin2mini", model="Odin2 ?Mini")
+            pm = {"DEV1": P.Profile(pathlib.Path(t) / "odin2mini"), "DEV2": None}
+            res = PV.root_all(
+                lambda s: Adb(serial=s, runner=FakeRunner(model="Nomatch", root=True)),
+                lambda s: Fastboot(serial=s, runner=FbRunner()),
+                [("DEV1", "device"), ("DEV2", "device")],
+                profiles_root=t, appdir=t, log=lambda m: None, profile_map=pm)
+            self.assertEqual(res["DEV1"][0], "ok")           # mapped profile used despite model not matching
+            self.assertEqual(res["DEV2"][0], "no-profile")   # None in the map -> skipped
 
 
 if __name__ == "__main__":

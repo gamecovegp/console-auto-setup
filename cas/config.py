@@ -18,6 +18,15 @@ from . import APPDIR
 # with no drive-letter mapping; on a machine where the share isn't mounted (this dev box, offline) it
 # simply isn't a directory, so library_root() falls back to the local profiles dir.
 NAS_DEFAULT = r"\\192.168.100.227\01 GAMECOVE\[03] SETUP\CAS Profiles"
+# On Linux/macOS that Windows UNC can't resolve; if the SMB share is mounted (cifs) at this conventional
+# point, CAS auto-uses it. Mount once with:
+#   sudo mount -t cifs '//192.168.100.227/01 GAMECOVE' /mnt/gamecove -o username=<app>,uid=$(id -u),...
+NAS_DEFAULT_POSIX = "/mnt/gamecove/[03] SETUP/CAS Profiles"
+
+
+def nas_default_path():
+    """The OS-appropriate default NAS library path: the Windows UNC, else the POSIX cifs mount point."""
+    return NAS_DEFAULT if sys.platform == "win32" else NAS_DEFAULT_POSIX
 
 
 def config_path():
@@ -48,8 +57,8 @@ def library_root():
     lib = load_config().get("library")
     if lib:
         return pathlib.Path(lib)
-    # Default to the shared NAS library if it's mounted; otherwise the local profiles dir.
-    nas = pathlib.Path(NAS_DEFAULT)
+    # Default to the shared NAS library if it's mounted (UNC on Windows / cifs mount on POSIX); else local.
+    nas = pathlib.Path(nas_default_path())
     try:
         if nas.is_dir():
             return nas
