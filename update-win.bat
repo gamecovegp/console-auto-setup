@@ -8,7 +8,9 @@ REM     2) build-win.bat  (regenerates dist\cas\cas-gui.exe + cas.exe)
 REM     3) link the runtime dirs into dist\cas\ as JUNCTIONS — no multi-GB copy
 REM
 REM  The runtime dirs (profiles, retroarch-cores, ES-DE\downloaded_media,
-REM  provision\root\firmware, windows-kit) are NOT in git; they live in THIS
+REM  provision\root\firmware, windows-kit, Apps) are NOT in git; they live in THIS
+REM  folder and are linked in. Apps\gamecove-companion.apk is the GameCove Companion
+REM  app installed on every unit during provisioning (install_companion).
 REM  folder and are linked into the freshly built dist\cas\. The golden library
 REM  is normally the NAS (Settings -> NAS login), so a local profiles\ is optional.
 REM
@@ -25,7 +27,7 @@ git pull --ff-only || (echo ERROR: git pull failed ^(local edits? run `git statu
 
 echo(
 echo === clearing old runtime links so the clean build can't recurse into them ===
-for %%D in (windows-kit retroarch-cores profiles) do if exist "dist\cas\%%D" rmdir "dist\cas\%%D" 2>nul
+for %%D in (windows-kit retroarch-cores profiles Apps) do if exist "dist\cas\%%D" rmdir "dist\cas\%%D" 2>nul
 if exist "dist\cas\provision\root\firmware" rmdir "dist\cas\provision\root\firmware" 2>nul
 if exist "dist\cas\ES-DE\downloaded_media" rmdir "dist\cas\ES-DE\downloaded_media" 2>nul
 
@@ -35,7 +37,7 @@ call build-win.bat || (echo ERROR: build failed. & exit /b 1)
 
 echo(
 echo === [3/3] link runtime dirs into dist\cas\ (junctions; skips any not present) ===
-for %%D in (windows-kit retroarch-cores profiles) do (
+for %%D in (windows-kit retroarch-cores profiles Apps) do (
   if exist "%%D" if not exist "dist\cas\%%D" ( mklink /J "dist\cas\%%D" "%CD%\%%D" >nul && echo   linked %%D )
 )
 if exist "provision\root\firmware" (

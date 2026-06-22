@@ -8,8 +8,10 @@
 #     3) symlink the runtime dirs into dist/cas — no multi-GB copy
 #
 #  Runtime dirs (profiles, retroarch-cores, ES-DE/downloaded_media,
-#  provision/root/firmware) are NOT in git; they live in THIS folder and are
-#  linked into the freshly built dist/cas. The golden library is normally the
+#  provision/root/firmware, Apps) are NOT in git; they live in THIS folder and are
+#  linked into the freshly built dist/cas. Apps/gamecove-companion.apk is the GameCove
+#  Companion app installed on every unit during provisioning (install_companion).
+#  The golden library is normally the
 #  NAS, so a local profiles/ is optional. (windows-kit holds Windows adb.exe —
 #  on Linux/macOS adb comes from PATH or a platform-tools/ dir, so it's skipped.)
 # ============================================================================
@@ -43,6 +45,7 @@ link retroarch-cores
 link profiles
 link provision/root/firmware
 link "ES-DE/downloaded_media"
+link Apps                     # gamecove-companion.apk -> installed on every unit (install_companion)
 
 echo "=== DONE — updated + rebuilt.  Run:  $DEST/cas-gui ==="
 echo "  (golden library = NAS when mounted; else local profiles/)"
