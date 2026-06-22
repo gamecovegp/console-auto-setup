@@ -19,6 +19,9 @@ CORES_SRC = ROOT / "retroarch-cores"   # the curated arm64 RetroArch core set, s
 MEDIA_SRC = ROOT / "ES-DE" / "downloaded_media"   # shared ES-DE box-art pool (box/screenshot/marquee),
 #   pushed per-device but kept OUT of the per-profile golden (it's ~12 GB; bundling it would balloon every
 #   profile). Override the PC source with CAS_MEDIA. The golden carries only the small ES-DE config.
+COMPANION_SRC = ROOT / "Apps" / "gamecove-companion.apk"   # shared GameCove Companion app installer,
+#   sourced from the PC (override CAS_COMPANION_APK). PC-pushed like cores/box-art and kept OUT of the
+#   per-profile golden: one current build serves every unit; bundling it would add ~57 MB to each profile.
 
 
 def _each_device(devices, worker, parallel, max_workers=8):
@@ -78,6 +81,25 @@ def push_es_media(adb, log=print, media_src=None):
         log("ES-DE box art pushed.")
         return True
     log("warning: ES-DE box-art push failed (config is fine; box art can be pushed later).")
+    return False
+
+
+def install_companion(adb, log=print, apk_src=None):
+    """Install the GameCove Companion app from the PC (adb install pushes the apk off the PC filesystem,
+    never the SD), so every provisioned unit ships with the current build. Shared across all units — a PC
+    layer kept OUT of the per-profile golden. Best-effort: a missing/failed install is a WARNING, not a
+    provisioning failure (the app also self-updates OTA and can be installed later)."""
+    src = pathlib.Path(apk_src) if apk_src else \
+        pathlib.Path(os.environ.get("CAS_COMPANION_APK", str(COMPANION_SRC)))
+    if not src.is_file():
+        log(f"Companion app not on this PC ({src.name}) — skipping its install (OTA self-update still applies).")
+        return False
+    log(f"installing the GameCove Companion app from PC: {src.name} ...")
+    rc, _, err = adb.raw("install", "-r", "-g", str(src))
+    if rc == 0:
+        log("Companion app installed (from PC).")
+        return True
+    log(f"warning: Companion app install returned {rc}: {err.strip()} (provisioning still OK).")
     return False
 
 
@@ -161,6 +183,8 @@ def provision(adb, profile, log=print, dry_push=False):
         return False
     if not dry_push and "org.es_de.frontend" in pkgs:
         push_es_media(adb, log=log)                    # shared box-art layer (kept out of the golden)
+    if not dry_push:
+        install_companion(adb, log=log)                # shared Companion app, PC-pushed (out of the golden)
     if not dry_push:
         adb.su(f"rm -rf {DEV}")
     adb.reboot()

@@ -594,5 +594,41 @@ class TestEsMedia(unittest.TestCase):
             self.assertFalse(any("push" in c for c in r.calls))
 
 
+class TestCompanionInstall(unittest.TestCase):
+    """The shared GameCove Companion app installs from the PC (adb install), kept out of the golden."""
+
+    def test_installs_from_pc_when_apk_present(self):
+        with tempfile.TemporaryDirectory() as t:
+            apk = pathlib.Path(t) / "gamecove-companion.apk"
+            apk.write_bytes(b"x")
+            r = FakeRunner()
+            self.assertTrue(PV.install_companion(Adb(runner=r), log=lambda m: None, apk_src=str(apk)))
+            a = "\n".join(r.cmds())
+            self.assertIn("install", a)            # adb install ...
+            self.assertIn(str(apk), a)             # ...from the PC apk path (never the SD)
+
+    def test_noop_when_apk_absent(self):
+        r = FakeRunner()
+        self.assertFalse(PV.install_companion(
+            Adb(runner=r), log=lambda m: None, apk_src="/no/such/companion.apk"))
+        self.assertNotIn("install", "\n".join(r.cmds()))
+
+    def test_provision_installs_companion_from_pc(self):
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t)
+            apk = pathlib.Path(t) / "gamecove-companion.apk"
+            apk.write_bytes(b"x")
+            os.environ["CAS_COMPANION_APK"] = str(apk)
+            try:
+                r = FakeRunner()
+                ok = PV.provision(Adb(runner=r), prof, log=lambda m: None)   # full (non-dry) path
+            finally:
+                os.environ.pop("CAS_COMPANION_APK", None)
+            self.assertTrue(ok)
+            a = "\n".join(r.cmds())
+            self.assertIn("install", a)            # companion installed during provisioning
+            self.assertIn(str(apk), a)
+
+
 if __name__ == "__main__":
     unittest.main()
