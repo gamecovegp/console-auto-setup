@@ -183,7 +183,9 @@ class TestConfig(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cas-config.json")
             os.environ.pop("CAS_PROFILES", None)
-            self.assertEqual(str(C.set_library("/mnt/nas/CAS Profiles")), "/mnt/nas/CAS Profiles")
+            # compare Path objects (not str): str(Path) renders \ on Windows, / on POSIX
+            self.assertEqual(pathlib.Path(C.set_library("/mnt/nas/CAS Profiles")),
+                             pathlib.Path("/mnt/nas/CAS Profiles"))
             self.assertEqual(C.load_config().get("library"), "/mnt/nas/CAS Profiles")
 
     def test_nas_credentials_roundtrip_and_obfuscated(self):
@@ -208,7 +210,7 @@ class TestConfig(unittest.TestCase):
             os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cas-config.json")
             C.set_library("/mnt/nas/lib")
             os.environ["CAS_PROFILES"] = "/tmp/override"
-            self.assertEqual(str(C.library_root()), "/tmp/override")
+            self.assertEqual(pathlib.Path(C.library_root()), pathlib.Path("/tmp/override"))
 
     def test_corrupt_config_is_empty(self):
         from cas import config as C
