@@ -73,12 +73,15 @@ jobs:
         working-directory: tests
         run: python -m unittest test_cas -v
 
-      - name: Install PyInstaller (BUILD-ONLY dependency)
+      - name: Install PyInstaller + Pillow (BUILD-ONLY dependencies)
         # >= 6.11 is the first release with Python 3.14 support; pin the floor so an old
         # cached pip can't grab a wheel that chokes on 3.14 or misses the Tk runtime hook.
+        # Pillow is needed ONLY on macOS: assets/cas.icns is a PNG, and PyInstaller's .app
+        # BUNDLE auto-converts it to a real .icns via Pillow. Build-only — cas/ never imports
+        # PIL, so it is not bundled into the frozen app (the runtime stays stdlib-only).
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "pyinstaller>=6.11"
+          python -m pip install "pyinstaller>=6.11" pillow
 
       - name: Inject __version__ from the tag (tag builds only)
         # So the frozen app reports the release version and the in-app updater compares
