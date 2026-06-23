@@ -100,6 +100,11 @@ dist\cas\
    └─ *.dll              (AdbWinApi.dll, AdbWinUsbApi.dll, libwinpthread-1.dll)
 ```
 
+- **The operator workflow IS the app — not scripts.** Launch `cas-gui.exe`, select the
+  device(s) (or tick "Apply to ALL connected"), then **⓪ Root** (fresh units) → **② Download**
+  (restore the golden + every app + the GameCove Companion) → **③ Lock for shipping**. This
+  supersedes the legacy hand-run `windows-kit\*.bat` flow (`1-flash-root` → `2-run-restore` →
+  verify), which is kept only as a fallback for benches that can't launch the app.
 - `cas-gui.exe` with no args auto-detects `platform-tools\adb.exe` (then legacy
   `windows-kit\`, then `PATH`). `--adb` / `--fastboot` always override.
 - `cas.exe` with no flags auto-detects the same sibling `platform-tools\adb.exe` /
