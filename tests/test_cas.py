@@ -662,5 +662,49 @@ class TestCompanionInstall(unittest.TestCase):
             self.assertIn(str(apk), "\n".join(r.cmds()))           # flag on -> installed
 
 
+class TestUpdater(unittest.TestCase):
+    """Self-update check against the public GitHub Release latest.json. Network is injected."""
+
+    def _opener(self, manifest):
+        import io, json
+        data = json.dumps(manifest).encode()
+        return lambda url, timeout=0: io.BytesIO(data)
+
+    def test_is_newer_semver(self):
+        from cas import updater as U
+        self.assertTrue(U.is_newer("0.2.0", "0.1.0"))
+        self.assertTrue(U.is_newer("1.0.0", "0.9.9"))
+        self.assertTrue(U.is_newer("v0.2.0", "0.1.0"))   # tolerate a leading v
+        self.assertFalse(U.is_newer("0.1.0", "0.1.0"))
+        self.assertFalse(U.is_newer("0.1.0", "0.2.0"))
+
+    def test_check_returns_update_for_this_os_when_newer(self):
+        from cas import updater as U
+        man = {"version": "0.2.0", "notes": "new",
+               "assets": {"windows": {"url": "http://x/cas-windows.zip", "sha256": "win"},
+                          "linux": {"url": "http://x/cas-linux.zip", "sha256": "lin"},
+                          "macos": {"url": "http://x/cas-macos.zip", "sha256": "mac"}}}
+        up = U.check("0.1.0", opener=self._opener(man), os_name="linux")
+        self.assertEqual(up["version"], "0.2.0")
+        self.assertEqual(up["url"], "http://x/cas-linux.zip")
+        self.assertEqual(up["sha256"], "lin")
+
+    def test_check_none_when_not_newer(self):
+        from cas import updater as U
+        man = {"version": "0.1.0", "assets": {"linux": {"url": "u", "sha256": "s"}}}
+        self.assertIsNone(U.check("0.1.0", opener=self._opener(man), os_name="linux"))
+
+    def test_check_none_when_no_asset_for_os(self):
+        from cas import updater as U
+        man = {"version": "0.2.0", "assets": {"windows": {"url": "u", "sha256": "s"}}}
+        self.assertIsNone(U.check("0.1.0", opener=self._opener(man), os_name="linux"))
+
+    def test_check_never_raises_on_network_error(self):
+        from cas import updater as U
+        def boom(url, timeout=0):
+            raise OSError("offline")
+        self.assertIsNone(U.check("0.1.0", opener=boom, os_name="linux"))
+
+
 if __name__ == "__main__":
     unittest.main()

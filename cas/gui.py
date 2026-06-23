@@ -9,13 +9,15 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import pathlib
 import threading
 import datetime
 import time
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, simpledialog, filedialog
 
-from . import APPDIR, BUNDLE, __version__
+from . import APPDIR, BUNDLE, __version__, updater
 from . import profiles as P
 from . import provision as PV
 from .adb import Adb, Fastboot, list_devices
@@ -84,6 +86,7 @@ class App:
         self._poll_log()
         self.refresh_profiles()
         self.refresh_devices()
+        self._check_updates(manual=False)        # silent startup check; prompts only if newer exists
 
     # ---------- menu bar ----------
     def _build_menu(self):
@@ -102,12 +105,51 @@ class App:
         bar.add_cascade(label="Settings", menu=setm)
 
         helpm = tk.Menu(bar, tearoff=0)
+        helpm.add_command(label="Check for updates…", command=lambda: self._check_updates(manual=True))
         helpm.add_command(label="About CAS", command=self._about)
         bar.add_cascade(label="Help", menu=helpm)
 
         self.win.config(menu=bar)
         self.win.bind_all("<Control-r>", lambda e: self.refresh_devices())
         self.win.bind_all("<Control-q>", lambda e: self.win.destroy())
+
+    # ---------- self-update (GitHub Release; runtime siblings stay external) ----------
+    def _check_updates(self, manual=False):
+        """Background check against the public GitHub Release. manual=True also reports 'up to date'."""
+        def work():
+            up = updater.check(__version__)
+            self.win.after(0, lambda: self._on_update_result(up, manual))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_update_result(self, up, manual):
+        if not up:
+            if manual:
+                messagebox.showinfo("CAS", f"You're on the latest version (v{__version__}).")
+            return
+        if messagebox.askyesno(
+                "Update available",
+                f"CAS v{up['version']} is available (you have v{__version__}).\n\n"
+                f"{up.get('notes', '')}\n\nDownload it and restart CAS now?"):
+            self._apply_update(up)
+
+    def _apply_update(self, up):
+        self.log(f"downloading CAS v{up['version']} …")
+        dest = str(pathlib.Path(tempfile.gettempdir()) / "cas-update.zip")
+
+        def work():
+            ok = updater.download_and_verify(up["url"], dest, up.get("sha256", ""))
+            self.win.after(0, lambda: self._finish_update(ok))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _finish_update(self, zip_path):
+        if not zip_path:
+            messagebox.showerror("Update", "Download or checksum check failed — not updating.")
+            return
+        if updater.stage_and_relaunch(zip_path, appdir=APPDIR, log=self.log):
+            messagebox.showinfo("Update", "Update staged. CAS will close and reopen on the new version.")
+            self.win.destroy()
+        else:
+            messagebox.showerror("Update", "Could not stage the update (see log).")
 
     def _open_library(self):
         """Open the storage location in the file manager. Opens the active library, but when the library

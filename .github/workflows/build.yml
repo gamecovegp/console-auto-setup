@@ -32,10 +32,13 @@ jobs:
         include:
           - os: windows-latest   # PRIMARY: the operator rig
             artifact: cas-windows
+            os_tag: windows
           - os: ubuntu-latest     # this dev host's OS
             artifact: cas-linux
+            os_tag: linux
           - os: macos-latest      # future/optional
             artifact: cas-macos
+            os_tag: macos
 
     steps:
       - name: Checkout
@@ -77,6 +80,21 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install "pyinstaller>=6.11"
 
+      - name: Inject __version__ from the tag (tag builds only)
+        # So the frozen app reports the release version and the in-app updater compares
+        # correctly. Python (not sed) for cross-runner portability (BSD sed on macOS differs).
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          python - "$V" <<'PY'
+          import re, sys, pathlib
+          v = sys.argv[1]
+          p = pathlib.Path("cas/__init__.py")
+          p.write_text(re.sub(r'__version__ = ".*"', f'__version__ = "{v}"', p.read_text()))
+          print("version ->", v)
+          PY
+
       - name: Freeze with PyInstaller
         # Builds BOTH exes into one dist/cas/ (see cas.spec). --noconfirm so a stale
         # build/ or dist/ from a warm cache never blocks the rebuild.
@@ -96,3 +114,69 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 14
+
+      - name: Package release zip + sha256 (tag builds only)
+        # Zip dist/cas -> cas-<os>.zip and record its sha256 (Python = cross-runner; no zip/7z needed).
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          python - "${{ matrix.os_tag }}" <<'PY'
+          import shutil, hashlib, pathlib, sys
+          osk = sys.argv[1]
+          z = shutil.make_archive(f"cas-{osk}", "zip", "dist", "cas")   # -> cas-<os>.zip (contains cas/)
+          sha = hashlib.sha256(pathlib.Path(z).read_bytes()).hexdigest()
+          pathlib.Path(f"{osk}.sha256").write_text(sha)
+          print(z, sha)
+          PY
+
+      - name: Upload release artifacts (zip + sha) (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: rel-${{ matrix.os_tag }}
+          path: |
+            cas-${{ matrix.os_tag }}.zip
+            ${{ matrix.os_tag }}.sha256
+          if-no-files-found: error
+
+  # Assemble latest.json from the three per-OS shas and publish the GitHub Release.
+  # The in-app updater reads latest.json from releases/latest/download/latest.json.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write          # needed to create the Release
+    steps:
+      - name: Download per-OS release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rel-*
+          path: rel
+
+      - name: Build latest.json
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"; V="${TAG#v}"
+          BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          python - "$V" "$BASE" <<'PY'
+          import json, sys, pathlib
+          v, base = sys.argv[1], sys.argv[2]
+          assets = {}
+          for osk in ("windows", "linux", "macos"):
+              sha = pathlib.Path(f"rel/rel-{osk}/{osk}.sha256")
+              if sha.exists():
+                  assets[osk] = {"url": f"{base}/cas-{osk}.zip", "sha256": sha.read_text().strip()}
+          pathlib.Path("latest.json").write_text(
+              json.dumps({"version": v, "notes": f"CAS {v}", "assets": assets}, indent=2))
+          print(open("latest.json").read())
+          PY
+
+      - name: Publish Release (zips + latest.json)
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            rel/rel-windows/cas-windows.zip
+            rel/rel-linux/cas-linux.zip
+            rel/rel-macos/cas-macos.zip
+            latest.json
