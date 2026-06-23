@@ -629,6 +629,38 @@ class TestCompanionInstall(unittest.TestCase):
             self.assertIn("install", a)            # companion installed during provisioning
             self.assertIn(str(apk), a)
 
+    def test_provision_skips_companion_when_flag_off(self):
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t)
+            P.save_manifest(prof.manifest_path, prof.pkgs(),       # @companion off
+                            {"settings": "on", "companion": "off"}, header="# t")
+            apk = pathlib.Path(t) / "gamecove-companion.apk"
+            apk.write_bytes(b"x")
+            os.environ["CAS_COMPANION_APK"] = str(apk)
+            try:
+                r = FakeRunner()
+                ok = PV.provision(Adb(runner=r), prof, log=lambda m: None)
+            finally:
+                os.environ.pop("CAS_COMPANION_APK", None)
+            self.assertTrue(ok)
+            self.assertNotIn(str(apk), "\n".join(r.cmds()))        # flag off -> NOT installed
+
+    def test_provision_installs_companion_when_flag_on(self):
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t)
+            P.save_manifest(prof.manifest_path, prof.pkgs(),
+                            {"settings": "on", "companion": "on"}, header="# t")
+            apk = pathlib.Path(t) / "gamecove-companion.apk"
+            apk.write_bytes(b"x")
+            os.environ["CAS_COMPANION_APK"] = str(apk)
+            try:
+                r = FakeRunner()
+                ok = PV.provision(Adb(runner=r), prof, log=lambda m: None)
+            finally:
+                os.environ.pop("CAS_COMPANION_APK", None)
+            self.assertTrue(ok)
+            self.assertIn(str(apk), "\n".join(r.cmds()))           # flag on -> installed
+
 
 if __name__ == "__main__":
     unittest.main()

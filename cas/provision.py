@@ -124,6 +124,7 @@ def provision(adb, profile, log=print, dry_push=False):
 
     pay = profile.payload
     pkgs = profile.pkgs()
+    flags = profile.flags()                            # @-flags from the manifest (settings/hardening/...)
     if not _validate_payload(pay, pkgs, log):
         return False
 
@@ -183,8 +184,8 @@ def provision(adb, profile, log=print, dry_push=False):
         return False
     if not dry_push and "org.es_de.frontend" in pkgs:
         push_es_media(adb, log=log)                    # shared box-art layer (kept out of the golden)
-    if not dry_push:
-        install_companion(adb, log=log)                # shared Companion app, PC-pushed (out of the golden)
+    if not dry_push and flags.get("companion", "on") == "on":
+        install_companion(adb, log=log)                # shared Companion app, PC-pushed (gated by @companion)
     if not dry_push:
         adb.su(f"rm -rf {DEV}")
     adb.reboot()
@@ -270,7 +271,8 @@ def capture_to_pc(adb, name, stamp, root="profiles", log=print, dry_pull=False):
             pl = dest / "pkglist.txt"
             apps = pl.read_text().splitlines() if pl.exists() else []
             P.save_manifest(man, [a.strip() for a in apps if a.strip()],
-                            {"settings": "on", "hardening": "on", "grants": "on", "homescreen": "on"},
+                            {"settings": "on", "hardening": "on", "grants": "on", "homescreen": "on",
+                             "companion": "on"},
                             header=f"# {name} default manifest")
     log(f"==> captured golden into profiles/{name} (prev kept for rollback)")
     return True
