@@ -103,6 +103,25 @@ class TestAdb(unittest.TestCase):
         self.assertIn("9C33-6BBD", Adb(runner=FakeRunner(sd=True)).sd_info())
         self.assertEqual(Adb(runner=FakeRunner(sd=False)).sd_info(), "no SD")
 
+    def test_subprocess_runner_suppresses_console_window(self):
+        # cas-gui.exe is a GUI app; adb/fastboot calls must pass creationflags so Windows
+        # doesn't flash a console window per call (0 off-Windows; CREATE_NO_WINDOW on it).
+        from cas import adb as A
+        from unittest import mock
+        seen = {}
+
+        class _R:
+            returncode, stdout, stderr = 0, "ok", ""
+
+        def fake_run(args, **kw):
+            seen.update(kw)
+            return _R()
+
+        with mock.patch.object(A.subprocess, "run", fake_run):
+            rc, out, _ = A.subprocess_runner(["adb", "devices"])
+        self.assertEqual((rc, out), (0, "ok"))
+        self.assertIn("creationflags", seen)
+
 
 class TestProfiles(unittest.TestCase):
     def test_manifest_parse(self):

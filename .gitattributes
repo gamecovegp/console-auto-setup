@@ -1,0 +1,6 @@
+# Device-side shell scripts run on Android's `sh` (pushed to the unit, sourced via Magisk su).
+# They MUST be LF even when the repo is checked out on Windows (core.autocrlf=true, the default on
+# the Windows CI runner and most benches). A trailing \r otherwise breaks `. lib-root.sh`, shebangs,
+# and case/heredoc parsing on the device — this is exactly why golden capture/restore failed from
+# the Windows build ("capture.sh[6]: .: .../lib-root.sh: No such file or directory").
+*.sh text eol=lf

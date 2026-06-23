@@ -1,8 +1,14 @@
 """Thin adb wrapper. The `runner` is injectable so tests can mock it (no real device needed)."""
 import subprocess
+import sys
 import time
 
 SU = "/debug_ramdisk/su"   # MagiskSU path on these units (plain `su` isn't on the adb PATH)
+
+# cas-gui.exe is a GUI (windowed) app; without this, every adb/fastboot subprocess pops a black
+# console window on Windows. CREATE_NO_WINDOW suppresses it. 0 elsewhere — the conditional never
+# evaluates the (Windows-only) attribute off-Windows, and creationflags=0 is a no-op on POSIX.
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform.startswith("win") else 0
 
 
 def subprocess_runner(args, input_text=None, timeout=900):
@@ -10,7 +16,8 @@ def subprocess_runner(args, input_text=None, timeout=900):
     On timeout returns (124, "", "timeout…") instead of raising — so a hung device (e.g. a MagiskSU grant
     prompt nobody tapped) fails FAST and never blocks a batch for the full timeout window."""
     try:
-        p = subprocess.run(args, capture_output=True, text=True, input=input_text, timeout=timeout)
+        p = subprocess.run(args, capture_output=True, text=True, input=input_text,
+                           timeout=timeout, creationflags=_NO_WINDOW)
         return p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired:
         return 124, "", f"timeout after {timeout}s"
@@ -23,7 +30,7 @@ def subprocess_stream(args, on_line, input_text=None):
     scripts, multi-GB pulls) so the UI can show realtime activity + transfer percentages."""
     p = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          stdin=(subprocess.PIPE if input_text is not None else None),
-                         text=True, bufsize=1)
+                         text=True, bufsize=1, creationflags=_NO_WINDOW)
     if input_text is not None:
         try:
             p.stdin.write(input_text)
