@@ -114,3 +114,33 @@ dist\cas\
 On **Linux/macOS** the layout is identical (`cas-gui` / `cas` with no `.exe`, `platform-tools/`
 holding the platform's `adb`/`fastboot`); on macOS the `.app`-aware path logic in
 `cas/__init__.py` keeps `profiles/` and `platform-tools/` beside the `.app`, not inside it.
+
+## Updating CAS itself — releases + in-app self-update
+
+Operators don't run `update-win.bat` (git pull + PyInstaller rebuild) anymore. The app
+**self-updates from the GitHub Release**, so a bench needs no git / Python / PyInstaller —
+just the app and its sibling folders.
+
+**To ship an update — push a tag** (the version comes FROM the tag; nothing to bump in source):
+
+```bash
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+`.github/workflows/build.yml` then, on a `v*` tag: injects `__version__` from the tag, builds
+`dist/cas` on a Windows/Linux/macOS runner each, zips + sha256s every bundle, assembles
+`latest.json`, and publishes a **GitHub Release** with the three `cas-<os>.zip`s + `latest.json`.
+
+**What the app does:** on startup (and via **Help → Check for updates…**) it reads
+`https://github.com/<repo>/releases/latest/download/latest.json` (public repo → no auth),
+compares `cas/__init__.py`'s `__version__`, and if a newer build exists prompts to download.
+On accept it downloads this OS's zip, **sha256-verifies** it, then a small helper waits for the
+app to exit, **overwrite-copies** (`robocopy /E`, never `/MIR`) the new bundle over `dist/cas`,
+and relaunches. The external siblings (`profiles/`, `Apps/`, `platform-tools/`, cores, `ES-DE/`,
+`provision/root/firmware/`) live OUTSIDE the bundle, so the swap never touches them.
+
+**Bootstrap (one-time):** the updater is in the code, so any build from `main` has it.
+Distribute ONE build to each bench (the app + its sibling folders). After that, tags drive
+updates automatically — existing installs report `0.1.0`, so the first `v0.2.x` tag prompts
+everyone. The in-app check logic is unit-tested (`TestUpdater`); the per-OS swap+relaunch helper
+should be smoke-tested on a real Windows bench before relying on unattended updates.
