@@ -3,6 +3,7 @@
 """
 import os
 import sys
+import tarfile
 import tempfile
 import unittest
 import pathlib
@@ -52,6 +53,8 @@ class FakeRunner:
                 key = tail.split()[-1]
                 val = {"ro.product.model": self.model, "sys.boot_completed": self.boot}.get(key, "")
                 return 0, val + "\n", ""
+            if "CAS_XOK" in tail:                       # box-art tar unpack confirmation sentinel
+                return 0, "CAS_XOK\n", ""
             return 0, "", ""
         return 0, "", ""
 
@@ -159,6 +162,29 @@ class TestProfiles(unittest.TestCase):
             self.assertIsNone(P.match_profile("", t))             # blank model -> None
             self.assertIsNone(P.match_profile(None, t))
 
+    def test_parse_sd_gb(self):
+        self.assertEqual(P.parse_sd_gb("9C33-6BBD · 477G"), 477.0)
+        self.assertEqual(P.parse_sd_gb("238G"), 238.0)
+        self.assertEqual(P.parse_sd_gb("1T"), 1024.0)
+        self.assertIsNone(P.parse_sd_gb("no SD"))
+        self.assertIsNone(P.parse_sd_gb(""))
+
+    def test_match_by_name_similarity_no_regex(self):
+        # model_match BLANK -> matched purely by NAME similarity (no regex to write)
+        with tempfile.TemporaryDirectory() as t:
+            make_profile(t, "retroid-pocket-6-512", model="")
+            self.assertEqual(P.match_profile("Retroid Pocket 6", t).name, "retroid-pocket-6-512")
+            self.assertIsNone(P.match_profile("Odin2 Mini", t))          # different model -> no match
+
+    def test_match_tier_by_sd_size(self):
+        # two capacity tiers, no regex -> the device's SD size chooses the closest one
+        with tempfile.TemporaryDirectory() as t:
+            make_profile(t, "retroid-pocket-6-512", model="")
+            make_profile(t, "retroid-pocket-6-256", model="")
+            self.assertEqual(P.match_profile("Retroid Pocket 6", t, sd_gb=477).name, "retroid-pocket-6-512")
+            self.assertEqual(P.match_profile("Retroid Pocket 6", t, sd_gb=238).name, "retroid-pocket-6-256")
+            self.assertIsNone(P.match_profile("Retroid Pocket 6", t))    # no size -> ambiguous, assign manually
+
     def test_internal_for(self):
         self.assertEqual(P.internal_for("org.es_de.frontend"), "ES-DE")
         self.assertEqual(P.internal_for("com.retroarch.aarch64"), "RetroArch")
@@ -219,17 +245,34 @@ class TestConfig(unittest.TestCase):
                              pathlib.Path("/mnt/nas/CAS Profiles"))
             self.assertEqual(C.load_config().get("library"), "/mnt/nas/CAS Profiles")
 
-    def test_nas_credentials_roundtrip_and_obfuscated(self):
+    def test_nas_credentials_roundtrip_and_default(self):
         from cas import config as C
         with tempfile.TemporaryDirectory() as t:
             cfgp = pathlib.Path(t) / "cas-config.json"
             os.environ["CAS_CONFIG"] = str(cfgp)
-            self.assertIsNone(C.get_nas_credentials())             # nothing stored yet
+            # nothing saved -> the shipped default app account (so a fresh PC auto-connects)
+            self.assertEqual(C.get_nas_credentials(), (C.NAS_DEFAULT_USER, C.NAS_DEFAULT_PW))
+            # a saved account OVERRIDES the default, round-trips, and isn't written in the clear
             C.set_nas_credentials("cas_app", "P@ss w0rd!")
             self.assertEqual(C.get_nas_credentials(), ("cas_app", "P@ss w0rd!"))
-            self.assertNotIn("P@ss w0rd!", cfgp.read_text())       # password not in the clear
-            C.set_nas_credentials("", "")                          # clear
-            self.assertIsNone(C.get_nas_credentials())
+            self.assertNotIn("P@ss w0rd!", cfgp.read_text())
+            # clearing reverts to the shipped default
+            C.set_nas_credentials("", "")
+            self.assertEqual(C.get_nas_credentials(), (C.NAS_DEFAULT_USER, C.NAS_DEFAULT_PW))
+
+    def test_device_profiles_persist(self):
+        from cas import config as C
+        with tempfile.TemporaryDirectory() as t:
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cas-config.json")
+            self.assertEqual(C.get_device_profiles(), {})
+            C.set_device_profile("2ee078bd", "retroid-pocket-6-512", manual=False)   # remembered auto-match
+            C.set_device_profile("ABC123", "odin2-mini", manual=True)                # operator override
+            dp = C.get_device_profiles()
+            self.assertEqual(dp["2ee078bd"], {"profile": "retroid-pocket-6-512", "manual": False})
+            self.assertEqual(dp["ABC123"], {"profile": "odin2-mini", "manual": True})
+            C.set_device_profile("ABC123", None)                                     # forget one
+            self.assertNotIn("ABC123", C.get_device_profiles())
+            self.assertIn("2ee078bd", C.get_device_profiles())                        # the other survives
 
     def test_nas_share_root(self):
         from cas import config as C
@@ -260,6 +303,21 @@ class TestConfig(unittest.TestCase):
             os.environ["CAS_PROFILES"] = str(pathlib.Path(t) / "nope")
             self.assertFalse(C.library_reachable())
 
+    def test_es_media_src_set_get_clear(self):
+        from cas import config as C
+        with tempfile.TemporaryDirectory() as t:
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cas-config.json")
+            os.environ.pop("CAS_MEDIA", None)
+            self.assertIsNone(C.es_media_src())                # default => SD mode (no push)
+            C.set_es_media_src("/pc/ES-DE")
+            self.assertEqual(C.es_media_src(), "/pc/ES-DE")
+            C.set_es_media_src(None)                           # clear => back to SD mode
+            self.assertIsNone(C.es_media_src())
+            os.environ["CAS_MEDIA"] = "/env/wins"              # env overrides config
+            C.set_es_media_src("/pc/ES-DE")
+            self.assertEqual(C.es_media_src(), "/env/wins")
+            os.environ.pop("CAS_MEDIA", None)
+
 
 class TestProvision(unittest.TestCase):
     def test_provision_runs_restore_and_reboot(self):
@@ -273,6 +331,27 @@ class TestProvision(unittest.TestCase):
             self.assertIn("restore.sh", joined)
             self.assertIn("CAS_MANIFEST", joined)
             self.assertTrue(any(c[-1] == "reboot" for c in r.calls))
+
+    def test_provision_sd_media_is_default(self):
+        # no es_media_src => 'sd' mode: restore gets CAS_ES_MEDIA=sd and NO box-art push happens.
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t)                              # includes org.es_de.frontend
+            r = FakeRunner()
+            ok = PV.provision(Adb(runner=r), prof, log=lambda m: None, dry_push=True)
+            self.assertTrue(ok)
+            joined = "\n".join(r.cmds())
+            self.assertIn("CAS_ES_MEDIA=sd", joined)
+            self.assertIn("restore.sh", joined)
+
+    def test_provision_internal_media_sets_mode(self):
+        # es_media_src set => 'internal' mode: restore gets CAS_ES_MEDIA=internal.
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t)
+            r = FakeRunner()
+            ok = PV.provision(Adb(runner=r), prof, log=lambda m: None, dry_push=True,
+                              es_media_src=str(pathlib.Path(t) / "ES-DE"))
+            self.assertTrue(ok)
+            self.assertIn("CAS_ES_MEDIA=internal", "\n".join(r.cmds()))
 
     def test_provision_refuses_golden(self):
         with tempfile.TemporaryDirectory() as t:
@@ -312,6 +391,64 @@ class TestProvision(unittest.TestCase):
             ok = PV.provision(Adb(runner=r), prof, log=lambda m: None)  # real push path
             self.assertFalse(ok)
             self.assertNotIn("restore.sh", "\n".join(r.cmds()))        # never reached restore
+
+    def test_push_es_media_packs_one_archive(self):
+        # Universal fast path: pack downloaded_media into ONE tar, push that single file, unpack it on the
+        # device, delete it. Verifies we do NOT do a slow per-file directory push and that both the
+        # device-side archive AND the PC-side archive are cleaned up.
+        with tempfile.TemporaryDirectory() as t:
+            media = pathlib.Path(t) / "ES-DE" / "downloaded_media"
+            (media / "nes" / "covers").mkdir(parents=True)
+            (media / "nes" / "covers" / "game.jpg").write_bytes(b"img")
+            r = FakeRunner()
+            ok = PV.push_es_media(Adb(runner=r), log=lambda m: None, media_src=str(media))
+            self.assertTrue(ok)
+            joined = "\n".join(r.cmds())
+            self.assertIn("tar -xf /data/local/tmp/cas_es_media.tar", joined)   # unpacked on device
+            self.assertIn("rm -f /data/local/tmp/cas_es_media.tar", joined)     # device archive removed
+            pushes = [c for c in r.calls if "push" in c]
+            self.assertEqual(len(pushes), 1)                                    # ONE file, not a tree
+            self.assertTrue(pushes[0][-2].endswith(".tar"))                     # src is the archive
+            self.assertEqual(pushes[0][-1], "/data/local/tmp/cas_es_media.tar")
+            self.assertEqual(list(pathlib.Path(t).rglob("cas_es_media_*.tar")), [])  # PC archive cleaned up
+
+    def test_push_es_media_pushes_premade_archive(self):
+        # If the PC source is ALREADY a single archive, push it AS-IS (no on-the-fly packing), pick the
+        # gzip unpack flag for .tar.gz, and never delete the operator's stored file.
+        with tempfile.TemporaryDirectory() as t:
+            md = pathlib.Path(t) / "downloaded_media"
+            (md / "nes").mkdir(parents=True)
+            (md / "nes" / "a.jpg").write_bytes(b"x")
+            arc = pathlib.Path(t) / "es-de-media.tar.gz"
+            with tarfile.open(arc, "w:gz") as tar:
+                tar.add(str(md), arcname="downloaded_media")
+            r = FakeRunner()
+            ok = PV.push_es_media(Adb(runner=r), log=lambda m: None, media_src=str(arc))
+            self.assertTrue(ok)
+            joined = "\n".join(r.cmds())
+            self.assertIn("tar -xzf /data/local/tmp/cas_es_media.tar", joined)  # gzip unpack flag
+            pushes = [c for c in r.calls if "push" in c]
+            self.assertEqual(len(pushes), 1)                                    # pushed ONE file
+            self.assertTrue(pushes[0][-2].endswith(".tar.gz"))                  # the archive itself, as-is
+            self.assertTrue(arc.exists())                                       # operator's file untouched
+
+    def test_push_es_media_skips_when_present(self):
+        # A re-provision must NOT re-pack/re-push 12 GB if the device already has the box art.
+        with tempfile.TemporaryDirectory() as t:
+            media = pathlib.Path(t) / "downloaded_media"
+            (media / "nes").mkdir(parents=True)
+            (media / "nes" / "a.jpg").write_bytes(b"x")
+
+            class Present(FakeRunner):
+                def __call__(self, args, input_text=None, timeout=900):
+                    if "shell" in args and args[-1].startswith("ls /storage"):
+                        return 0, "/storage/emulated/0/ES-DE/downloaded_media\n", ""
+                    return super().__call__(args, input_text, timeout)
+            r = Present()
+            ok = PV.push_es_media(Adb(runner=r), log=lambda m: None, media_src=str(media))
+            self.assertTrue(ok)
+            self.assertFalse([c for c in r.calls if "push" in c])              # nothing pushed
+            self.assertNotIn("tar -xf", "\n".join(r.cmds()))                   # nothing unpacked
 
     def test_provision_all_isolates_exception(self):
         with tempfile.TemporaryDirectory() as t:
@@ -610,7 +747,9 @@ class TestEsMedia(unittest.TestCase):
             src = self._media(t)
             r = self._MR(has_media=False)
             self.assertTrue(PV.push_es_media(Adb(runner=r), log=lambda m: None, media_src=str(src)))
-            self.assertTrue(any("push" in c and str(src) in " ".join(c) for c in r.calls))
+            # new transfer: pack -> push ONE .tar -> unpack on device (not a per-file push of the src dir)
+            self.assertTrue(any("push" in c for c in r.calls))
+            self.assertTrue(any("tar -xf" in " ".join(c) for c in r.calls))
 
     def test_skips_when_device_already_has_media(self):
         with tempfile.TemporaryDirectory() as t:

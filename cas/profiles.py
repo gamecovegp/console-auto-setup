@@ -103,21 +103,80 @@ def list_profiles(root="profiles"):
             if p.is_dir() and (p / "profile.meta").exists()]
 
 
-def match_profile(model, root="profiles"):
-    """The profile whose model_match regex matches `model`. END-ANCHORED so a loose pattern can't
-    hijack the wrong variant. Returns None if the model is blank, nothing matches, or MORE THAN ONE
-    matches (ambiguous -> caller must pass an explicit profile)."""
+# --- model / SD-size matching -------------------------------------------------------------------
+_CAP_MIN_GB = 32        # a number >= this (in a profile name or an SD size) is a STORAGE CAPACITY, not a
+#                         model version — so "Pocket 6" keeps 6 as a model word while "…-512" is a tier.
+
+
+def _toks(s):
+    """Lowercase alphanumeric tokens: 'Retroid Pocket 6' -> ['retroid','pocket','6']."""
+    return [t for t in re.split(r"[^a-z0-9]+", (s or "").lower()) if t]
+
+
+def _leading_int(tok):
+    m = re.match(r"(\d+)", tok)
+    return int(m.group(1)) if m else None
+
+
+def _is_capacity(tok):
+    n = _leading_int(tok)
+    return n is not None and n >= _CAP_MIN_GB
+
+
+def parse_sd_gb(sd_desc):
+    """GB from an sd_info() string like '9C33-6BBD · 477G', '238G', or '1T'. None if no size is present."""
+    m = re.search(r"(\d+(?:\.\d+)?)\s*([TG])", (sd_desc or ""), re.IGNORECASE)
+    if not m:
+        return None
+    val = float(m.group(1))
+    return val * 1024 if m.group(2).upper() == "T" else val
+
+
+def match_profile(model, root="profiles", sd_gb=None):
+    """Pick the profile for a device by MODEL, using the SD-card size to break ties between per-capacity
+    tiers — no hand-written regex required.
+      1. If any profile sets an explicit `model_match`, those END-ANCHORED regexes win (back-compat).
+      2. Else match by NAME similarity: a profile is a candidate when ALL its non-capacity name words
+         appear in the device model (profile 'retroid-pocket-6-512' -> {retroid,pocket,6} ⊆ 'Retroid
+         Pocket 6'); the most specific (most model words matched) win.
+      3. If >1 candidate remains (e.g. '…-512' vs '…-256'), pick the one whose capacity is NEAREST the
+         device's SD size. Still tied, or no size to compare -> None (operator assigns manually).
+    Returns the Profile, or None."""
     model = (model or "").strip()
     if not model:
         return None
-    matches = []
-    for prof in list_profiles(root):
-        pat = prof.meta.get("model_match")
-        if pat and re.search(f"(?:{pat})$", model):
-            matches.append(prof)
-    if len(matches) != 1:
-        return None                      # 0 = no match; >1 = ambiguous, refuse to guess
-    return matches[0]
+    profs = list_profiles(root)
+    # 1) explicit regex profiles win (END-ANCHORED, case-sensitive — unchanged behaviour)
+    cands = [p for p in profs if p.meta.get("model_match")
+             and re.search(f"(?:{p.meta['model_match']})$", model)]
+    # 2) default: name-similarity (the most specific model coverage wins)
+    if not cands:
+        mt = set(_toks(model))
+        if mt:
+            sims = []
+            for p in profs:
+                pmodel = {t for t in (_toks(p.name) + _toks(p.meta.get("model_match", "")))
+                          if not _is_capacity(t)}
+                if pmodel and pmodel <= mt and len(mt & pmodel) / len(mt) >= 0.6:
+                    sims.append((len(mt & pmodel), p))
+            if sims:
+                top = max(c for c, _ in sims)
+                cands = [p for c, p in sims if c == top]
+    if not cands:
+        return None
+    if len(cands) == 1:
+        return cands[0]
+    # 3) several tiers match -> the SD card's size chooses the closest one
+    if sd_gb:
+        scored = []
+        for p in cands:
+            caps = [_leading_int(t) for t in _toks(p.name) if _is_capacity(t)]
+            if caps:
+                scored.append((min(abs(c - sd_gb) for c in caps), p))
+        scored.sort(key=lambda x: x[0])
+        if scored and (len(scored) == 1 or scored[0][0] != scored[1][0]):
+            return scored[0][1]
+    return None                          # ambiguous -> operator assigns (double-click / Assign button)
 
 
 def archive_profile(profile, stamp, archive_root=None):

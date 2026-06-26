@@ -15,7 +15,7 @@ from . import APPDIR, find_adb
 from . import profiles as P
 from . import provision as PV
 from .adb import Adb, Fastboot, list_devices
-from .config import library_root
+from .config import library_root, es_media_src
 
 
 def _stamp():
@@ -64,7 +64,8 @@ def main(argv=None):
         return 0
 
     if a.cmd == "provision-all":
-        res = PV.provision_all(lambda s: Adb(serial=s, adb=a.adb), list_devices(adb=a.adb), root=proot)
+        res = PV.provision_all(lambda s: Adb(serial=s, adb=a.adb), list_devices(adb=a.adb), root=proot,
+                               es_media_src=es_media_src())
         print("batch:", ", ".join(f"{k}={v[0]}" for k, v in res.items()))
         return 0 if all(v[0] in ("ok", "skip") for v in res.values()) else 1
 
@@ -94,7 +95,7 @@ def main(argv=None):
         prof = _resolve_profile(adb, a.profile, proot)
         if not prof:
             print("no matching profile — pass --profile NAME"); return 1
-        return 0 if PV.provision(adb, prof) else 1
+        return 0 if PV.provision(adb, prof, es_media_src=es_media_src()) else 1
 
     if a.cmd == "capture":
         return 0 if PV.capture_to_pc(adb, a.name, _stamp(), root=proot) else 1

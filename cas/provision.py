@@ -9,6 +9,8 @@ import os
 import re
 import time
 import shutil
+import tarfile
+import tempfile
 import pathlib
 import concurrent.futures
 
@@ -62,26 +64,111 @@ def _validate_payload(pay, pkgs, log):
     return True
 
 
+ESHOME = "/storage/emulated/0/ES-DE"              # the device's internal ES-DE home
+DEV_ES_TAR = "/data/local/tmp/cas_es_media.tar"   # transient box-art archive landing on the device (ext4)
+ES_ARCHIVE_SUFFIXES = (".tar", ".tar.gz", ".tgz")  # archives the device's toybox `tar` can unpack as-is
+
+
+def _es_extract_flag(name):
+    """toybox `tar` flag to unpack <name> on the device — '-xzf' for gzip (.tar.gz/.tgz), else '-xf'."""
+    n = name.lower()
+    return "-xzf" if (n.endswith(".gz") or n.endswith(".tgz")) else "-xf"
+
+
+def _push_es_archive(adb, archive, log):
+    """Push ONE box-art archive to the device, unpack it into ESHOME, then delete the device-side copy.
+    True on success. Never touches the PC-side file (a pre-made archive is the operator's; an on-the-fly
+    temp is owned by the caller). The archive must hold a top-level 'downloaded_media/' so it lands at
+    ESHOME/downloaded_media."""
+    adb.shell(f"mkdir -p {ESHOME}")
+    log("pushing the box-art archive (one big file — moves at USB link speed)...")
+    if not adb.push(str(archive), DEV_ES_TAR):
+        log("warning: box-art archive push failed (config is fine; box art can be pushed later).")
+        return False
+    log("unpacking the box art on the device...")
+    # adb shell's exit code isn't reliable across devices/versions, so confirm via a stdout sentinel
+    # (same pattern as is_golden). Extract THEN remove the on-device archive regardless of outcome.
+    flag = _es_extract_flag(pathlib.Path(archive).name)
+    rc, out, _ = adb.shell(f"cd {ESHOME} && tar {flag} {DEV_ES_TAR} && echo CAS_XOK")
+    adb.shell(f"rm -f {DEV_ES_TAR}")
+    if rc == 0 and "CAS_XOK" in out:
+        log("ES-DE box art pushed (unpacked on device).")
+        return True
+    log("warning: on-device unpack failed (config is fine; box art can be pushed later).")
+    return False
+
+
 def push_es_media(adb, log=print, media_src=None):
-    """Push the SHARED ES-DE box-art pool (downloaded_media) from the PC straight to the device's internal
-    ES-DE home — a separate ~12 GB layer kept OUT of the per-profile golden. No-op if the PC source is
-    absent, or if the device already has media (a re-provision shouldn't re-push 12 GB). adb push to
-    /storage is fine — sdcardfs owns it, no chown. A failed push is a WARNING: box art is cosmetic, the
-    ES-DE config (gamelists/themes) already rode the golden, so the unit still works without it."""
+    """Push the SHARED ES-DE box-art pool (downloaded_media) from the PC to the device's internal ES-DE
+    home — a separate ~12 GB layer kept OUT of the per-profile golden. No-op if the PC source is absent,
+    or if the device already has media (a re-provision shouldn't re-push 12 GB). A failed push is a
+    WARNING: box art is cosmetic, the ES-DE config (gamelists/themes) already rode the golden, so the
+    unit still works without it.
+
+    Transfer method — ONE archive, not a per-file push. downloaded_media is tens of thousands of tiny
+    JPG/PNGs; an `adb push <dir>` pays a sync-protocol round-trip PER FILE, so it crawls regardless of
+    link speed. We move a single archive at link speed and unpack it on the device (local FS, no ADB
+    per-file overhead). tar over zip on purpose: Android's toybox `tar` is far more universally present
+    than `unzip`, and tar has no zip 4 GB / ZIP64 edge cases.
+
+    The PC source (media_src / CAS_MEDIA) may be EITHER:
+      • a pre-made archive file (.tar/.tar.gz/.tgz) — pushed AS-IS, no packing (keep ES-DE media as one
+        compressed file on the NAS and re-push it without re-packing). Build it with:
+            tar -C <ES-DE> -czf es-de-media.tar.gz downloaded_media
+      • a downloaded_media/ folder (or a parent holding it) — packed on the fly into a single, NOT
+        compressed tar (box art is already-compressed JPG/PNG, so gzip would burn CPU for ~0 win),
+        using Python's stdlib tarfile so NO `tar` binary is needed on the PC (Windows/macOS/Linux alike).
+    """
     src = pathlib.Path(media_src) if media_src else pathlib.Path(os.environ.get("CAS_MEDIA", str(MEDIA_SRC)))
+    dst = f"{ESHOME}/downloaded_media"
+
+    # --- Case A: the source is already a single archive -> push it as-is, no packing. ---
+    if src.is_file() and src.name.lower().endswith(ES_ARCHIVE_SUFFIXES):
+        if adb.shell(f"ls {dst} 2>/dev/null")[1].strip():
+            log(f"ES-DE box art already on device — skipping the media push ({dst}).")
+            return True
+        return _push_es_archive(adb, src, log)
+
+    # --- Case B: the source is a folder -> pack it into a temp tar on the fly, then push. ---
+    # Accept EITHER the box-art folder itself OR a parent that holds it (e.g. the operator picks ".../ES-DE",
+    # which contains downloaded_media). We pack with arcname='downloaded_media' so it always lands at
+    # .../ES-DE/downloaded_media regardless of where the source sat on the PC.
+    if src.name != "downloaded_media" and (src / "downloaded_media").is_dir():
+        src = src / "downloaded_media"
+    if src.name != "downloaded_media":
+        log(f"ES-DE box art: '{src}' is not a 'downloaded_media' folder/archive — skipping push.")
+        return False
     if not (src.is_dir() and any(src.iterdir())):
         return False                                    # no shared media on this PC — nothing to push
-    dst = "/storage/emulated/0/ES-DE/downloaded_media"
     if adb.shell(f"ls {dst} 2>/dev/null")[1].strip():
         log(f"ES-DE box art already on device — skipping the ~12 GB media push ({dst}).")
         return True
-    log("pushing the shared ES-DE box art from the PC (large — several minutes over USB)...")
-    adb.shell("mkdir -p /storage/emulated/0/ES-DE")
-    if adb.push(str(src), "/storage/emulated/0/ES-DE/"):    # -> /storage/emulated/0/ES-DE/downloaded_media
-        log("ES-DE box art pushed.")
-        return True
-    log("warning: ES-DE box-art push failed (config is fine; box art can be pushed later).")
-    return False
+
+    # Stage the archive on the SAME volume as the media (space guaranteed); fall back to the system temp
+    # dir if the source tree is read-only (e.g. a NAS mount).
+    tdir = str(src.parent) if os.access(src.parent, os.W_OK) else None
+    try:
+        fd, tmp = tempfile.mkstemp(prefix="cas_es_media_", suffix=".tar", dir=tdir)
+        os.close(fd)
+    except OSError as e:
+        log(f"warning: cannot stage the box-art archive ({e}) — skipping (box art can be pushed later).")
+        return False
+    tmp = pathlib.Path(tmp)
+    try:
+        log("packing the shared ES-DE box art into one archive (a single file pushes far faster than "
+            "tens of thousands of tiny image files)...")
+        try:
+            with tarfile.open(tmp, "w") as tar:               # "w" == stored, NO compression
+                tar.add(str(src), arcname="downloaded_media")
+        except OSError as e:
+            log(f"warning: could not pack box art ({e}) — skipping (config is fine; box art optional).")
+            return False
+        return _push_es_archive(adb, tmp, log)
+    finally:
+        try:
+            tmp.unlink()                                       # never leave the ~12 GB PC archive behind
+        except OSError:
+            pass
 
 
 def install_companion(adb, log=print, apk_src=None):
@@ -103,8 +190,10 @@ def install_companion(adb, log=print, apk_src=None):
     return False
 
 
-def provision(adb, profile, log=print, dry_push=False):
-    """Provision one connected device from `profile`. Returns True on success."""
+def provision(adb, profile, log=print, dry_push=False, es_media_src=None):
+    """Provision one connected device from `profile`. Returns True on success.
+    es_media_src: a PC folder to PUSH ES-DE box art onto the unit's internal storage ('internal' mode).
+    None (default) = 'sd' mode: nothing is pushed and restore points ES-DE at the unit's SD card."""
     model = adb.getprop("ro.product.model")
     log(f"==> device '{model}' -> profile '{profile.name}'")
     if adb.is_golden():
@@ -176,14 +265,18 @@ def provision(adb, profile, log=print, dry_push=False):
                 return False
 
     cores_env = f"CAS_CORES={DEV}/cores " if (push_cores and not dry_push) else ""
+    # ES-DE box art: 'internal' => push a PC folder onto the unit (below) and use the internal default;
+    # 'sd' (default) => leave it on the SD and tell restore to point MediaDirectory at THIS unit's card.
+    es_mode = "internal" if es_media_src else "sd"
+    es_env = f"CAS_ES_MEDIA={es_mode} " if "org.es_de.frontend" in pkgs else ""
     log("running restore (installs apps, restores data/keys/BIOS/cores/grants/settings)...")
     rc = adb.su_stream(                                      # stream each [ok]/[warn] line LIVE to the log
-        f"{cores_env}CAS_PAYLOAD={DEV}/payload CAS_MANIFEST={DEV}/manifest sh {DEV}/restore.sh", log)
+        f"{es_env}{cores_env}CAS_PAYLOAD={DEV}/payload CAS_MANIFEST={DEV}/manifest sh {DEV}/restore.sh", log)
     if rc != 0:
         log(f"restore FAILED (rc={rc}) — NOT rebooting; the unit is NOT provisioned.")
         return False
-    if not dry_push and "org.es_de.frontend" in pkgs:
-        push_es_media(adb, log=log)                    # shared box-art layer (kept out of the golden)
+    if not dry_push and "org.es_de.frontend" in pkgs and es_mode == "internal":
+        push_es_media(adb, log=log, media_src=es_media_src)   # opt-in: push box art onto internal storage
     if not dry_push and flags.get("companion", "on") == "on":
         install_companion(adb, log=log)                # shared Companion app, PC-pushed (gated by @companion)
     if not dry_push:
@@ -194,7 +287,7 @@ def provision(adb, profile, log=print, dry_push=False):
 
 
 def provision_all(make_adb, devices, root="profiles", log=print, profile=None, profile_map=None,
-                  parallel=True):
+                  parallel=True, es_media_src=None):
     """Batch DOWNLOAD: provision every connected 'device'-state unit, in PARALLEL by default (all units
     push + restore at once). Profile resolution per device: profile_map[serial] (explicit per-device) >
     `profile` (one for all) > auto-match by model. Returns {serial: (status, detail)}; failures isolated."""
@@ -217,7 +310,8 @@ def provision_all(make_adb, devices, root="profiles", log=print, profile=None, p
                 if not prof:
                     log(f"[{serial}] no profile matches '{model}'")
                     return ("no-profile", model)
-            ok = provision(adb, prof, log=lambda m, s=serial: log(f"[{s}] {m}"))
+            ok = provision(adb, prof, log=lambda m, s=serial: log(f"[{s}] {m}"),
+                           es_media_src=es_media_src)
             return ("ok" if ok else "fail", prof.name)
         except Exception as e:  # isolate: one device fault must not abort the whole batch
             log(f"[{serial}] ERROR: {e}")

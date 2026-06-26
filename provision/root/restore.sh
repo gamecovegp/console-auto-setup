@@ -135,6 +135,30 @@ for pkg in $RPKGS; do
   ok "restored internal:$d (for $pkg)"
 done
 
+# 2c) ES-DE box-art location — point MediaDirectory at where the art actually is for THIS unit:
+#   CAS_ES_MEDIA=sd (default) -> the unit's OWN SD card (/storage/$SERIAL/ES-DE/downloaded_media). Box art
+#       rides the SD image; nothing is pushed to internal. Skip if no SD (art absent, like ROMs).
+#   CAS_ES_MEDIA=internal     -> internal default; the PC pushes downloaded_media there AFTER restore.
+# es_settings.xml is ES-DE's own flat list of <type name=".." value=".." /> lines (no root wrapper), so we
+# DELETE any existing MediaDirectory line (robust to spacing) and append a clean one. [VERIFY the element
+# format against the live ES-DE build on first run.]
+ES_SET="/storage/emulated/0/ES-DE/settings/es_settings.xml"
+if echo "$RPKGS" | grep -q org.es_de.frontend && [ -f "$ES_SET" ]; then
+  case "${CAS_ES_MEDIA:-sd}" in
+    internal) MEDIA_DIR="/storage/emulated/0/ES-DE/downloaded_media";;
+    *)        [ -n "$SERIAL" ] && MEDIA_DIR="/storage/$SERIAL/ES-DE/downloaded_media" || MEDIA_DIR="";;
+  esac
+  if [ -n "$MEDIA_DIR" ]; then
+    sed -i '/name="MediaDirectory"/d' "$ES_SET" 2>/dev/null   # drop any existing line (avoids duplicates)
+    [ -s "$ES_SET" ] && [ -n "$(tail -c1 "$ES_SET" 2>/dev/null)" ] && printf '\n' >> "$ES_SET"  # ensure EOL
+    printf '<string name="MediaDirectory" value="%s" />\n' "$MEDIA_DIR" >> "$ES_SET"
+    relabel "$ES_SET" 2>/dev/null
+    ok "ES-DE MediaDirectory -> $MEDIA_DIR (${CAS_ES_MEDIA:-sd})"
+  else
+    warn "ES-DE box art: SD mode but no SD serial — MediaDirectory left at default (box art may be absent)."
+  fi
+fi
+
 # 3) RetroArch cores: bulk-copy the arm64 .so set into the internal (exec-able) cores dir.
 #    Source order: $CAS_CORES (pushed from the PC) > $SD/retroarch-cores (legacy, SD). The app's own
 #    cores already arrive inside data.tar; this step tops the set up to the full curated library.

@@ -9,6 +9,7 @@ import base64
 import json
 import os
 import pathlib
+import socket
 import subprocess
 import sys
 
@@ -75,6 +76,62 @@ def set_library(path):
     return library_root()
 
 
+def es_media_src():
+    """PC folder to push ES-DE box art FROM, or None to use the SD card (default, no per-unit push).
+    Priority: CAS_MEDIA env (one-shot override) > config 'es_media_src' > None. None => SD mode: nothing is
+    transferred and restore points ES-DE's MediaDirectory at the unit's own SD card instead."""
+    env = os.environ.get("CAS_MEDIA")
+    if env:
+        return env
+    return load_config().get("es_media_src") or None
+
+
+def set_es_media_src(path):
+    """Persist the ES-DE box-art PC source folder, or clear it (falsy => 'use the SD card').
+    Returns the resolved es_media_src()."""
+    cfg = load_config()
+    if path:
+        cfg["es_media_src"] = str(path)
+    else:
+        cfg.pop("es_media_src", None)
+    save_config(cfg)
+    return es_media_src()
+
+
+# --- per-device profile memory ------------------------------------------------------------------
+# A device is identified by its adb SERIAL (the unit's stable hardware serial — survives reboot/reflash and
+# SD swaps). We remember each device's profile so it sticks across launches: the FIRST time a device is
+# seen it's auto-matched and saved; an operator override is saved with manual=True (and always wins).
+def get_device_profiles():
+    """{serial: {'profile': name, 'manual': bool}} — remembered per-device profile assignments."""
+    raw = load_config().get("device_profiles")
+    out = {}
+    if isinstance(raw, dict):
+        for serial, v in raw.items():
+            if isinstance(v, dict) and v.get("profile"):
+                out[serial] = {"profile": str(v["profile"]), "manual": bool(v.get("manual"))}
+            elif isinstance(v, str) and v:                     # tolerate a bare {serial: name} shape
+                out[serial] = {"profile": v, "manual": True}
+    return out
+
+
+def set_device_profile(serial, profile, manual=True):
+    """Remember a device's profile (profile truthy) or forget it (falsy). manual=True marks an operator
+    override (sticky + tinted); manual=False is a remembered first-find auto-match."""
+    if not serial:
+        return
+    cfg = load_config()
+    dp = cfg.get("device_profiles")
+    if not isinstance(dp, dict):
+        dp = {}
+    if profile:
+        dp[serial] = {"profile": str(profile), "manual": bool(manual)}
+    else:
+        dp.pop(serial, None)
+    cfg["device_profiles"] = dp
+    save_config(cfg)
+
+
 def library_reachable():
     """True if the configured library path exists as a directory (e.g. the NAS drive is mapped)."""
     try:
@@ -89,6 +146,14 @@ def library_reachable():
 # account scoped to the CAS Profiles share so a leaked file can't reach anything else.
 # --------------------------------------------------------------------------------------------------
 _OBF = b"cas/gamecove/nas/v1"
+
+# Default NAS app-account SHIPPED with CAS, so a fresh bench PC auto-connects to the shared library with no
+# manual login. SECURITY: this must be a DEDICATED, LOW-PRIVILEGE NAS account scoped ONLY to the CAS
+# Profiles share on the LAN NAS (192.168.100.227, not internet-exposed) — anyone with the bundle/source can
+# read it, so it must be able to reach nothing else. An operator-saved account (Settings → NAS login)
+# OVERRIDES this default. Set NAS_DEFAULT_USER = "" to ship with no default.
+NAS_DEFAULT_USER = "console-auto-setup"
+NAS_DEFAULT_PW = "console-setup"
 
 
 def _xor(b):
@@ -109,16 +174,18 @@ def set_nas_credentials(user, password):
 
 
 def get_nas_credentials():
-    """(user, password) from the config, or None if not set / unreadable."""
+    """(user, password) for the NAS: an operator-saved account from cas-config.json if present, else the
+    shipped default app account (NAS_DEFAULT_USER/PW) so a fresh PC auto-connects. None only if there is
+    no saved account AND no shipped default."""
     cfg = load_config()
     u = cfg.get("nas_user")
     pw = cfg.get("nas_pw")
-    if not u or pw is None:
-        return None
-    try:
-        return (u, _xor(base64.b64decode(pw.encode())).decode())
-    except Exception:
-        return None
+    if u and pw is not None:
+        try:
+            return (u, _xor(base64.b64decode(pw.encode())).decode())
+        except Exception:
+            pass
+    return (NAS_DEFAULT_USER, NAS_DEFAULT_PW) if NAS_DEFAULT_USER else None
 
 
 def nas_share_root():
@@ -127,15 +194,33 @@ def nas_share_root():
     return ("\\\\" + parts[0] + "\\" + parts[1]) if len(parts) >= 2 else NAS_DEFAULT
 
 
+def nas_host():
+    """The NAS hostname/IP from NAS_DEFAULT (e.g. '192.168.100.227')."""
+    return NAS_DEFAULT.lstrip("\\").split("\\")[0]
+
+
+def nas_reachable(timeout=1.5):
+    """Fast TCP probe of the NAS SMB port — so startup auto-connect doesn't BLOCK for the full mount
+    timeout on a machine that isn't on the NAS network (now that a default account always exists)."""
+    try:
+        with socket.create_connection((nas_host(), 445), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 def nas_connect(timeout=20):
-    """Best-effort: authenticate to the NAS with the stored app account so the library path resolves.
+    """Best-effort: authenticate to the NAS with the saved/default app account so the library path resolves.
     Windows uses `net use`; other OSes fall back to `gio mount`. Returns True if the library is reachable
-    afterwards. Safe no-op when no creds are stored (False) or already connected (True)."""
+    afterwards. Safe no-op when already connected (True), no creds (False), or the NAS isn't on this
+    network (False, fast — via nas_reachable)."""
     if library_reachable():
         return True
     creds = get_nas_credentials()
     if not creds:
         return False
+    if not nas_reachable():
+        return False                                    # NAS not on this network — skip the slow mount
     user, pw = creds
     try:
         if sys.platform == "win32":
