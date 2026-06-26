@@ -79,17 +79,30 @@ def check(current_version, opener=_urlopen, url=LATEST_URL, os_name=None):
         return None
 
 
-def download_and_verify(url, dest, sha256="", opener=_urlopen):
-    """Stream `url` to `dest`; if `sha256` is given, verify it. Returns dest on success, else None."""
+def download_and_verify(url, dest, sha256="", opener=_urlopen, progress=None):
+    """Stream `url` to `dest`; if `sha256` is given, verify it. Returns dest on success, else None.
+
+    `progress(downloaded, total)` (optional) is called after every chunk so the UI can render a real
+    percentage — `total` is the Content-Length (0 if the server didn't send one, i.e. indeterminate)."""
     try:
         h = hashlib.sha256()
+        done = 0
         with opener(url, timeout=60) as r, open(dest, "wb") as f:
+            try:
+                total = int(r.headers.get("Content-Length", 0) or 0)
+            except (AttributeError, ValueError, TypeError):
+                total = 0
+            if progress:
+                progress(0, total)
             while True:
                 chunk = r.read(1 << 16)
                 if not chunk:
                     break
                 h.update(chunk)
                 f.write(chunk)
+                done += len(chunk)
+                if progress:
+                    progress(done, total or done)      # if size unknown, report done as the running total
         if sha256 and h.hexdigest().lower() != sha256.lower():
             return None
         return dest
@@ -97,16 +110,33 @@ def download_and_verify(url, dest, sha256="", opener=_urlopen):
         return None
 
 
-def stage_and_relaunch(zip_path, appdir=None, log=print):
-    """Extract the new bundle next to the current one and launch an OS helper that, once THIS
-    process exits, replaces the bundle dir and relaunches the GUI. Returns True if handed off.
+def _exe_name(platform):
+    return "cas-gui.exe" if platform.startswith("win") else "cas-gui"
 
-    NOTE: the swap+relaunch helper is OS-specific and must be verified on a real Windows bench
-    before being relied on for unattended updates — a frozen exe can't overwrite itself while
-    running, so the swap is deferred to the helper after this process exits.
+
+def stage_and_relaunch(zip_path, appdir=None, log=print, platform=None, launch=None):
+    """Extract the new bundle next to the current one and launch an OS helper that, once THIS process
+    exits, OVERWRITES the bundle in place and relaunches the GUI. Returns True if a swap was handed off.
+
+    Returns False (and logs WHY) instead of silently pretending to update when there is nothing to swap:
+      * appdir has no cas-gui[.exe]      -> not a frozen release bundle (e.g. a `python -m cas` checkout,
+                                            or a macOS .app whose binaries live inside Contents/). The old
+                                            code launched a helper that copied nothing useful and STILL
+                                            returned True — the exact "downloads but stays the same" bug.
+      * the downloaded zip has no exe    -> malformed asset; don't clobber the install with garbage.
+
+    The swap is deferred to a detached helper because a running executable can't overwrite itself. The
+    helper writes <appdir>/cas-update.log so a failed swap on the bench is diagnosable, not a black box.
     """
+    platform = platform or sys.platform
+    launch = launch or _launch_detached
     try:
         appdir = pathlib.Path(appdir) if appdir else pathlib.Path(sys.executable).resolve().parent
+        exe = _exe_name(platform)
+        if not (appdir / exe).exists():
+            log(f"update: no {exe} in {appdir} — in-place update only works on a frozen release bundle. "
+                f"For a source checkout, update with `git pull` (or update.sh / update-win.bat).")
+            return False
         staging = pathlib.Path(tempfile.mkdtemp(prefix="cas-update-"))
         with zipfile.ZipFile(zip_path) as z:
             z.extractall(staging)
@@ -114,47 +144,89 @@ def stage_and_relaunch(zip_path, appdir=None, log=print):
         new_bundle = staging / "cas"
         if not new_bundle.is_dir():
             new_bundle = staging
-        helper = _write_helper(appdir, new_bundle, log=log)
+        if not (new_bundle / exe).exists():
+            log(f"update: downloaded bundle has no {exe} (malformed asset) — not swapping.")
+            return False
+        helper = _write_helper(appdir, new_bundle, platform=platform, log=log)
         if helper is None:
             return False
-        _launch_detached(helper)
+        launch(helper, platform=platform)
         return True
     except Exception as e:
         log(f"update staging failed: {e}")
         return False
 
 
-def _write_helper(appdir, new_bundle, log=print):
-    """Write the wait-swap-relaunch helper for the current OS. Returns its path."""
+def _write_helper(appdir, new_bundle, platform=None, log=print):
+    """Write the wait-swap-relaunch helper for the target OS. Returns its path.
+
+    The helper (a) waits for THIS process (pid) to exit, (b) overwrite-copies the new bundle over the
+    install — never purging, so external siblings (profiles/, Apps/, platform-tools/, cores, ES-DE/)
+    survive — and (c) relaunches the GUI, logging every step to <appdir>/cas-update.log.
+    """
+    platform = platform or sys.platform
     pid = os.getpid()
-    if sys.platform.startswith("win"):
+    if platform.startswith("win"):
         gui = appdir / "cas-gui.exe"
+        log_path = appdir / "cas-update.log"
         bat = pathlib.Path(tempfile.gettempdir()) / "cas-apply-update.bat"
+        # ping -n (NOT timeout): timeout reads the console input handle and aborts with "Input redirection
+        # is not supported" when the bat is launched console-less from the windowed exe — which silently
+        # broke the wait loop. `ping -n 2 127.0.0.1` is a ~1s console-independent sleep.
+        # robocopy /E (NOT /MIR): overwrite-copy, never DELETE extras, so the external siblings survive.
+        # /R:2 /W:2 so a momentarily-locked file retries briefly instead of failing the whole swap.
         bat.write_text(
             "@echo off\r\n"
-            f':wait\r\n'
-            f'tasklist /FI "PID eq {pid}" | find "{pid}" >nul && (timeout /t 1 /nobreak >nul & goto wait)\r\n'
-            # /E overwrite-copy (NOT /MIR): copy the new bundle over the old, never DELETE extras — so
-            # the external siblings (profiles\, Apps\, platform-tools\, cores, ES-DE\) are left untouched.
-            f'robocopy "{new_bundle}" "{appdir}" /E /NFL /NDL /NJH /NJS >nul\r\n'
+            "setlocal\r\n"
+            f'set "LOG={log_path}"\r\n'
+            'echo [cas-update] start %DATE% %TIME%> "%LOG%"\r\n'
+            f'echo waiting for PID {pid} to exit>> "%LOG%"\r\n'
+            ':wait\r\n'
+            f'tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul\r\n'
+            'if not errorlevel 1 (\r\n'
+            '  ping -n 2 127.0.0.1 >nul\r\n'
+            '  goto wait\r\n'
+            ')\r\n'
+            f'echo copying new bundle into "{appdir}">> "%LOG%"\r\n'
+            f'robocopy "{new_bundle}" "{appdir}" /E /R:2 /W:2 /NFL /NDL /NJH /NJS >> "%LOG%"\r\n'
+            'set RC=%ERRORLEVEL%\r\n'
+            'echo robocopy exit code %RC%>> "%LOG%"\r\n'
+            'if %RC% GEQ 8 (echo ERROR: swap FAILED ^(robocopy %RC%^) — version unchanged>> "%LOG%") '
+            'else (echo OK: bundle swapped>> "%LOG%")\r\n'
+            f'echo relaunching "{gui}">> "%LOG%"\r\n'
             f'start "" "{gui}"\r\n'
-            f'del "%~f0"\r\n')
+            'del "%~f0"\r\n')
         return bat
     gui = appdir / "cas-gui"
+    log_path = appdir / "cas-update.log"
     sh = pathlib.Path(tempfile.gettempdir()) / "cas-apply-update.sh"
     sh.write_text(
         "#!/bin/sh\n"
+        f'LOG="{log_path}"\n'
+        'echo "[cas-update] start" > "$LOG"\n'
+        f'echo "waiting for pid {pid} to exit" >> "$LOG"\n'
         f'while kill -0 {pid} 2>/dev/null; do sleep 1; done\n'
-        f'cp -a "{new_bundle}/." "{appdir}/"\n'
-        f'"{gui}" &\n'
+        f'echo "copying new bundle into {appdir}" >> "$LOG"\n'
+        f'if cp -a "{new_bundle}/." "{appdir}/" >> "$LOG" 2>&1; then\n'
+        '  echo "OK: bundle swapped" >> "$LOG"\n'
+        'else\n'
+        '  echo "ERROR: swap FAILED (cp) — version unchanged" >> "$LOG"\n'
+        'fi\n'
+        f'echo "relaunching {gui}" >> "$LOG"\n'
+        f'"{gui}" >> "$LOG" 2>&1 &\n'
         f'rm -- "$0"\n')
     sh.chmod(0o755)
     return sh
 
 
-def _launch_detached(helper):
-    if sys.platform.startswith("win"):
+def _launch_detached(helper, platform=None):
+    platform = platform or sys.platform
+    if platform.startswith("win"):
+        # CREATE_NO_WINDOW (hidden console, so tasklist/ping/robocopy still work) + NEW_PROCESS_GROUP so
+        # the helper outlives this exe. NOT DETACHED_PROCESS: that leaves the bat console-less, which broke
+        # its console child tools. close_fds so no handle on the old bundle keeps a file locked during swap.
+        CREATE_NO_WINDOW, NEW_PROCESS_GROUP = 0x08000000, 0x00000200
         subprocess.Popen(["cmd", "/c", str(helper)],
-                         creationflags=0x00000008 | 0x00000200)  # DETACHED | NEW_PROCESS_GROUP
+                         creationflags=CREATE_NO_WINDOW | NEW_PROCESS_GROUP, close_fds=True)
     else:
         subprocess.Popen(["/bin/sh", str(helper)], start_new_session=True)

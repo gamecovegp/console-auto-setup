@@ -133,23 +133,93 @@ class App:
             self._apply_update(up)
 
     def _apply_update(self, up):
+        """Download + apply the update behind a MODAL, non-cancelable progress dialog. While it's up the
+        operator can't touch the main window (grab_set) — no half-provisioned device from a stray click
+        mid-swap — and a live progress bar shows the download isn't frozen. Download AND staging run on a
+        worker thread so the dialog keeps animating; only success closes the app (the helper relaunches)."""
         self.log(f"downloading CAS v{up['version']} …")
         dest = str(pathlib.Path(tempfile.gettempdir()) / "cas-update.zip")
 
-        def work():
-            ok = updater.download_and_verify(up["url"], dest, up.get("sha256", ""))
-            self.win.after(0, lambda: self._finish_update(ok))
-        threading.Thread(target=work, daemon=True).start()
+        dlg = tk.Toplevel(self.win)
+        dlg.title("Updating CAS")
+        dlg.transient(self.win)
+        dlg.resizable(False, False)
+        dlg.protocol("WM_DELETE_WINDOW", lambda: None)        # no close box while a swap is in flight
+        frm = ttk.Frame(dlg, padding=18)
+        frm.pack(fill="both", expand=True)
+        head = ttk.Label(frm, text=f"Downloading CAS v{up['version']} …",
+                         font=("TkDefaultFont", 11, "bold"))
+        head.pack(anchor="w")
+        subl = ttk.Label(frm, text="Please wait — don't unplug devices or close CAS.",
+                         foreground="#555")
+        subl.pack(anchor="w", pady=(2, 10))
+        bar = ttk.Progressbar(frm, mode="determinate", maximum=100, length=380)
+        bar.pack(fill="x")
+        stat = ttk.Label(frm, text="Starting…", foreground="#555")
+        stat.pack(anchor="w", pady=(8, 0))
+        btnrow = ttk.Frame(frm)
+        btnrow.pack(anchor="e", pady=(12, 0))
+        closeb = ttk.Button(btnrow, text="Close", command=dlg.destroy)   # shown only if it fails
 
-    def _finish_update(self, zip_path):
-        if not zip_path:
-            messagebox.showerror("Update", "Download or checksum check failed — not updating.")
-            return
-        if updater.stage_and_relaunch(zip_path, appdir=APPDIR, log=self.log):
-            messagebox.showinfo("Update", "Update staged. CAS will close and reopen on the new version.")
-            self.win.destroy()
-        else:
-            messagebox.showerror("Update", "Could not stage the update (see log).")
+        dlg.update_idletasks()
+        try:                                                   # center over the main window
+            x = self.win.winfo_rootx() + (self.win.winfo_width() - dlg.winfo_width()) // 2
+            y = self.win.winfo_rooty() + 110
+            dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
+        except Exception:
+            pass
+        dlg.grab_set()                                         # MODAL: blocks the main window entirely
+
+        state = {"pct": -1, "mode": "determinate"}
+
+        def fail(msg):
+            if str(bar["mode"]) == "indeterminate":
+                bar.stop()
+            head.config(text="Update failed")
+            subl.config(text="The current version is unchanged. You can close this and try again later.")
+            stat.config(text=msg)
+            closeb.pack(side="right")                          # let them dismiss + retry later
+            dlg.protocol("WM_DELETE_WINDOW", dlg.destroy)
+
+        def on_progress(done, total):                          # called on the worker thread
+            pct = int(done * 100 / total) if total else 0
+            def ui():
+                if total:
+                    if state["mode"] != "determinate":
+                        bar.stop(); bar.config(mode="determinate"); state["mode"] = "determinate"
+                    bar["value"] = pct
+                    stat.config(text=f"{done/1048576:.1f} / {total/1048576:.1f} MB   ({pct}%)")
+                else:                                          # server sent no size → march indeterminately
+                    if state["mode"] != "indeterminate":
+                        bar.config(mode="indeterminate"); bar.start(12); state["mode"] = "indeterminate"
+                    stat.config(text=f"{done/1048576:.1f} MB")
+            if not total or pct != state["pct"]:               # throttle determinate redraws to 1%/step
+                state["pct"] = pct
+                self.win.after(0, ui)
+
+        def staged_ok():
+            if str(bar["mode"]) == "indeterminate":
+                bar.stop()
+            bar.config(mode="determinate"); bar["value"] = 100
+            stat.config(text="Update staged — CAS will restart now.")
+            dlg.update_idletasks()
+            self.win.after(700, self.win.destroy)              # quit; the helper swaps + relaunches the new build
+
+        def do_stage():
+            head.config(text=f"Applying CAS v{up['version']} …")
+            bar.stop(); bar.config(mode="indeterminate"); bar.start(12); state["mode"] = "indeterminate"
+            stat.config(text="Swapping in the new version…")
+            def work_stage():
+                ok = updater.stage_and_relaunch(dest, appdir=APPDIR, log=self.log)
+                self.win.after(0, staged_ok if ok else lambda: fail(
+                    "Couldn't apply the update — see cas-update.log next to the app."))
+            threading.Thread(target=work_stage, daemon=True).start()
+
+        def work_download():
+            ok = updater.download_and_verify(up["url"], dest, up.get("sha256", ""), progress=on_progress)
+            self.win.after(0, do_stage if ok else lambda: fail(
+                "Download or checksum check failed — not updating."))
+        threading.Thread(target=work_download, daemon=True).start()
 
     def _open_library(self):
         """Open the storage location in the file manager. Opens the active library, but when the library

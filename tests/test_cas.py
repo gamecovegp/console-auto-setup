@@ -103,6 +103,18 @@ class TestAdb(unittest.TestCase):
         self.assertIn("9C33-6BBD", Adb(runner=FakeRunner(sd=True)).sd_info())
         self.assertEqual(Adb(runner=FakeRunner(sd=False)).sd_info(), "no SD")
 
+    def test_pull_with_progress_fallback(self):
+        # an injected (test) runner has no real process to poll -> one blocking pull; success follows pull_ok
+        self.assertTrue(Adb(runner=FakeRunner(pull_ok=True))
+                        .pull_with_progress("/d/src", "/d/dst", 100, lambda m: None))
+        self.assertFalse(Adb(runner=FakeRunner(pull_ok=False))
+                         .pull_with_progress("/d/src", "/d/dst", 100, lambda m: None))
+
+    def test_dir_size_kb_missing_dir(self):
+        from cas import adb as A
+        # pull hasn't created the dir yet -> 0, not a crash (best-effort sizing for the progress bar)
+        self.assertEqual(A._dir_size_kb("/no/such/path/cas-test"), 0)
+
     def test_subprocess_runner_suppresses_console_window(self):
         # cas-gui.exe is a GUI app; adb/fastboot calls must pass creationflags so Windows
         # doesn't flash a console window per call (0 off-Windows; CREATE_NO_WINDOW on it).
@@ -725,6 +737,90 @@ class TestUpdater(unittest.TestCase):
         def boom(url, timeout=0):
             raise OSError("offline")
         self.assertIsNone(U.check("0.1.0", opener=boom, os_name="linux"))
+
+    # ---- download progress (issue #2: a real progress indicator) ----
+    def test_download_and_verify_reports_progress(self):
+        """download_and_verify streams and calls progress(done, total) so the GUI can show a real %."""
+        import io
+        from cas import updater as U
+        payload = b"x" * (1 << 17)            # 128 KiB -> two 64 KiB chunks
+        class _Resp(io.BytesIO):
+            headers = {"Content-Length": str(len(payload))}
+            def __enter__(self): return self
+            def __exit__(self, *a): self.close()
+        seen = []
+        dest = os.path.join(tempfile.mkdtemp(), "u.zip")
+        out = U.download_and_verify("http://x/u.zip", dest,
+                                    opener=lambda url, timeout=0: _Resp(payload),
+                                    progress=lambda done, total: seen.append((done, total)))
+        self.assertEqual(out, dest)
+        self.assertTrue(seen, "progress callback was never called")
+        self.assertEqual(seen[-1], (len(payload), len(payload)))   # ends at 100%
+        self.assertTrue(all(t == len(payload) for _, t in seen))   # total reported every time
+
+    # ---- stage_and_relaunch must not silently no-op when there is nothing to swap ----
+    def test_stage_refuses_when_no_executable_to_swap(self):
+        """Source checkout / wrong layout: appdir has no cas-gui[.exe]. The old code launched a helper
+        and returned True (silent no-op -> 'updates but stays the same'). It must now fail loudly."""
+        from cas import updater as U
+        appdir = tempfile.mkdtemp()                       # NO cas-gui here (mimics `python -m cas`)
+        zp = os.path.join(tempfile.mkdtemp(), "cas.zip")
+        import zipfile
+        with zipfile.ZipFile(zp, "w") as z:
+            z.writestr("cas/cas-gui", "NEW")
+        launched = []
+        ok = U.stage_and_relaunch(zp, appdir=appdir, log=lambda *a: None,
+                                  platform="linux", launch=lambda *a, **k: launched.append(a))
+        self.assertFalse(ok, "must not claim success when there is no executable to replace")
+        self.assertEqual(launched, [], "must not launch a swap helper when there's nothing to swap")
+
+    # ---- the Windows helper must be robust when run console-less (the real bench bug) ----
+    def test_windows_helper_does_not_use_console_dependent_timeout(self):
+        """The helper is launched DETACHED from a windowed (console=False) exe, so `timeout` aborts with
+        'Input redirection is not supported' and the wait loop misbehaves. Use a console-independent wait."""
+        from cas import updater as U
+        script = U._write_helper(pathlib.Path(r"C:\app\dist\cas"),
+                                 pathlib.Path(r"C:\stage\cas"), platform="win32", log=lambda *a: None)
+        text = pathlib.Path(script).read_text()
+        self.assertNotIn("timeout ", text, "timeout needs a console; fails when launched detached")
+        self.assertIn("ping", text.lower(), "expected a console-independent delay (ping -n)")
+
+    def test_windows_helper_relaunches_gui_and_logs(self):
+        """The Windows helper relaunches cas-gui.exe, copies the new bundle, and writes a diagnostic log
+        so a failed swap is no longer a silent black box."""
+        from cas import updater as U
+        script = U._write_helper(pathlib.Path(r"C:\app\dist\cas"),
+                                 pathlib.Path(r"C:\stage\cas"), platform="win32", log=lambda *a: None)
+        text = pathlib.Path(script).read_text()
+        self.assertIn("cas-gui.exe", text)               # relaunches the GUI exe
+        self.assertIn("robocopy", text.lower())          # still an overwrite-copy (never purge siblings)
+        self.assertIn("cas-update.log", text)            # leaves a breadcrumb we can read on the bench
+
+    # ---- end-to-end swap via the real unix helper (regression guard for the part that works) ----
+    @unittest.skipIf(sys.platform.startswith("win"), "unix helper")
+    def test_unix_helper_swaps_bundle_and_preserves_siblings(self):
+        from cas import updater as U
+        import subprocess, time, zipfile
+        root = tempfile.mkdtemp()
+        appdir = pathlib.Path(root, "appdir"); (appdir / "_internal").mkdir(parents=True)
+        (appdir / "cas-gui").write_text("OLD"); (appdir / "_internal" / "V").write_text("0.1.0")
+        (appdir / "profiles").mkdir(); (appdir / "profiles" / "keep").write_text("precious")
+        zp = pathlib.Path(root, "cas.zip")
+        with zipfile.ZipFile(zp, "w") as z:
+            z.writestr("cas/cas-gui", "NEW"); z.writestr("cas/_internal/V", "0.2.1")
+        dead = subprocess.Popen(["true"]); dead.wait()
+        captured = {}
+        orig = os.getpid; os.getpid = lambda: dead.pid
+        try:
+            ok = U.stage_and_relaunch(str(zp), appdir=str(appdir), log=lambda *a: None, platform="linux",
+                                      launch=lambda helper, **k: captured.setdefault("h", helper))
+        finally:
+            os.getpid = orig
+        self.assertTrue(ok)
+        subprocess.run(["/bin/sh", str(captured["h"])], timeout=15)   # run helper directly (pid already dead)
+        self.assertEqual((appdir / "_internal" / "V").read_text(), "0.2.1")   # swap took
+        self.assertEqual((appdir / "cas-gui").read_text(), "NEW")
+        self.assertEqual((appdir / "profiles" / "keep").read_text(), "precious")  # sibling untouched
 
 
 if __name__ == "__main__":
