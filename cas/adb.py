@@ -1,4 +1,5 @@
 """Thin adb wrapper. The `runner` is injectable so tests can mock it (no real device needed)."""
+import os
 import subprocess
 import sys
 import time
@@ -53,6 +54,19 @@ def subprocess_stream(args, on_line, input_text=None):
     if tail:
         on_line(tail)
     return p.wait()
+
+
+def _dir_size_kb(path):
+    """Total size (KB) of all files under `path`. Tolerates a missing dir (pull hasn't created it yet)
+    and files that vanish/grow mid-walk (adb is writing into it) — best-effort sizing for a progress bar."""
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+    return total // 1024
 
 
 def list_devices(adb="adb", runner=subprocess_runner):
@@ -111,6 +125,43 @@ class Adb:
         if self.runner is subprocess_runner:
             return subprocess_stream(args, on_line) == 0
         return self.runner(args)[0] == 0
+
+    def pull_with_progress(self, src, dst, total_kb, on_line, poll=3.0):
+        """adb pull a big tree, emitting synthetic '[ NN%] pulled X/Y MB (R MB/s)' lines.
+
+        adb only renders its own '[ NN%]' transfer progress to a TTY; with stdout on a pipe (how we run
+        every adb call) it stays SILENT for the whole multi-GB pull — which made 'Save device' look frozen
+        for minutes. Instead we launch the pull and poll the bytes landing in `dst`, turning that into the
+        SAME '[ NN%]' lines the GUI already parses (cas/gui.py _maybe_progress). Cross-platform — no PTY.
+        `total_kb` is the device-side payload size (du -sk); 0/unknown -> emit MB-only lines (bar stays
+        marching). Returns True on success. An injected (test) runner has no real process to poll, so it
+        falls back to one blocking pull."""
+        args = self._base() + ["pull", str(src), str(dst)]
+        if self.runner is not subprocess_runner:
+            return self.runner(args)[0] == 0
+        total_kb = int(total_kb or 0)
+        p = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             creationflags=_NO_WINDOW)
+        t0 = time.monotonic()
+        last_pct, last_emit = -1, 0.0
+        while True:
+            try:
+                rc, finished = p.wait(timeout=poll), True
+            except subprocess.TimeoutExpired:
+                rc, finished = None, False
+            got_kb = _dir_size_kb(dst)
+            now = time.monotonic()
+            rate = (got_kb / 1024.0) / max(0.001, now - t0)          # MB/s
+            if total_kb > 0:
+                pct = 100 if finished else min(99, got_kb * 100 // total_kb)
+                if finished or pct != last_pct or now - last_emit >= 10:
+                    on_line(f"[ {pct}%] pulled {got_kb // 1024} / {total_kb // 1024} MB ({rate:.1f} MB/s)")
+                    last_pct, last_emit = pct, now
+            elif finished or now - last_emit >= 5:                   # unknown total: MB + rate heartbeat
+                on_line(f"pulled {got_kb // 1024} MB ({rate:.1f} MB/s)")
+                last_emit = now
+            if finished:
+                return rc == 0
 
     def push_stream(self, src, dst, on_line):
         """adb push, streaming progress lines to on_line(); True on success."""

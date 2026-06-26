@@ -20,6 +20,7 @@ user_pkgs > "$P/pkglist.txt"                      # exact app set we clone: ALL 
 ok "cloning $(grep -c . "$P/pkglist.txt") apps: $(tr '\n' ' ' < "$P/pkglist.txt")"
 for pkg in $(cat "$P/pkglist.txt"); do
   [ -d "/data/data/$pkg" ] || { warn "$pkg not installed — skip"; continue; }
+  log "capturing $pkg…"   # announce BEFORE the tar so a big app (save states/mods) isn't a silent gap
   mkdir -p "$P/$pkg/apk"
   # bundle the app's EXACT installed APK into the payload (self-contained root clone — version-exact,
   # portable, no dependency on the SD's /apps folder). pm path = base + any splits.
@@ -36,19 +37,29 @@ for pkg in $(cat "$P/pkglist.txt"); do
   # large native-game expansion files (OBB) — some GameHub PC-game ports need them
   [ -d "/sdcard/Android/obb/$pkg" ] && tar -cf "$P/$pkg/obb.tar" -C /sdcard/Android/obb "$pkg" 2>/dev/null
   echo "golden_uid=$(app_uid "$pkg")" > "$P/$pkg/meta"
-  ok "captured $pkg"
+  ok "captured $pkg ($(du -sh "$P/$pkg" 2>/dev/null | cut -f1))"   # size so the operator can see what's big
 done
 # shared internal-storage dirs (Citra/RetroArch keep state here, OUTSIDE app-private dirs; a factory
 # reset wipes internal storage, so the self-contained payload must carry them).
 for d in $INTERNAL_DIRS; do
   # skip if absent OR empty (e.g. ES-DE before its home is actually moved to internal — avoids a
   # stale/empty capture that would create a broken empty dir on restore).
-  # EXCLUDE downloaded_media (ES-DE box art, ~12 GB) + logs: box art is a SHARED layer the PC pushes
-  # separately (push_es_media), NOT bundled per golden — only the small config (gamelists/themes/settings)
-  # belongs in the profile. toybox tar supports --exclude (verified on device).
-  [ -d "/storage/emulated/0/$d" ] && [ -n "$(ls -A "/storage/emulated/0/$d" 2>/dev/null)" ] \
-    && tar -cf "$P/internal_$d.tar" --exclude=downloaded_media --exclude=logs -C /storage/emulated/0 "$d" 2>/dev/null \
-    && ok "captured internal:$d config ($(du -sh "$P/internal_$d.tar" 2>/dev/null | cut -f1); box art excluded → shared layer)"
+  [ -d "/storage/emulated/0/$d" ] && [ -n "$(ls -A "/storage/emulated/0/$d" 2>/dev/null)" ] || continue
+  # EXCLUDES — MUST be path-anchored "$d/sub", NOT a bare "sub". toybox tar matches excludes with
+  # fnmatch(pattern, member, FNM_LEADING_DIR), which anchors to the START of the member name: a bare
+  # "downloaded_media" does NOT match "ES-DE/downloaded_media/…", so it was SILENTLY NOT excluded and the
+  # ~12 GB ES-DE box art shipped in every golden — the real cause of the slow, oversized captures.
+  # "$d/…" matches correctly on toybox AND GNU tar (verified). We drop:
+  #   downloaded_media — ES-DE box art (SHARED layer the PC pushes via push_es_media; not per-golden)
+  #   logs             — runtime logs, never golden state
+  # RetroArch thumbnails are INTENTIONALLY KEPT (per decision) so units ship with RA box art OFFLINE —
+  # do NOT add --exclude="$d/thumbnails" here; it would strip that offline box art.
+  # announce BEFORE the tar (a big NAND/thumbnails dir is otherwise a silent gap) and show the RAW source
+  # size so the operator sees raw-vs-captured and knows the wait is real work, not a hang.
+  log "archiving internal:$d ($(du -sh "/storage/emulated/0/$d" 2>/dev/null | cut -f1) raw; ES-DE box art + logs excluded)…"
+  tar -cf "$P/internal_$d.tar" --exclude="$d/downloaded_media" --exclude="$d/logs" \
+        -C /storage/emulated/0 "$d" 2>/dev/null \
+    && ok "captured internal:$d config ($(du -sh "$P/internal_$d.tar" 2>/dev/null | cut -f1))"
 done
 # device-experience settings: full dumps for reference; restore applies the safe allowlist (lib-root.sh).
 mkdir -p "$P/settings"
@@ -99,4 +110,4 @@ if [ "$CFAIL" -gt 0 ]; then
   warn "GOLDEN capture had $CFAIL problem(s) — DO NOT trust this payload until resolved."
   exit 1
 fi
-ok "GOLDEN captured -> $P  (serial ${SD##*/}, $(ls "$P" | grep -c .) entries)"
+ok "GOLDEN captured -> $P  (serial ${SD##*/}, $(ls "$P" | grep -c .) entries, $(du -sh "$P" 2>/dev/null | cut -f1) total)"

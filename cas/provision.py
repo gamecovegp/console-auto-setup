@@ -246,8 +246,19 @@ def capture_to_pc(adb, name, stamp, root="profiles", log=print, dry_pull=False):
         incoming = pdir / ".incoming"
         if incoming.exists():
             shutil.rmtree(incoming, ignore_errors=True)
-        log("pulling captured payload to the PC — a multi-GB golden can take several minutes...")
-        if not adb.pull_stream(TMPCAP, incoming, log):       # streams adb's '[ NN%]' -> progress bar
+        # Size the payload on the device so the pull can show a REAL % bar + transfer rate. adb's own
+        # '[ NN%]' only renders to a TTY; piped (how we run it) the pull is silent for minutes and the UI
+        # looks frozen — so we poll the bytes landing on the PC against this total instead.
+        total_kb = 0
+        rc_du, out_du, _ = adb.su(f"du -sk {TMPCAP}", timeout=120)
+        if rc_du == 0:
+            try:
+                total_kb = int(out_du.split()[0])
+            except (ValueError, IndexError):
+                total_kb = 0
+        size_hint = f"~{total_kb // 1024} MB " if total_kb else ""
+        log(f"pulling captured {size_hint}payload to the PC — a multi-GB golden can take several minutes...")
+        if not adb.pull_with_progress(TMPCAP, incoming, total_kb, log):  # synthetic '[ NN%]' -> progress bar
             log("pull failed — existing profile untouched.")
             shutil.rmtree(incoming, ignore_errors=True)
             return False
