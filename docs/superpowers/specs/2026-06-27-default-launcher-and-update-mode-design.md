@@ -21,7 +21,7 @@ This spec covers the chosen scope for this round: **(1) default game launcher (H
 ## 2. Goals / Non-goals
 
 **Goals**
-- Capture and restore the device's **default HOME launcher** (the operator's choice: ES-DE) so it propagates across same-family units.
+- Set the device's **default HOME launcher** to a configurable frontend (manifest flag `@home`, **default ES-DE** this round; switchable to e.g. Cocoon later) so it propagates across all families without reading the OEM launcher.
 - Make the **All-Files-Access** grant for declaring apps (e.g. the Companion) reliably stick, or fail loudly.
 - Add an **Update** action that re-applies settings + default launcher + grants to existing units **without** wiping per-app data (saves/states).
 
@@ -34,12 +34,15 @@ This spec covers the chosen scope for this round: **(1) default game launcher (H
 
 ES-DE's `AndroidManifest.xml` declares `android.intent.category.HOME` on a dedicated activity `org.es_de.frontend/org.es_de.frontend.MainActivityHomeApp` (also `CATEGORY_LAUNCHER` and `LEANBACK_LAUNCHER`). Therefore `cmd package set-home-activity org.es_de.frontend/org.es_de.frontend.MainActivityHomeApp` can make ES-DE the Android home, replacing the OEM launcher. Because this is launcher-agnostic, it sidesteps the cross-family favorites-DB problem (symptom #2).
 
-**Determining the home launcher — pin ES-DE, do not read the OEM launcher.** MANGMI, Retroid, and Odin each ship a *different* OEM launcher, so capturing "whatever is HOME on the golden" is fragile and family-specific. Instead the rule is family-agnostic:
+**Determining the home launcher — a configurable frontend, defaulting to ES-DE; never the OEM launcher.** MANGMI, Retroid, and Odin each ship a *different* OEM launcher, so capturing "whatever is HOME on the golden" is fragile and family-specific. Instead the home app is **chosen by a new manifest flag `@home <pkg>`** and is family-agnostic. Resolution order:
 
-- **If `org.es_de.frontend` is in the unit's manifest (`RPKGS`) → set ES-DE as the home.** ES-DE is the same package on every family and is HOME-capable, so this works identically on MANGMI/Retroid/Odin and never touches the OEM launcher.
-- **Else** (a profile without ES-DE) → fall back to the captured `launcher_component` / `launcher_pkg` from the golden.
+1. `@home <pkg>` value from the manifest, if present;
+2. else `org.es_de.frontend` if it is in the manifest (the **default** this round);
+3. else the captured `launcher_component` / `launcher_pkg` from the golden (no-frontend fallback).
 
-This is deterministic and removes any "set ES-DE as home on the golden before capture" dependency — restore enforces it by policy. It is consistent with how CAS already special-cases `org.es_de.frontend` (box art, MediaDirectory). The current Retroid golden's captured `launcher_pkg=com.android.launcher3` is therefore irrelevant: as long as ES-DE is in the manifest, restore sets ES-DE as home regardless.
+The resolved target must be HOME-capable (declare `CATEGORY_HOME`) and present in the manifest/installed on the unit. ES-DE qualifies (`MainActivityHomeApp`). A different frontend — e.g. **Cocoon** — becomes the default later simply by setting `@home <cocoon-pkg>` in the profile manifest (no code change), once it is confirmed HOME-capable. This is consistent with how CAS already special-cases `org.es_de.frontend` (box art, MediaDirectory). The current Retroid golden's `launcher_pkg=com.android.launcher3` is therefore irrelevant: with ES-DE in the manifest and no `@home` override, restore sets ES-DE as home. No "set the home on the golden before capture" step is required.
+
+A GUI picker for `@home` is **out of scope this round** (defaults to ES-DE; switchable by editing the manifest) — added when a second frontend (Cocoon) is actually onboarded.
 
 ## 4. Component design
 
@@ -59,10 +62,11 @@ This is deterministic and removes any "set ES-DE as home on the golden before ca
 ### 4.3 `provision/root/restore.sh`
 - **New env `CAS_MODE`**: `full` (default) | `update`.
 - **Extract the All-Files grant** out of the destructive per-app loop into its own pass over `RPKGS` (using `grant_all_files`), so it runs in both modes. Grant failure increments `FAIL` (unchanged contract).
-- **New set-default-HOME step** (under `@homescreen`), independent of the favorites-DB clone, following the §3 determination rule:
-  - if `org.es_de.frontend` ∈ `RPKGS` and installed here → `set_home_launcher org.es_de.frontend` (package-only);
-  - else read `launcher_pkg` + `launcher_component` from `homescreen/meta` and, if that pkg is installed, `set_home_launcher launcher_pkg launcher_component`;
-  - failure → **WARN** (additive/recoverable, consistent with homescreen's existing additive treatment); does **not** bump `FAIL`.
+- **New set-default-HOME step** (under `@homescreen`), independent of the favorites-DB clone, following the §3 resolution order:
+  - resolve target pkg: `manifest_flag @home` → else `org.es_de.frontend` if ∈ `RPKGS` → else captured `launcher_pkg`/`launcher_component`;
+  - if the resolved pkg is installed here, call `set_home_launcher pkg [component]` (component only used for the captured-fallback path; the `@home`/ES-DE path is package-only via role-holder);
+  - resolved pkg not in manifest / not installed / not HOME-capable → **WARN** and skip;
+  - set failure → **WARN** (additive/recoverable, consistent with homescreen's existing additive treatment); does **not** bump `FAIL`.
 - **Favorites-DB clone guard:** skip the favorites-DB layout restore when `launcher_pkg` ∈ `RPKGS` (its data already arrives via per-app restore — avoids a redundant destructive `rm -rf`/extract). Otherwise unchanged (same-family only).
 - **`CAS_MODE=update` gating** — skip the destructive/serial phases, run only the idempotent ones (see §6).
 
@@ -76,6 +80,7 @@ This is deterministic and removes any "set ES-DE as home on the golden before ca
 
 ### 4.5 `cas/gui.py`
 - Add an **"Update"** button to the action footer between Download and Lock (workflow: Root → Save → Download → **Update** → Lock). Honors the existing "Apply to ALL connected / selected rows" toggle and runs in parallel like Download. Tooltip: *"Re-apply settings, default launcher, and file-access grants to already-set-up units — does NOT wipe saves/state."* Calls `provision(mode="update")` per target.
+- **Preserve `@home` on save:** `save_manifest()` currently writes only the four checkbox flags (`settings/hardening/grants/homescreen`), which would drop a value-flag like `@home`. Fix: start from the manifest's existing flags (`prof.flags()`) and overlay the four checkbox values, so `@home` (and any future non-checkbox flag) survives a "Save selection". No `@home` GUI control this round (defaults to ES-DE).
 
 ## 5. Data flow (Update)
 
@@ -108,6 +113,7 @@ In Update mode the grant pass only attempts apps actually installed on the unit 
 
 Python suite (`tests/test_cas.py`, mocks adb):
 - capture writes `launcher_component` into `homescreen/meta`.
+- `manifest_flags` parses `@home <pkg>`; `save_manifest` via the GUI path **preserves** an existing `@home` when only the four checkbox flags are edited.
 - `provision(mode="update")` pushes the reduced payload set (asserts APKs/data/internal tars are **not** pushed) and invokes `restore.sh` with `CAS_MODE=update`; SD guard not enforced in update mode.
 - `provision(mode="full")` still pushes the full payload and runs `CAS_MODE=full`/default.
 - All 106 existing tests stay green.
