@@ -172,6 +172,18 @@ class TestProfiles(unittest.TestCase):
                              ["org.es_de.frontend", "dev.eden.eden_emulator", "org.citra.emu"])
             self.assertEqual(prof.flags(), {"settings": "on", "hardening": "on"})
 
+    def test_manifest_tolerates_non_utf8_bytes(self):
+        # NAS profiles authored on Windows can carry cp1252 bytes (e.g. em-dash 0x97). Strict UTF-8 used to
+        # crash the whole GUI on startup; the readers must decode tolerantly and still find ASCII pkgs/flags.
+        with tempfile.TemporaryDirectory() as t:
+            m = pathlib.Path(t) / "manifest"
+            m.write_bytes(b"# Retroid \x97 ESDE build\norg.es_de.frontend\n@settings on\n")
+            self.assertEqual(P.manifest_pkgs(m), ["org.es_de.frontend"])
+            self.assertEqual(P.manifest_flags(m), {"settings": "on"})
+            meta = pathlib.Path(t) / "profile.meta"
+            meta.write_bytes(b"frontend=es\x97de\nmodel_match=Foo\n")
+            self.assertEqual(P._read_meta(meta)["model_match"], "Foo")   # no crash; other keys parse
+
     def test_set_meta_key_updates_existing_and_adds_new(self):
         # The GUI's 'Root images' Browse writes stock_init_boot / magisk_apk into profile.meta in place,
         # leaving other keys + comments intact.

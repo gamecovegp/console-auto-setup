@@ -37,11 +37,17 @@ def _dir_bytes(path):
     return total
 
 
+def _read_text(path):
+    """Read text tolerant of non-UTF-8 bytes. NAS profiles authored on Windows can carry cp1252 bytes
+    (e.g. an em-dash 0x97) in a manifest/meta line that strict UTF-8 decoding would crash on."""
+    return pathlib.Path(path).read_text(encoding="utf-8", errors="replace")
+
+
 def _read_meta(path):
     meta = {}
     p = pathlib.Path(path)
     if p.exists():
-        for line in p.read_text().splitlines():
+        for line in _read_text(p).splitlines():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
@@ -54,7 +60,7 @@ def set_meta_key(path, key, value):
     or appending it. Creates the file if missing. Used by the GUI's 'Root images' picker to record
     stock_init_boot / magisk_apk without clobbering hand-written keys."""
     p = pathlib.Path(path)
-    lines = p.read_text().splitlines() if p.exists() else []
+    lines = _read_text(p).splitlines() if p.exists() else []
     out, replaced = [], False
     for line in lines:
         s = line.strip()
@@ -88,7 +94,7 @@ def manifest_pkgs(manifest_path):
     if not p.exists():
         return []
     out = []
-    for line in p.read_text().splitlines():
+    for line in _read_text(p).splitlines():
         line = line.split("#", 1)[0].strip()
         if not line or line.startswith("@"):
             continue
@@ -102,7 +108,7 @@ def manifest_flags(manifest_path):
     flags = {}
     if not p.exists():
         return flags
-    for line in p.read_text().splitlines():
+    for line in _read_text(p).splitlines():
         line = line.split("#", 1)[0].strip()
         if line.startswith("@"):
             parts = line[1:].split()
@@ -136,7 +142,7 @@ class Profile:
         """Every app the payload contains (from pkglist.txt) — the full toggle set for the UI."""
         pl = self.payload / "pkglist.txt"
         if pl.exists():
-            return [l.strip() for l in pl.read_text().splitlines() if l.strip()]
+            return [l.strip() for l in _read_text(pl).splitlines() if l.strip()]
         return self.pkgs()
 
     def has_golden(self):
