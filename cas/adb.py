@@ -257,24 +257,50 @@ class Adb:
 
 
 class Fastboot:
-    """fastboot scoped to one device (or the only one in bootloader). Runner is injectable."""
+    """fastboot scoped to one device. Some units (e.g. MANGMI) report a DIFFERENT serial in fastboot than
+    in adb, so `fastboot -s <adb-serial> flash` HANGS forever ('waiting for <serial>') and the flash never
+    runs. We therefore REMAP the requested (adb) serial to the device actually present in fastboot: the
+    requested serial if it's there, else — when exactly one device is in fastboot — that one. Resolved on
+    wait()/resolve(); ambiguous cases keep the requested serial so a wrong call fails loudly, never flashes
+    the wrong unit. Runner is injectable."""
 
     def __init__(self, serial=None, fastboot="fastboot", runner=subprocess_runner):
-        self.serial = serial
+        self.serial = serial            # requested serial (usually the adb serial)
+        self._eff = serial              # effective fastboot serial actually used (resolved on wait/resolve)
         self.fb = fastboot
         self.runner = runner
 
     def _base(self):
-        return [self.fb] + (["-s", self.serial] if self.serial else [])
+        return [self.fb] + (["-s", self._eff] if self._eff else [])
+
+    def _list(self):
+        """Serials currently in fastboot, from `fastboot devices` (UNSCOPED — fastboot ignores -s here)."""
+        out = self.runner([self.fb, "devices"])[1]
+        return [ln.split()[0] for ln in out.splitlines() if ln.strip() and "fastboot" in ln]
+
+    def resolve(self):
+        """Lock onto the device to talk to: the requested serial if present in fastboot; else, when exactly
+        one device is in fastboot, that one (handles a serial that differs between adb and fastboot). Several
+        present and the requested one absent -> keep the requested serial (fail loudly, don't guess). Returns
+        the effective serial."""
+        devs = self._list()
+        if self.serial and self.serial in devs:
+            self._eff = self.serial
+        elif len(devs) == 1:
+            self._eff = devs[0]
+        else:
+            self._eff = self.serial
+        return self._eff
 
     def devices(self):
-        return self.runner(self._base() + ["devices"])[1]
+        return self.runner([self.fb, "devices"])[1]
 
     def wait(self, timeout=60, on_tick=None):
-        """Wait until a device appears in fastboot. Returns True if seen.
+        """Wait until a device appears in fastboot, then RESOLVE the effective serial. Returns True if seen.
         on_tick(seconds) is called ~every 10s so a UI can show progress during the wait."""
         for i in range(max(1, timeout // 2)):
-            if self.devices().strip():
+            if self._list():
+                self.resolve()             # remap onto the present device (serial may differ from adb)
                 return True
             if on_tick and i and i % 5 == 0:
                 on_tick(i * 2)

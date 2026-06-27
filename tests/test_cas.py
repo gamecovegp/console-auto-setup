@@ -164,6 +164,44 @@ class TestAdb(unittest.TestCase):
         self.assertIn("creationflags", seen)
 
 
+class TestFastboot(unittest.TestCase):
+    def test_remaps_to_present_device_when_fastboot_serial_differs(self):
+        # MANGMI reports a DIFFERENT serial in fastboot (357451cb) than adb (MQ66…). Without remap,
+        # `fastboot -s MQ66… flash` hangs forever; the flash must target the serial actually present.
+        calls = []
+
+        def runner(args, input_text=None, timeout=900):
+            calls.append(list(args))
+            if args[-1] == "devices":
+                return 0, "357451cb\t fastboot\n", ""
+            return 0, "", ""
+        fb = Fastboot(serial="MQ66142509130541", runner=runner)
+        self.assertTrue(fb.wait(timeout=2))
+        self.assertEqual(fb.resolve(), "357451cb")
+        self.assertTrue(fb.flash("init_boot_b", "/tmp/x.img"))
+        flash_cmd = [c for c in calls if "flash" in c][-1]
+        self.assertIn("357451cb", flash_cmd)                 # targets the real fastboot serial
+        self.assertNotIn("MQ66142509130541", flash_cmd)      # NOT the adb serial (would hang)
+
+    def test_keeps_requested_serial_when_present(self):
+        def runner(args, input_text=None, timeout=900):
+            if args[-1] == "devices":
+                return 0, "SAME123\t fastboot\n", ""
+            return 0, "", ""
+        fb = Fastboot(serial="SAME123", runner=runner)
+        self.assertTrue(fb.wait(timeout=2))
+        self.assertEqual(fb.resolve(), "SAME123")            # Retroid/AYN: serial matches, unchanged
+
+    def test_ambiguous_keeps_requested_serial(self):
+        # several units in fastboot, requested serial absent -> don't guess; keep requested (fails loudly).
+        def runner(args, input_text=None, timeout=900):
+            if args[-1] == "devices":
+                return 0, "aaa\t fastboot\nbbb\t fastboot\n", ""
+            return 0, "", ""
+        fb = Fastboot(serial="MQ66", runner=runner)
+        self.assertEqual(fb.resolve(), "MQ66")
+
+
 class TestProfiles(unittest.TestCase):
     def test_manifest_parse(self):
         with tempfile.TemporaryDirectory() as t:
