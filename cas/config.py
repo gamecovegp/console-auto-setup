@@ -69,9 +69,14 @@ def library_root():
 
 
 def set_library(path):
-    """Persist the library location to cas-config.json. Returns the resolved library_root()."""
+    """Persist (path) or, with a falsy path, CLEAR the library override in cas-config.json — clearing makes
+    library_root() follow the NAS default when it's mounted (local only when offline). Returns the resolved
+    library_root()."""
     cfg = load_config()
-    cfg["library"] = str(path)
+    if path:
+        cfg["library"] = str(path)
+    else:
+        cfg.pop("library", None)
     save_config(cfg)
     return library_root()
 
@@ -103,6 +108,26 @@ def set_log_dir(path):
         cfg.pop("log_dir", None)
     save_config(cfg)
     return load_config().get("log_dir")
+
+
+def firmware_dir():
+    """The device-root-firmware library directory. The configured 'firmware_dir' (e.g. the NAS CAS Profiles
+    _firmware) if set — so the firmware catalog centralizes on the NAS for unified access while the heavy
+    goldens stay on a fast LOCAL library — else library_root()/_firmware. Deterministic (no local fallback):
+    it's a deliberate shared catalog, not resilient run logs."""
+    d = load_config().get("firmware_dir")
+    return pathlib.Path(d) if d else (library_root() / "_firmware")
+
+
+def set_firmware_dir(path):
+    """Persist (path) or clear (falsy) the firmware-library directory."""
+    cfg = load_config()
+    if path:
+        cfg["firmware_dir"] = str(path)
+    else:
+        cfg.pop("firmware_dir", None)
+    save_config(cfg)
+    return load_config().get("firmware_dir")
 
 
 def es_media_src():

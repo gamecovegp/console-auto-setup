@@ -153,7 +153,9 @@ class App:
 
         setm = tk.Menu(bar, tearoff=0)
         setm.add_command(label="Open library folder", command=self._open_library)
+        setm.add_command(label="Library folder…", command=self.choose_library)
         setm.add_command(label="Log folder…", command=self.choose_log_dir)
+        setm.add_command(label="Firmware folder…", command=self.choose_firmware_dir)
         setm.add_separator()
         setm.add_command(label="NAS login…", command=self.nas_login_dialog)
         bar.add_cascade(label="Settings", menu=setm)
@@ -322,6 +324,48 @@ class App:
                 "CAS", "Clear the shared log folder? Run-history will go to the library root instead."):
             config.set_log_dir(None)
             self.log("Run-history logs → library root (shared log folder cleared).")
+
+    def choose_firmware_dir(self):
+        """Pick the device-root-firmware library folder (e.g. the mounted NAS '…/CAS Profiles/_firmware'),
+        so the firmware catalog is shared across benches while the heavy goldens stay on a fast local
+        library. Cancel offers to clear it (firmware then lives under the library root)."""
+        cur = config.load_config().get("firmware_dir")
+        d = filedialog.askdirectory(
+            title="Firmware library folder — shared/NAS folder for device root firmware  (Cancel to clear)")
+        if d:
+            config.set_firmware_dir(d)
+            self.log(f"Firmware library → {d}")
+            self.refresh_firmware()
+        elif cur and messagebox.askyesno(
+                "CAS", "Clear the firmware-library folder? It will live under the library root instead."):
+            config.set_firmware_dir(None)
+            self.log("Firmware library → library root/_firmware (shared firmware folder cleared).")
+            self.refresh_firmware()
+
+    def choose_library(self):
+        """Pick the profile/golden library folder — e.g. the mounted NAS '…/CAS Profiles' so goldens are
+        shared across benches too. Cancel offers to CLEAR the override so the library follows the NAS default
+        when mounted (local fallback only when offline). Re-resolves profiles, firmware and devices after."""
+        def _applied():
+            self.profiles_root = str(library_root())
+            self._update_lib_label()
+            self.refresh_profiles()
+            self.refresh_firmware()
+            self.refresh_devices()
+        cur = config.load_config().get("library")
+        d = filedialog.askdirectory(
+            title="Profile/golden library folder — e.g. the mounted NAS '…/CAS Profiles'  (Cancel to clear)",
+            initialdir=(cur or config.nas_default_path()))
+        if d:
+            config.set_library(d)
+            _applied()
+            self.log(f"Library → {d}")
+        elif cur and messagebox.askyesno(
+                "CAS", "Clear the library override? The library will follow the NAS when it's mounted "
+                       "(local fallback only when offline)."):
+            config.set_library(None)
+            _applied()
+            self.log(f"Library override cleared → {self.profiles_root}")
 
     def _open_path(self, target):
         """Open a folder path or smb:// URL in the OS file manager. Returns True if a viewer was launched.
