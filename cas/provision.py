@@ -514,8 +514,69 @@ def capture_to_pc(adb, name, stamp, root="profiles", log=print, dry_pull=False):
     return True
 
 
+def fastboot_flasher(fastboot, wait=True):
+    """Flash backend: reboot to BOOTLOADER fastboot and write the patched image to `target`. Works on units
+    whose bootloader implements `flash` (Retroid/AYN/Odin). Returns callable(adb, target, image, log)->bool;
+    always reboots back to the OS, never strands the unit in fastboot."""
+    def _flash(adb, target, image, log):
+        log(f"step 3/4: rebooting to bootloader to flash the patched {target} (fastboot)...")
+        adb.raw("reboot", "bootloader")
+        if wait and not fastboot.wait(on_tick=lambda s: log(f"  …waiting for fastboot ({s}s)")):
+            log("ERROR: device did not enter fastboot. Aborting (it should still be bootable).")
+            return False
+        if not fastboot.flash(target, image):
+            log("ERROR: patched flash failed — this bootloader's fastboot may not support 'flash' "
+                "(e.g. MANGMI → needs the EDL backend). Booting back to the OS, NOT rooted.")
+            fastboot.reboot()                          # never strand the unit in fastboot
+            return False
+        fastboot.reboot()
+        return True
+    return _flash
+
+
+def edl_flasher(edl, geometry, wait=True):
+    """Flash backend using Qualcomm EDL / Firehose — for units whose bootloader fastboot can't write
+    (MANGMI). Reboots to EDL, Firehose-writes the patched image to `target` at the firmware `geometry`
+    (init_boot_<slot> sector/LUN), then resets. Returns callable(adb, target, image, log)->bool."""
+    def _flash(adb, target, image, log):
+        log(f"step 3/4: rebooting to EDL to flash the patched {target} (Firehose)...")
+        adb.raw("reboot", "edl")
+        port = edl.find_port(timeout=(60 if wait else 4),
+                             on_tick=lambda s: log(f"  …waiting for EDL serial /dev/ttyUSB ({s}s)"))
+        if not port:
+            log("ERROR: no EDL serial port appeared (qcserial driver? hold power ~12s to recover).")
+            return False
+        with tempfile.TemporaryDirectory() as td:
+            if not edl.flash_partition(port, target, image, geometry, td, log=log):
+                return False
+        edl.reset(port)
+        return True
+    return _flash
+
+
+def flasher_for_firmware(firmware, fastboot, slot, version=None, runner=None):
+    """Pick the flash backend for a resolved Firmware (brand-agnostic root):
+      * flash_method == 'edl'  -> edl_flasher using the build's bundled QSaharaServer/fh_loader/programmer
+                                  and the init_boot_<slot> geometry from its rawprogram.
+      * else (or no firmware)  -> fastboot_flasher.
+    Returns (flasher, None) on success, or (None, reason) when EDL is required but the build lacks the
+    tools/geometry — so the caller can surface a clear error instead of silently falling back."""
+    if firmware is None or firmware.flash_method != "edl":
+        return fastboot_flasher(fastboot), None
+    from .adb import Edl, subprocess_runner
+    tools = firmware.edl_tools(version)
+    geom = firmware.init_boot_geometry(slot, version)
+    if not tools:
+        return None, "EDL firmware is missing QSaharaServer/fh_loader/prog_firehose in its payload."
+    if not geom:
+        return None, f"EDL firmware has no rawprogram entry for init_boot{slot}."
+    q, f, p = tools
+    edl = Edl(q, f, p, runner=(runner or subprocess_runner))
+    return edl_flasher(edl, geom), None
+
+
 def root(adb, fastboot, stock_init_boot, magisk_apk=None, log=print, wait=True, model_match=None,
-         force=False):
+         force=False, flasher=None):
     """Root a FRESH unit — Magisk-FIRST, everything sourced from the PC (run BEFORE provision). Inverse of
     seal():
       1) install the Magisk APP from the PC (the manager — FIRST, so it's present to own root)
@@ -527,6 +588,7 @@ def root(adb, fastboot, stock_init_boot, magisk_apk=None, log=print, wait=True, 
     stock_init_boot). Never strands the unit in fastboot. Refuses the golden. Bootloader must be UNLOCKED.
     force=True proceeds on a model MISMATCH (e.g. a same-chipset sibling) with a loud warning."""
     log("ROOT: installing Magisk on this unit (Magisk-first, sourced from the PC).")
+    flasher = flasher or fastboot_flasher(fastboot, wait=wait)   # brand-agnostic: caller passes edl_flasher for EDL units
 
     rooted = adb.is_root()
     # never re-flash the GOLDEN. is_golden() needs root to read the marker, so only check when rooted
@@ -583,18 +645,10 @@ def root(adb, fastboot, stock_init_boot, magisk_apk=None, log=print, wait=True, 
             log("ERROR: on-device Magisk patch failed — NOT flashing, unit unchanged.")
             return False
 
-        # (3) flash the patched init_boot.
-        log(f"step 3/4: rebooting to bootloader to flash the patched {target}...")
-        adb.raw("reboot", "bootloader")
-        if wait and not fastboot.wait(on_tick=lambda s: log(f"  …waiting for fastboot ({s}s)")):
-            log("ERROR: device did not enter fastboot. Aborting (it should still be bootable).")
+        # (3) flash the patched init_boot via the device's flash backend (bootloader fastboot by default;
+        #     EDL/Firehose when the caller passes an edl_flasher — units whose bootloader can't write).
+        if not flasher(adb, target, patched, log):
             return False
-        if not fastboot.flash(target, patched):
-            log("ERROR: patched init_boot flash failed (is the bootloader UNLOCKED?) — booting back to "
-                "the OS, NOT rooted.")
-            fastboot.reboot()                          # never strand the unit in fastboot
-            return False
-        fastboot.reboot()
     log("flashed; rebooting to system. step 4/4: waiting for the device to finish booting (1-3 min)...")
     if wait and not adb.wait_boot(on_tick=lambda s: log(f"  …still booting ({s}s)")):
         log("ERROR: unit did not boot after the root flash — investigate before retrying.")
@@ -726,10 +780,32 @@ def root_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
             # without per-profile picking. A profile.meta key still wins when present.
             stock_rel = prof.meta.get("stock_init_boot") or DEFAULT_STOCK_INIT_BOOT
             magisk_rel = prof.meta.get("magisk_apk") or DEFAULT_MAGISK_APK
-            ok = root(adb, make_fb(serial), P.resolve_asset(prof, appdir, stock_rel),
+            stock_path = P.resolve_asset(prof, appdir, stock_rel)
+            # Brand-agnostic flash: a resolved device-root-firmware supplies the unit's OWN stock init_boot
+            # and — for EDL units whose bootloader fastboot can't write (e.g. MANGMI) — the Firehose flasher.
+            # Fail-safe: any firmware-lookup error → fall back to the fastboot path + profile/default stock.
+            flasher = None
+            try:
+                from . import firmware as FW
+                fwres = FW.resolve(serial, FW.identity(adb), FW.firmware_root())
+                fw = fwres.get("firmware")
+                if fw is not None:
+                    sb = fw.stock_boot_image(fwres.get("version"))
+                    if sb:
+                        stock_path = str(sb)            # the unit's own init_boot from its firmware build
+                    if fw.flash_method == "edl":
+                        flasher, reason = flasher_for_firmware(fw, make_fb(serial), adb.slot_suffix(),
+                                                               version=fwres.get("version"))
+                        if flasher is None:
+                            log(f"[{serial}] EDL firmware '{fw.id}' unusable: {reason}")
+                            return ("fail", reason)
+            except Exception as e:
+                log(f"[{serial}] firmware lookup skipped ({e}); using fastboot + profile stock")
+            ok = root(adb, make_fb(serial), stock_path,
                       magisk_apk=P.resolve_asset(prof, appdir, magisk_rel),
                       log=lambda m, s=serial: log(f"[{s}] {m}"),
-                      model_match=prof.meta.get("model_match"), force=(serial in force_serials))
+                      model_match=prof.meta.get("model_match"), force=(serial in force_serials),
+                      flasher=flasher)
             return ("ok" if ok else "fail", prof.name)
         except Exception as e:
             log(f"[{serial}] ERROR: {e}")

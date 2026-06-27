@@ -1,5 +1,7 @@
 """Thin adb wrapper. The `runner` is injectable so tests can mock it (no real device needed)."""
+import glob
 import os
+import pathlib
 import subprocess
 import sys
 import time
@@ -312,3 +314,79 @@ class Fastboot:
 
     def reboot(self):
         return self.runner(self._base() + ["reboot"])[0] == 0
+
+
+class Edl:
+    """Flash a partition via Qualcomm EDL / Firehose (Sahara loads a programmer, fh_loader writes). For
+    devices whose BOOTLOADER fastboot can't flash (e.g. MANGMI: `Writing… FAILED (remote: 'unknown
+    command')`). The device must already be in EDL (`adb reboot edl`) — it then appears as /dev/ttyUSB*,
+    which needs read/write access (the `dialout` group, or run CAS via sudo). The two tools + the Firehose
+    programmer come from the device's firmware build. Runner is injectable for tests; success is detected
+    from OUTPUT, not return code (QSaharaServer exits 0 even when it can't open the port).
+
+    geometry (per init_boot_<slot>, parsed from the firmware's rawprogram) is a dict with:
+      sector_size, num_sectors, partition (physical_partition_number), start_sector, start_byte_hex."""
+
+    def __init__(self, qsahara, fh_loader, programmer, memoryname="eMMC", runner=subprocess_runner):
+        self.qsahara = str(qsahara)
+        self.fh = str(fh_loader)
+        self.programmer = str(programmer)
+        self.memoryname = memoryname
+        self.runner = runner
+
+    def find_port(self, timeout=60, on_tick=None, pattern="/dev/ttyUSB*"):
+        """Poll for the EDL serial port (created when the device enters EDL). Returns the path or None."""
+        for i in range(max(1, timeout // 2)):
+            ports = sorted(glob.glob(pattern))
+            if ports:
+                return ports[0]
+            if on_tick and i and i % 5 == 0:
+                on_tick(i * 2)
+            time.sleep(2)
+        return None
+
+    @staticmethod
+    def rawprogram_xml(label, image_name, geometry):
+        """A one-entry Firehose rawprogram writing `image_name` to `label` at the firmware's geometry."""
+        return (
+            '<?xml version="1.0" ?>\n<data>\n'
+            f'<program SECTOR_SIZE_IN_BYTES="{geometry["sector_size"]}" file_sector_offset="0" '
+            f'filename="{image_name}" label="{label}" num_partition_sectors="{geometry["num_sectors"]}" '
+            f'partofsingleimage="false" physical_partition_number="{geometry["partition"]}" '
+            f'readbackverify="false" size_in_KB="0.0" sparse="false" '
+            f'start_byte_hex="{geometry["start_byte_hex"]}" start_sector="{geometry["start_sector"]}" />\n'
+            '</data>\n')
+
+    def flash_partition(self, port, label, image, geometry, workdir, log=print):
+        """Sahara-load the programmer, then Firehose-write `image` to `label`. Returns True on success.
+        `workdir` is a writable dir; the image is staged there beside a generated rawprogram so fh_loader's
+        --search_path finds it by basename. Success is parsed from tool OUTPUT."""
+        workdir = pathlib.Path(workdir)
+        workdir.mkdir(parents=True, exist_ok=True)
+        img_name = pathlib.Path(image).name
+        staged = workdir / img_name
+        if pathlib.Path(image).resolve() != staged.resolve():
+            staged.write_bytes(pathlib.Path(image).read_bytes())
+        xml = workdir / f"rawprogram_{label}.xml"
+        xml.write_text(self.rawprogram_xml(label, img_name, geometry))
+
+        log(f"EDL: loading Firehose programmer via Sahara on {port}...")
+        rc, out, err = self.runner([self.qsahara, "-p", port, "-s", "13:" + self.programmer])
+        blob = (out or "") + (err or "")
+        if "Could not connect" in blob or "Sahara protocol completed" not in blob:
+            log(f"EDL: Sahara failed (port permission? add user to 'dialout' or run as root). {err.strip()}")
+            return False
+
+        log(f"EDL: Firehose writing {label}...")
+        rc, out, err = self.runner([self.fh, "--port=" + port, "--sendxml=" + xml.name,
+                                    "--search_path=" + str(workdir), "--memoryname=" + self.memoryname,
+                                    "--noprompt", "--showpercentagecomplete"])
+        blob = (out or "") + (err or "")
+        if "All Finished Successfully" not in blob and "{SUCCESS}" not in blob:
+            log(f"EDL: Firehose write of {label} FAILED. {err.strip()}")
+            return False
+        return True
+
+    def reset(self, port):
+        """Reboot the device out of EDL (Firehose <power reset>)."""
+        return self.runner([self.fh, "--port=" + port, "--reset", "--noprompt"])[0] == 0

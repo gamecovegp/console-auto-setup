@@ -60,8 +60,10 @@ def identity(adb):
 # ---------------------------------------------------------------------------
 
 def firmware_root():
-    """Device-root-firmware library dir: library_root()/_firmware (NOT emulator BIOS)."""
-    return config.library_root() / "_firmware"
+    """Device-root-firmware library dir: the configured firmware_dir (e.g. the NAS CAS Profiles _firmware,
+    so the catalog is shared across benches while goldens stay on a fast local library) or, unset,
+    library_root()/_firmware. DEVICE ROOT firmware only — never emulator BIOS."""
+    return config.firmware_dir()
 
 
 def get_device_firmware():
@@ -142,6 +144,63 @@ class Firmware:
         if not v:
             return None
         return self.path / "versions" / v / "payload"
+
+    @property
+    def flash_method(self):
+        """How the patched ramdisk is written: 'fastboot' (bootloader fastboot — Retroid/AYN/Odin) or
+        'edl' (Qualcomm Firehose — MANGMI, whose bootloader fastboot rejects flash). Recorded on ingest;
+        falls back to detecting from the payload (Firehose tools present → edl) so firmwares ingested before
+        this field existed still resolve correctly without a re-ingest."""
+        m = self.meta.get("flash_method")
+        if m:
+            return m
+        return "edl" if self.edl_tools() else "fastboot"
+
+    def _payload_glob(self, pattern, version=None):
+        pd = self.payload_dir(version)
+        if not pd:
+            return None
+        hits = sorted(pd.glob(pattern))
+        return hits[0] if hits else None
+
+    def stock_boot_image(self, version=None):
+        """The stock image to Magisk-patch from this build: <payload>/**/<flash_target>.img."""
+        ft = self.flash_target or "init_boot"
+        return self._payload_glob(f"**/{ft}.img", version)
+
+    def edl_tools(self, version=None):
+        """(QSaharaServer, fh_loader, prog_firehose) paths bundled in the payload, or None if not present."""
+        q = self._payload_glob("**/QSaharaServer", version)
+        f = self._payload_glob("**/fh_loader", version)
+        p = (self._payload_glob("**/prog_firehose_ddr.elf", version)
+             or self._payload_glob("**/prog_firehose*.elf", version))
+        return (q, f, p) if (q and f and p) else None
+
+    def init_boot_geometry(self, slot, version=None):
+        """Parse the firmware's rawprogram for label 'init_boot<slot>' (slot '_a'/'_b'/'') →
+        {sector_size, num_sectors, partition, start_sector, start_byte_hex}, or None. Used to build the
+        one-entry rawprogram for an EDL write of the patched init_boot to the right offset/LUN."""
+        pd = self.payload_dir(version)
+        if not pd:
+            return None
+        label = (self.flash_target or "init_boot") + (slot or "")
+        for xml in sorted(pd.glob("**/rawprogram*.xml")):
+            try:
+                txt = xml.read_text(errors="ignore")
+            except OSError:
+                continue
+            m = re.search(r'<program\b[^>]*\blabel="' + re.escape(label) + r'"[^>]*/>', txt)
+            if not m:
+                continue
+            tag = m.group(0)
+
+            def g(attr):
+                mm = re.search(attr + r'="([^"]*)"', tag)
+                return mm.group(1) if mm else None
+            return {"sector_size": g("SECTOR_SIZE_IN_BYTES"), "num_sectors": g("num_partition_sectors"),
+                    "partition": g("physical_partition_number"), "start_sector": g("start_sector"),
+                    "start_byte_hex": g("start_byte_hex")}
+        return None
 
     def __repr__(self):
         return f"<Firmware {self.id} device={self.device} flash={self.flash_target}>"
@@ -277,12 +336,17 @@ def detect_build(src):
         except OSError:
             pass
     flash_target = "init_boot" if "init_boot" in labels else ("boot" if "boot" in labels else "")
+    # A Firehose/EDL build ships QSaharaServer + fh_loader + a prog_firehose programmer → flash via EDL
+    # (its bootloader fastboot can't write, e.g. MANGMI). Otherwise the patched ramdisk goes via fastboot.
+    is_edl = ((src / "QSaharaServer").exists() and (src / "fh_loader").exists()
+              and bool(list(base.glob("prog_firehose*.elf"))))
     m = _VERSION_RE.search(src.name)
     version = f"{m.group(1)}-{m.group(2)}" if m else src.name
     imgs = sorted(base.glob("super_*.img")) + sorted(base.glob("system_*.img"))
     return {
         "storage": storage,
         "flash_target": flash_target,
+        "flash_method": "edl" if is_edl else "fastboot",
         "version": version,
         "device": _grep_value(imgs, "ro.product.system.device="),
         "dev_code": _grep_value(imgs, "ro.mangmi.dev.code="),
@@ -326,6 +390,7 @@ def ingest(src, root, firmware_id=None, label=None, match=None, copy=True):
         "os_version": info["os_version"],
         "storage": info["storage"],
         "flash_target": info["flash_target"],
+        "flash_method": info["flash_method"],
         "source": str(src),
     })
 
@@ -337,6 +402,7 @@ def ingest(src, root, firmware_id=None, label=None, match=None, copy=True):
         "device": info["device"] or meta.get("device", ""),
         "storage": info["storage"] or meta.get("storage", ""),
         "flash_target": info["flash_target"],
+        "flash_method": info["flash_method"],
         "current": version,
     })
     # Seed match rules so a freshly-ingested firmware auto-matches immediately: start from the caller's

@@ -352,5 +352,67 @@ class TestAuditLog(unittest.TestCase):
         self.assertEqual(lines[1]["action"], "update")
 
 
+def fake_edl_build(tmp, name):
+    """A Firehose/EDL device-firmware build: bundled QSaharaServer/fh_loader + emmc/{prog_firehose,
+    rawprogram with init_boot_a/_b geometry, init_boot.img}."""
+    d = pathlib.Path(tmp) / name
+    d.mkdir(parents=True)
+    (d / "QSaharaServer").write_text("#!/bin/sh\n")
+    (d / "fh_loader").write_text("#!/bin/sh\n")
+    p = d / "emmc"
+    p.mkdir(parents=True)
+    (p / "prog_firehose_ddr.elf").write_bytes(b"\x7fELF")
+    (p / "init_boot.img").write_bytes(b"ANDROID!" + b"\0" * 64)
+    (p / "rawprogram1.xml").write_text(
+        '<data>'
+        '<program SECTOR_SIZE_IN_BYTES="512" filename="init_boot.img" label="init_boot_a" '
+        'num_partition_sectors="16384" physical_partition_number="0" '
+        'start_byte_hex="0x1f5802000" start_sector="16433168" />'
+        '<program SECTOR_SIZE_IN_BYTES="512" filename="" label="init_boot_b" '
+        'num_partition_sectors="16384" physical_partition_number="0" '
+        'start_byte_hex="0x1f6002000" start_sector="16449552" />'
+        '</data>')
+    (p / "super_1.img").write_text("ro.product.system.device=AIR_X\nro.mangmi.dev.code=MQ66\n")
+    return d
+
+
+class TestFlashMethod(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.root = pathlib.Path(self.tmp) / "_firmware"
+        self.root.mkdir(parents=True)
+
+    def test_ingest_detects_edl_and_exposes_tools_and_geometry(self):
+        src = fake_edl_build(self.tmp, "MANGMI_x_la2.0.l.user.20260507.165105")
+        fw = FW.ingest(src, self.root, firmware_id="air-x")
+        self.assertEqual(fw.flash_method, "edl")
+        tools = fw.edl_tools()
+        self.assertIsNotNone(tools)
+        self.assertTrue(str(tools[0]).endswith("QSaharaServer"))
+        g = fw.init_boot_geometry("_b")
+        self.assertEqual(g["start_sector"], "16449552")
+        self.assertEqual(g["partition"], "0")
+        self.assertEqual(g["sector_size"], "512")
+
+    def test_ingest_non_firehose_is_fastboot(self):
+        src = fake_build(self.tmp, "Retroid_la2.0.l.user.20260507.000000")   # no QSahara/fh_loader/firehose
+        fw = FW.ingest(src, self.root, firmware_id="rp")
+        self.assertEqual(fw.flash_method, "fastboot")
+
+    def test_flasher_for_firmware_picks_edl_vs_fastboot(self):
+        from cas import provision as PV
+        edl_fw = FW.ingest(fake_edl_build(self.tmp, "MANGMI_la2.0.l.user.20260507.165105"),
+                           self.root, firmware_id="air-x")
+        flasher, reason = PV.flasher_for_firmware(edl_fw, fastboot=None, slot="_b",
+                                                  runner=lambda *a, **k: (0, "", ""))
+        self.assertIsNotNone(flasher)
+        self.assertIsNone(reason)
+        fb_fw = FW.ingest(fake_build(self.tmp, "Retroid_la2.0.l.user.20260507.000000"),
+                          self.root, firmware_id="rp")
+        flasher2, reason2 = PV.flasher_for_firmware(fb_fw, fastboot="FBOBJ", slot="_a")
+        self.assertIsNotNone(flasher2)
+        self.assertIsNone(reason2)
+
+
 if __name__ == "__main__":
     unittest.main()

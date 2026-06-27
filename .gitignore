@@ -13,6 +13,9 @@ venv/
 # ── Superpowers SDD scratch (ledger, review diffs) — process artifacts, never source ──
 .superpowers/
 
+# ── EDL/Firehose run log (fh_loader writes this to the cwd) ──
+/port_trace.txt
+
 # ── SECRETS — cas-config.json holds the NAS app password (obfuscated). NEVER commit. ──
 cas-config.json
 *.local.json

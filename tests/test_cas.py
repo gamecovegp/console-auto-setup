@@ -1282,5 +1282,112 @@ class TestUpdater(unittest.TestCase):
         self.assertEqual((appdir / "data" / "profiles" / "keep").read_text(), "precious")  # sibling untouched
 
 
+class TestEdl(unittest.TestCase):
+    GEOM = {"sector_size": "512", "num_sectors": "16384", "partition": "0",
+            "start_sector": "16449552", "start_byte_hex": "0x1f6002000"}
+
+    def _runner(self, sahara_ok=True, fh_ok=True):
+        calls = []
+
+        def runner(args, input_text=None, timeout=900):
+            calls.append(list(args))
+            if args[0].endswith("QSaharaServer"):
+                return (0, "Sahara protocol completed\nFile transferred successfully\n", "") if sahara_ok \
+                    else (0, "ERROR: Could not connect to /dev/ttyUSB0\n", "")
+            if args[0].endswith("fh_loader"):
+                return (0, "{All Finished Successfully}\n", "") if fh_ok else (0, "FAILED\n", "")
+            return 0, "", ""
+        return runner, calls
+
+    def test_rawprogram_xml_has_geometry(self):
+        from cas.adb import Edl
+        xml = Edl.rawprogram_xml("init_boot_b", "patched.img", self.GEOM)
+        self.assertIn('label="init_boot_b"', xml)
+        self.assertIn('filename="patched.img"', xml)
+        self.assertIn('start_sector="16449552"', xml)
+        self.assertIn('physical_partition_number="0"', xml)
+
+    def test_flash_partition_success_targets_real_args(self):
+        from cas.adb import Edl
+        runner, calls = self._runner()
+        with tempfile.TemporaryDirectory() as td:
+            img = pathlib.Path(td) / "patched.img"; img.write_bytes(b"x" * 32)
+            wd = pathlib.Path(td) / "wd"
+            edl = Edl("/x/QSaharaServer", "/x/fh_loader", "/x/prog.elf", runner=runner)
+            self.assertTrue(edl.flash_partition("/dev/ttyUSB0", "init_boot_b", str(img), self.GEOM, str(wd)))
+            xml = (wd / "rawprogram_init_boot_b.xml").read_text()
+            self.assertIn('start_sector="16449552"', xml)
+            self.assertTrue((wd / "patched.img").exists())                 # image staged for --search_path
+            fh = [c for c in calls if c[0].endswith("fh_loader")][0]
+            self.assertIn("--port=/dev/ttyUSB0", fh)
+            self.assertIn("--memoryname=eMMC", fh)
+
+    def test_flash_partition_fails_when_sahara_cannot_connect(self):
+        from cas.adb import Edl
+        runner, _ = self._runner(sahara_ok=False)
+        with tempfile.TemporaryDirectory() as td:
+            img = pathlib.Path(td) / "p.img"; img.write_bytes(b"x")
+            edl = Edl("/x/QSaharaServer", "/x/fh_loader", "/x/prog.elf", runner=runner)
+            self.assertFalse(edl.flash_partition("/dev/ttyUSB0", "init_boot_b", str(img), self.GEOM, td))
+
+
+class TestFlashers(unittest.TestCase):
+    def test_fastboot_flasher_success_and_failure(self):
+        from cas.adb import Adb, Fastboot
+        from cas import provision as PV
+
+        def fb_ok(args, input_text=None, timeout=900):
+            return (0, "SER\t fastboot\n", "") if args[-1] == "devices" else (0, "", "")
+
+        def fb_flashfail(args, input_text=None, timeout=900):
+            if args[-1] == "devices":
+                return 0, "SER\t fastboot\n", ""
+            return (1, "", "FAILED (remote: 'unknown command')") if "flash" in args else (0, "", "")
+        adb = Adb(runner=FakeRunner())
+        self.assertTrue(PV.fastboot_flasher(Fastboot(serial="SER", runner=fb_ok))(
+            adb, "init_boot_a", "/tmp/p.img", lambda *a: None))
+        self.assertFalse(PV.fastboot_flasher(Fastboot(serial="SER", runner=fb_flashfail))(
+            adb, "init_boot_a", "/tmp/p.img", lambda *a: None))
+
+    def test_edl_flasher_success(self):
+        from cas.adb import Adb, Edl
+        from cas import provision as PV
+
+        def runner(args, input_text=None, timeout=900):
+            if args[0].endswith("QSaharaServer"):
+                return 0, "Sahara protocol completed\n", ""
+            if args[0].endswith("fh_loader"):
+                return 0, "{All Finished Successfully}\n", ""
+            return 0, "", ""
+        edl = Edl("/x/QSaharaServer", "/x/fh_loader", "/x/p.elf", runner=runner)
+        edl.find_port = lambda timeout=60, on_tick=None, pattern="/dev/ttyUSB*": "/dev/ttyUSB0"
+        geom = {"sector_size": "512", "num_sectors": "1", "partition": "0",
+                "start_sector": "1", "start_byte_hex": "0x0"}
+        flasher = PV.edl_flasher(edl, geom)
+        with tempfile.TemporaryDirectory() as td:
+            img = pathlib.Path(td) / "p.img"; img.write_bytes(b"x")
+            self.assertTrue(flasher(Adb(runner=FakeRunner()), "init_boot_b", str(img), lambda *a: None))
+
+    def test_root_dispatches_to_provided_flasher(self):
+        from cas.adb import Adb, Fastboot
+        from cas import provision as PV
+        orig = PV.patch_init_boot_on_device
+        PV.patch_init_boot_on_device = lambda adb, stock, out, log=print: True   # isolate dispatch
+        try:
+            seen = {}
+
+            def fake_flasher(adb, target, image, log):
+                seen["target"] = target
+                return True
+            with tempfile.TemporaryDirectory() as td:
+                stock = pathlib.Path(td) / "init_boot.img"; stock.write_bytes(b"x")
+                ok = PV.root(Adb(runner=FakeRunner(root=False)), Fastboot(runner=lambda *a, **k: (0, "", "")),
+                             str(stock), magisk_apk=None, log=lambda *a: None, wait=False, flasher=fake_flasher)
+                self.assertTrue(ok)
+                self.assertEqual(seen.get("target"), "init_boot_a")    # FakeRunner: first_api 33, slot _a
+        finally:
+            PV.patch_init_boot_on_device = orig
+
+
 if __name__ == "__main__":
     unittest.main()
