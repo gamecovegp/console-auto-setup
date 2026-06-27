@@ -34,15 +34,20 @@ This spec covers the chosen scope for this round: **(1) default game launcher (H
 
 ES-DE's `AndroidManifest.xml` declares `android.intent.category.HOME` on a dedicated activity `org.es_de.frontend/org.es_de.frontend.MainActivityHomeApp` (also `CATEGORY_LAUNCHER` and `LEANBACK_LAUNCHER`). Therefore `cmd package set-home-activity org.es_de.frontend/org.es_de.frontend.MainActivityHomeApp` can make ES-DE the Android home, replacing the OEM launcher. Because this is launcher-agnostic, it sidesteps the cross-family favorites-DB problem (symptom #2).
 
-The current Retroid golden captured `launcher_pkg=com.android.launcher3` — ES-DE is **not** yet set as home on it. **Golden-prep requirement:** set ES-DE as the default home on the golden unit *before* capture. Capture then records the resolved HOME component and restore replicates it.
+**Determining the home launcher — pin ES-DE, do not read the OEM launcher.** MANGMI, Retroid, and Odin each ship a *different* OEM launcher, so capturing "whatever is HOME on the golden" is fragile and family-specific. Instead the rule is family-agnostic:
+
+- **If `org.es_de.frontend` is in the unit's manifest (`RPKGS`) → set ES-DE as the home.** ES-DE is the same package on every family and is HOME-capable, so this works identically on MANGMI/Retroid/Odin and never touches the OEM launcher.
+- **Else** (a profile without ES-DE) → fall back to the captured `launcher_component` / `launcher_pkg` from the golden.
+
+This is deterministic and removes any "set ES-DE as home on the golden before capture" dependency — restore enforces it by policy. It is consistent with how CAS already special-cases `org.es_de.frontend` (box art, MediaDirectory). The current Retroid golden's captured `launcher_pkg=com.android.launcher3` is therefore irrelevant: as long as ES-DE is in the manifest, restore sets ES-DE as home regardless.
 
 ## 4. Component design
 
 ### 4.1 `provision/root/lib-root.sh` (shared helpers)
-- `home_launcher_component()` — returns the full `pkg/cls` of the resolved HOME activity (existing `home_launcher()` returns only the package). Falls back to empty if unresolved.
-- `set_home_launcher(component, pkg)`:
-  1. `cmd package set-home-activity "<component>"` (preferred — pins the exact activity, e.g. ES-DE's `MainActivityHomeApp`).
-  2. fallback `cmd role add-role-holder --user 0 android.app.role.HOME "<pkg>"`.
+- `home_launcher_component()` — returns the full `pkg/cls` of the resolved HOME activity (existing `home_launcher()` returns only the package). Falls back to empty if unresolved. Used only to *record* the golden's HOME for the no-ES-DE fallback.
+- `set_home_launcher(pkg, component)`:
+  1. `cmd role add-role-holder --user 0 android.app.role.HOME "<pkg>"` (preferred — package-only; Android selects the package's HOME activity, e.g. ES-DE's `MainActivityHomeApp`). Works for the ES-DE policy case with no component needed.
+  2. fallback `cmd package set-home-activity "<component>"` when a component is supplied (the no-ES-DE fallback path).
   3. verify via `home_launcher` == `pkg`; return non-zero if neither stuck.
 - `grant_all_files(pkg)` — robust MANAGE_EXTERNAL_STORAGE:
   - `appops set "$pkg" MANAGE_EXTERNAL_STORAGE allow`, then `appops set --user 0 "$pkg" …`, then by uid `appops set --uid "$(app_uid pkg)" …` (forms vary across OEM A14 builds).
@@ -54,9 +59,9 @@ The current Retroid golden captured `launcher_pkg=com.android.launcher3` — ES-
 ### 4.3 `provision/root/restore.sh`
 - **New env `CAS_MODE`**: `full` (default) | `update`.
 - **Extract the All-Files grant** out of the destructive per-app loop into its own pass over `RPKGS` (using `grant_all_files`), so it runs in both modes. Grant failure increments `FAIL` (unchanged contract).
-- **New set-default-HOME step** (under `@homescreen`), independent of the favorites-DB clone:
-  - read `launcher_pkg` + `launcher_component` from `homescreen/meta`;
-  - if `launcher_pkg` is installed here, call `set_home_launcher`;
+- **New set-default-HOME step** (under `@homescreen`), independent of the favorites-DB clone, following the §3 determination rule:
+  - if `org.es_de.frontend` ∈ `RPKGS` and installed here → `set_home_launcher org.es_de.frontend` (package-only);
+  - else read `launcher_pkg` + `launcher_component` from `homescreen/meta` and, if that pkg is installed, `set_home_launcher launcher_pkg launcher_component`;
   - failure → **WARN** (additive/recoverable, consistent with homescreen's existing additive treatment); does **not** bump `FAIL`.
 - **Favorites-DB clone guard:** skip the favorites-DB layout restore when `launcher_pkg` ∈ `RPKGS` (its data already arrives via per-app restore — avoids a redundant destructive `rm -rf`/extract). Otherwise unchanged (same-family only).
 - **`CAS_MODE=update` gating** — skip the destructive/serial phases, run only the idempotent ones (see §6).
@@ -111,5 +116,5 @@ Shell-level logic in `restore.sh`/`lib-root.sh` (set-home, grant robustness) car
 
 ## 9. Operational notes
 
-- **Golden prep:** on the MANGMI golden, set ES-DE as the default home (so it boots to ES-DE) before running capture. Capture records the component; restore replicates it on every MANGMI unit.
+- **Golden prep:** not required for the launcher — restore pins ES-DE as home by policy (§3) whenever ES-DE is in the manifest, regardless of what the golden's HOME was. (Setting ES-DE as home on the golden anyway is still nice so the golden itself boots to ES-DE for verification.)
 - **First MANGMI golden is still manual once:** seed from the Retroid golden if useful, hand-finish emulator GPU settings on one MANGMI, set ES-DE as home, capture → that becomes the MANGMI golden. Subsequent units use Download (fresh) or Update (existing).
