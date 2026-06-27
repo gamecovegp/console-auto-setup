@@ -1330,6 +1330,17 @@ class TestEdl(unittest.TestCase):
             edl = Edl("/x/QSaharaServer", "/x/fh_loader", "/x/prog.elf", runner=runner)
             self.assertFalse(edl.flash_partition("/dev/ttyUSB0", "init_boot_b", str(img), self.GEOM, td))
 
+    def test_staged_exec_makes_a_local_executable_copy(self):
+        # The fix: NAS/CIFS forces file_mode=0664 (non-exec), so tools must be copied local + chmod +x.
+        import os
+        from cas.adb import Edl
+        with tempfile.TemporaryDirectory() as td:
+            src = pathlib.Path(td) / "QSaharaServer"; src.write_text("#!/bin/sh\n"); src.chmod(0o644)
+            wd = pathlib.Path(td) / "wd"; wd.mkdir()
+            out = Edl(str(src), "/x/fh_loader", "/x/p.elf")._staged_exec(str(src), wd)
+            self.assertEqual(pathlib.Path(out).parent, wd)        # staged into the local workdir
+            self.assertTrue(os.access(out, os.X_OK))              # and now executable
+
 
 class TestFlashers(unittest.TestCase):
     def test_fastboot_flasher_success_and_failure(self):

@@ -547,10 +547,12 @@ def edl_flasher(edl, geometry, wait=True):
             log("ERROR: no EDL serial port appeared (qcserial driver? hold power ~12s to recover).")
             return False
         with tempfile.TemporaryDirectory() as td:
-            if not edl.flash_partition(port, target, image, geometry, td, log=log):
-                return False
-        edl.reset(port)
-        return True
+            ok = edl.flash_partition(port, target, image, geometry, td, log=log)
+            # ALWAYS reboot out of EDL — even on failure — so a failed flash never strands the unit on a
+            # black EDL screen (init_boot is untouched unless the Firehose write actually started).
+            if not edl.reset(port, td):
+                log("  …could not auto-reset out of EDL; hold power ~15s if the screen stays black.")
+            return ok
     return _flash
 
 

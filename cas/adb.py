@@ -2,6 +2,7 @@
 import glob
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import time
@@ -357,12 +358,29 @@ class Edl:
             f'start_byte_hex="{geometry["start_byte_hex"]}" start_sector="{geometry["start_sector"]}" />\n'
             '</data>\n')
 
+    def _staged_exec(self, src, workdir):
+        """Return a locally-EXECUTABLE copy of a bundled tool. The firmware library lives on a CIFS/NAS
+        mount that forces file_mode=0664 (non-executable), so exec'ing QSaharaServer/fh_loader straight off
+        it fails with EACCES. Copy into the local workdir + chmod +x. Falls back to the original path if the
+        copy can't be made (e.g. a mocked test path that doesn't exist) — harmless, the runner is mocked."""
+        try:
+            dst = pathlib.Path(workdir) / pathlib.Path(src).name
+            if not dst.exists():
+                shutil.copy2(src, dst)
+                dst.chmod(0o755)
+            return str(dst)
+        except OSError:
+            return str(src)
+
     def flash_partition(self, port, label, image, geometry, workdir, log=print):
         """Sahara-load the programmer, then Firehose-write `image` to `label`. Returns True on success.
-        `workdir` is a writable dir; the image is staged there beside a generated rawprogram so fh_loader's
-        --search_path finds it by basename. Success is parsed from tool OUTPUT."""
+        `workdir` is a writable LOCAL dir; the tools + image are staged there (the NAS mount is noexec) and
+        a rawprogram is generated so fh_loader's --search_path finds the image by basename. Success is parsed
+        from tool OUTPUT (QSaharaServer exits 0 even on a port-open failure)."""
         workdir = pathlib.Path(workdir)
         workdir.mkdir(parents=True, exist_ok=True)
+        qsahara = self._staged_exec(self.qsahara, workdir)         # local + executable (CIFS is noexec)
+        fh = self._staged_exec(self.fh, workdir)
         img_name = pathlib.Path(image).name
         staged = workdir / img_name
         if pathlib.Path(image).resolve() != staged.resolve():
@@ -371,14 +389,14 @@ class Edl:
         xml.write_text(self.rawprogram_xml(label, img_name, geometry))
 
         log(f"EDL: loading Firehose programmer via Sahara on {port}...")
-        rc, out, err = self.runner([self.qsahara, "-p", port, "-s", "13:" + self.programmer])
+        rc, out, err = self.runner([qsahara, "-p", port, "-s", "13:" + self.programmer])
         blob = (out or "") + (err or "")
         if "Could not connect" in blob or "Sahara protocol completed" not in blob:
             log(f"EDL: Sahara failed (port permission? add user to 'dialout' or run as root). {err.strip()}")
             return False
 
         log(f"EDL: Firehose writing {label}...")
-        rc, out, err = self.runner([self.fh, "--port=" + port, "--sendxml=" + xml.name,
+        rc, out, err = self.runner([fh, "--port=" + port, "--sendxml=" + xml.name,
                                     "--search_path=" + str(workdir), "--memoryname=" + self.memoryname,
                                     "--noprompt", "--showpercentagecomplete"])
         blob = (out or "") + (err or "")
@@ -387,6 +405,11 @@ class Edl:
             return False
         return True
 
-    def reset(self, port):
-        """Reboot the device out of EDL (Firehose <power reset>)."""
-        return self.runner([self.fh, "--port=" + port, "--reset", "--noprompt"])[0] == 0
+    def reset(self, port, workdir):
+        """Reboot the device out of EDL (Firehose <power reset>). `workdir` is a local dir to stage fh_loader
+        (the NAS copy is noexec). Best-effort — used to recover a unit so a failed flash never strands it."""
+        fh = self._staged_exec(self.fh, workdir)
+        try:
+            return self.runner([fh, "--port=" + port, "--reset", "--noprompt"])[0] == 0
+        except OSError:
+            return False
