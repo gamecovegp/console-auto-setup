@@ -3,7 +3,7 @@
 A firmware is a directory under `_firmware/<id>/` with:
   meta.json               id, label, device, brand, storage, flash_target, match{}, current, history[]
   versions/<version>/payload/   the firmware tree as-is (emmc|ufs + fh_loader/QSaharaServer/script)
-  versions/<version>/version.meta.json   fingerprint, dev_code, os_version, storage, flash_target, added, source
+  versions/<version>/version.meta.json   fingerprint, dev_code, os_version, storage, flash_target, source
 
 DEVICE ROOT firmware only (handheld OS/boot images) — never emulator/app BIOS. CAS stores + advises;
 it never flashes.
@@ -148,7 +148,8 @@ class Firmware:
 
 
 def list_firmware(root):
-    """All Firmware under `root` (dirs containing meta.json). index.json + dotfiles ignored."""
+    """All Firmware under `root`: lists subdirectories that contain a meta.json.
+    Non-directory entries (files such as index.json) and dotfile dirs are skipped."""
     root = pathlib.Path(root)
     if not root.is_dir():
         return []
@@ -422,7 +423,7 @@ def log_event(serial, firmware_id, version, action, manual, when=None):
 
 
 # ---------------------------------------------------------------------------
-# Task 4 (CLI adaptation): main() — `python3 -m cas.firmware`
+# Task 8 (CLI adaptation): main() — `python3 -m cas.firmware`
 # ---------------------------------------------------------------------------
 
 def main(argv=None):

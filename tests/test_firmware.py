@@ -128,7 +128,8 @@ class TestFirmwareClass(unittest.TestCase):
     def test_find_missing(self):
         self.assertIsNone(FW.find("nope", self.root))
 
-    def test_index_json_not_listed_as_firmware(self):
+    def test_nondirectory_entry_not_listed_as_firmware(self):
+        # index.json is skipped because it is a file (not a dir), not because of its name
         (self.root / "index.json").write_text("{}")
         make_fw(self.root, "ayn-m0", device="AYN", flash="boot", storage="ufs")
         self.assertEqual([f.id for f in FW.list_firmware(self.root)], ["ayn-m0"])
@@ -253,6 +254,16 @@ class TestIngest(unittest.TestCase):
         with self.assertRaises(ValueError):
             FW.ingest(fake_build(self.tmp, "b_la2.0.l.user.20260508.000000", device="Pocket_Max"),
                       self.root, firmware_id="fw")
+
+    def test_ingest_no_label_raises_value_error(self):
+        """Brick-guard: no boot/init_boot rawprogram label → ValueError."""
+        d = pathlib.Path(self.tmp) / "no_label_build"
+        p = d / "emmc"
+        p.mkdir(parents=True)
+        # rawprogram XML exists but contains only unrelated labels (no boot or init_boot)
+        (p / "rawprogram1.xml").write_text('<data><program label="persist" /></data>')
+        with self.assertRaises(ValueError):
+            FW.ingest(d, self.root, firmware_id="fw-no-label")
 
 
 # ---------------------------------------------------------------------------
