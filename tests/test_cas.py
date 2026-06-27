@@ -1388,6 +1388,23 @@ class TestFlashers(unittest.TestCase):
         finally:
             PV.patch_init_boot_on_device = orig
 
+    def test_seal_dispatches_to_provided_flasher_with_stock_image(self):
+        from cas.adb import Adb, Fastboot
+        from cas import provision as PV
+        seen = {}
+
+        def fake_flasher(adb, target, image, log):
+            seen["target"] = target
+            seen["image"] = image
+            return True
+        with tempfile.TemporaryDirectory() as td:
+            stock = pathlib.Path(td) / "init_boot.img"; stock.write_bytes(b"x")
+            ok = PV.seal(Adb(runner=FakeRunner(root=False)), Fastboot(runner=lambda *a, **k: (0, "", "")),
+                         str(stock), log=lambda *a: None, wait=False, flasher=fake_flasher)
+            self.assertTrue(ok)
+            self.assertEqual(seen.get("target"), "init_boot_a")
+            self.assertEqual(seen.get("image"), str(stock))     # seal un-roots by flashing STOCK
+
 
 if __name__ == "__main__":
     unittest.main()

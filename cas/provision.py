@@ -519,7 +519,7 @@ def fastboot_flasher(fastboot, wait=True):
     whose bootloader implements `flash` (Retroid/AYN/Odin). Returns callable(adb, target, image, log)->bool;
     always reboots back to the OS, never strands the unit in fastboot."""
     def _flash(adb, target, image, log):
-        log(f"step 3/4: rebooting to bootloader to flash the patched {target} (fastboot)...")
+        log(f"rebooting to bootloader to flash {target} (fastboot)...")
         adb.raw("reboot", "bootloader")
         if wait and not fastboot.wait(on_tick=lambda s: log(f"  …waiting for fastboot ({s}s)")):
             log("ERROR: device did not enter fastboot. Aborting (it should still be bootable).")
@@ -539,7 +539,7 @@ def edl_flasher(edl, geometry, wait=True):
     (MANGMI). Reboots to EDL, Firehose-writes the patched image to `target` at the firmware `geometry`
     (init_boot_<slot> sector/LUN), then resets. Returns callable(adb, target, image, log)->bool."""
     def _flash(adb, target, image, log):
-        log(f"step 3/4: rebooting to EDL to flash the patched {target} (Firehose)...")
+        log(f"rebooting to EDL to flash {target} (Firehose)...")
         adb.raw("reboot", "edl")
         port = edl.find_port(timeout=(60 if wait else 4),
                              on_tick=lambda s: log(f"  …waiting for EDL serial /dev/ttyUSB ({s}s)"))
@@ -647,6 +647,7 @@ def root(adb, fastboot, stock_init_boot, magisk_apk=None, log=print, wait=True, 
 
         # (3) flash the patched init_boot via the device's flash backend (bootloader fastboot by default;
         #     EDL/Firehose when the caller passes an edl_flasher — units whose bootloader can't write).
+        log(f"step 3/4: flashing the patched {target}...")
         if not flasher(adb, target, patched, log):
             return False
     log("flashed; rebooting to system. step 4/4: waiting for the device to finish booting (1-3 min)...")
@@ -667,7 +668,7 @@ def root(adb, fastboot, stock_init_boot, magisk_apk=None, log=print, wait=True, 
     return False
 
 
-def seal(adb, fastboot, stock_init_boot, log=print, wait=True, model_match=None, force=False):
+def seal(adb, fastboot, stock_init_boot, log=print, wait=True, model_match=None, force=False, flasher=None):
     """Make a provisioned unit RETAIL-READY (run AFTER provision + verify):
       1) check the stock init_boot matches THIS device model (wrong-model flash bricks boot)
       2) uninstall the Magisk app (needs root)
@@ -676,6 +677,7 @@ def seal(adb, fastboot, stock_init_boot, log=print, wait=True, model_match=None,
     Never strands the unit in fastboot, and never disables adb on an unverified/failed seal.
     force=True proceeds on a model MISMATCH with a loud warning instead of refusing."""
     log("SEAL: locking the unit down for retail.")
+    flasher = flasher or fastboot_flasher(fastboot, wait=wait)   # brand-agnostic: caller passes edl_flasher for EDL units
 
     # NEVER seal/un-root the GOLDEN. is_golden() needs root to read the marker, so only check when rooted
     # (the golden ships rooted). This protects the master from "Apply to ALL + Lock".
@@ -712,17 +714,12 @@ def seal(adb, fastboot, stock_init_boot, log=print, wait=True, model_match=None,
     else:
         log("warning: not rooted — skipping Magisk-app removal (need root); still un-rooting via flash.")
 
-    # (3) un-root via STOCK init_boot.
-    log("un-rooting: rebooting to bootloader to flash STOCK init_boot...")
-    adb.raw("reboot", "bootloader")
-    if wait and not fastboot.wait(on_tick=lambda s: log(f"  …waiting for fastboot ({s}s)")):
-        log("ERROR: device did not enter fastboot. Aborting seal (device should still be bootable).")
+    # (3) un-root by flashing STOCK init_boot via the device's flash backend (bootloader fastboot, or
+    #     EDL/Firehose for units whose bootloader can't write — caller passes an edl_flasher).
+    log(f"un-rooting: flashing STOCK {target}...")
+    if not flasher(adb, target, stock, log):
+        log("ERROR: stock init_boot flash failed — unit is back in the OS, still rooted, NOT sealed.")
         return False
-    if not fastboot.flash(target, stock):
-        log("ERROR: stock init_boot flash failed — booting back to the (still-rooted) OS, NOT sealing.")
-        fastboot.reboot()                                  # never strand the unit in fastboot
-        return False
-    fastboot.reboot()
     log("flashed stock init_boot; waiting for the device to finish booting (1-3 min)...")
     if wait:
         if not adb.wait_boot(on_tick=lambda s: log(f"  …still booting ({s}s)")):
@@ -850,9 +847,31 @@ def seal_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
             # whose Magisk-patched form ⓪ Root flashed, so flashing it back cleanly un-roots. seal() still
             # model-checks (won't flash a wrong-model image) and CONFIRMS un-root before disabling adb.
             stock_rel = prof.meta.get("stock_init_boot") or DEFAULT_STOCK_INIT_BOOT
-            ok = seal(adb, make_fb(serial), P.resolve_asset(prof, appdir, stock_rel),
+            stock_path = P.resolve_asset(prof, appdir, stock_rel)
+            # Brand-agnostic un-root: a resolved device-root-firmware supplies the unit's OWN stock init_boot
+            # and — for EDL units whose bootloader fastboot can't write (e.g. MANGMI) — the Firehose flasher.
+            # Fail-safe: any firmware-lookup error → fall back to the fastboot path + profile/default stock.
+            flasher = None
+            try:
+                from . import firmware as FW
+                fwres = FW.resolve(serial, FW.identity(adb), FW.firmware_root())
+                fw = fwres.get("firmware")
+                if fw is not None:
+                    sb = fw.stock_boot_image(fwres.get("version"))
+                    if sb:
+                        stock_path = str(sb)
+                    if fw.flash_method == "edl":
+                        flasher, reason = flasher_for_firmware(fw, make_fb(serial), adb.slot_suffix(),
+                                                               version=fwres.get("version"))
+                        if flasher is None:
+                            log(f"[{serial}] EDL firmware '{fw.id}' unusable: {reason}")
+                            return ("fail", reason)
+            except Exception as e:
+                log(f"[{serial}] firmware lookup skipped ({e}); using fastboot + profile stock")
+            ok = seal(adb, make_fb(serial), stock_path,
                       log=lambda m, s=serial: log(f"[{s}] {m}"),
-                      model_match=prof.meta.get("model_match"), force=(serial in force_serials))
+                      model_match=prof.meta.get("model_match"), force=(serial in force_serials),
+                      flasher=flasher)
             return ("ok" if ok else "fail", prof.name)
         except Exception as e:
             log(f"[{serial}] ERROR: {e}")
