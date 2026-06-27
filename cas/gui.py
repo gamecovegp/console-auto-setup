@@ -20,6 +20,7 @@ from tkinter import ttk, scrolledtext, messagebox, simpledialog, filedialog
 from . import APPDIR, BUNDLE, __version__, updater
 from . import profiles as P
 from . import provision as PV
+from . import firmware as FW
 from .adb import Adb, Fastboot, list_devices
 from . import config
 from .config import library_root
@@ -128,6 +129,7 @@ class App:
         self.assigned = {}          # serial -> profile name (per-device; remembered across launches)
         self.assigned_manual = set()  # serials whose profile was set by hand (deliberate; allows force)
         self._last_auto = {}        # serial -> last auto-match shown (to detect + announce auto-changes)
+        self.fw_resolved = {}       # serial -> firmware.resolve() result dict (for the column + status line)
         self._load_device_profiles()  # restore remembered per-device assignments from cas-config.json
         win.title("CAS — Console Auto Setup")
         win.geometry("1000x720")
@@ -453,11 +455,12 @@ class App:
         # Devices (left-top)
         devf = ttk.LabelFrame(top, text="Connected devices", padding=6)
         devf.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 6))
-        self.dev_tree = ttk.Treeview(devf, columns=("model", "sd", "profile", "state"),
+        self.dev_tree = ttk.Treeview(devf, columns=("model", "sd", "profile", "firmware", "state"),
                                      show="tree headings", height=7, selectmode="extended")
         self.dev_tree.heading("#0", text="serial")
-        for c, t, w in (("model", "model", 120), ("sd", "SD card", 135),
-                        ("profile", "profile", 110), ("state", "state", 70)):
+        for c, t, w in (("model", "model", 115), ("sd", "SD card", 125),
+                        ("profile", "profile", 105), ("firmware", "firmware", 140),
+                        ("state", "state", 65)):
             self.dev_tree.heading(c, text=t)
             self.dev_tree.column(c, width=w)
         self.dev_tree.column("#0", width=120)
@@ -465,7 +468,8 @@ class App:
         # Double-click a device row to ASSIGN the dropdown profile to it — quick manual override, works even
         # when auto-match said "(no match)" (e.g. several per-tier profiles share a model). MANUAL ALWAYS WINS.
         self.dev_tree.bind("<Double-1>", self._assign_on_doubleclick)
-        self.dev_tree.bind("<<TreeviewSelect>>", lambda e: self._probe_sd_media())  # auto-detect SD box art
+        self.dev_tree.bind("<<TreeviewSelect>>",
+                           lambda e: (self._probe_sd_media(), self._update_fw_status()))  # SD box art + firmware
         devbtns = ttk.Frame(devf)
         devbtns.pack(anchor="w", fill="x", pady=(6, 0))
         _tip(ttk.Button(devbtns, text="Refresh devices", command=self.refresh_devices),
@@ -564,6 +568,29 @@ class App:
         ttk.Label(root_tab, text=f"Default kit (all profiles): {P.pathlib.Path(PV.DEFAULT_STOCK_INIT_BOOT).name}"
                                  f" + {P.pathlib.Path(PV.DEFAULT_MAGISK_APK).name}",
                   foreground="#555", wraplength=440, justify="left").pack(anchor="w", pady=(10, 0))
+
+        # ── Firmware library (DEVICE ROOT firmware: the full OS/boot build per device; library-only —
+        #    CAS stores + suggests it, it does NOT flash. Distinct from emulator BIOS.) ──
+        ttk.Separator(root_tab, orient="horizontal").pack(fill="x", pady=(12, 8))
+        ttk.Label(root_tab, text="Firmware library (device root firmware)",
+                  font=("", 9, "bold")).pack(anchor="w")
+        fwrow = ttk.Frame(root_tab)
+        fwrow.pack(fill="x", pady=(4, 0))
+        ttk.Label(fwrow, text="Firmware:").pack(side="left")
+        self.fw_var = tk.StringVar()
+        self.fw_combo = ttk.Combobox(fwrow, textvariable=self.fw_var, state="readonly", width=22)
+        self.fw_combo.pack(side="left", padx=4)
+        _tip(ttk.Button(fwrow, text="Assign → selected", command=self.assign_firmware),
+             "Set this firmware on the selected device row(s) as a sticky MANUAL override (always wins over "
+             "the serial-prefix auto-match). Remembered across launches.").pack(side="left", padx=2)
+        _tip(ttk.Button(fwrow, text="Add / update…", command=self._add_firmware),
+             "Ingest a raw firmware BUILD FOLDER into the library as a new version (auto-detects device / "
+             "storage / flash target, keeps history). Pick the folder containing the emmc/ or ufs/ payload.") \
+            .pack(side="left", padx=2)
+        self.fw_status_var = tk.StringVar(value="Select a device to see its firmware suggestion.")
+        ttk.Label(root_tab, textvariable=self.fw_status_var, foreground="#555",
+                  wraplength=440, justify="left").pack(anchor="w", pady=(6, 0))
+        self.refresh_firmware()
 
         top.columnconfigure(0, weight=1)
         top.columnconfigure(1, weight=1)
@@ -840,6 +867,11 @@ class App:
                 self.log(f"adb error: {e} (is adb on PATH?)")
                 return
             rows = []
+            fwmap = {}                                   # serial -> firmware.resolve() result
+            try:
+                fw_root = FW.firmware_root()
+            except Exception:
+                fw_root = None
             for serial, state in devs:
                 model, sd, auto = "", "", ""
                 if state == "device":
@@ -852,8 +884,16 @@ class App:
                     # auto-match by model NAME similarity, with the SD size choosing the capacity tier
                     m = P.match_profile(model, self.profiles_root, sd_gb=P.parse_sd_gb(sd))
                     auto = m.name if m else "(no match)"
+                    # device-root-firmware: suggest by serial-prefix/props (sticky manual override wins),
+                    # then logic-check vs the live partition scheme. Library-only — never flashes.
+                    if fw_root is not None:
+                        try:
+                            fwmap[serial] = FW.resolve(serial, FW.identity(a), fw_root)
+                        except Exception as e:
+                            fwmap[serial] = {"firmware_id": None, "version": None, "manual": False,
+                                             "ok": False, "warnings": [f"error: {e}"], "firmware": None}
                 rows.append((serial, model, sd, auto, state))
-            self.win.after(0, lambda r=rows: self._populate_devices(r))
+            self.win.after(0, lambda r=rows, fm=fwmap: self._populate_devices(r, fm))
         threading.Thread(target=work, daemon=True).start()
 
     def _load_device_profiles(self):
@@ -869,13 +909,14 @@ class App:
                 if rec["manual"]:
                     self.assigned_manual.add(serial)
 
-    def _populate_devices(self, rows):
+    def _populate_devices(self, rows, fwmap=None):
         """(UI thread) fill the device tree (keyed by adb serial):
           * MANUAL assignment  -> sticky + remembered across launches; the operator's choice always wins.
           * AUTO assignment    -> FOLLOWS the live match every refresh, so if something CHANGES (SD card
                                   swapped to a different tier, a better-matching profile added) the device
                                   re-auto-assigns itself.
         Hand-assigned rows are tinted green."""
+        self.fw_resolved = fwmap or {}
         self.dev_tree.delete(*self.dev_tree.get_children())
         changes = []                                       # auto-matches that CHANGED for a known device
         for serial, model, sd, auto, state in rows:
@@ -890,7 +931,7 @@ class App:
                 self.assigned[serial] = auto
             tags = ("manual",) if serial in self.assigned_manual else ()
             self.dev_tree.insert("", "end", iid=serial, text=serial,
-                                 values=(model, sd, shown, state), tags=tags)
+                                 values=(model, sd, shown, self._fw_cell(serial), state), tags=tags)
         self.dev_tree.tag_configure("manual", foreground="#1a6f1a")
         self.log("refreshed: " + ", ".join(f"{r[0]} → {self.assigned.get(r[0], '?')}" for r in rows)
                  if rows else "refreshed: 0 device(s)")
@@ -1002,10 +1043,91 @@ class App:
             self.assigned_manual.add(s)
             config.set_device_profile(s, name, manual=True)   # remember across launches (sticky override)
             if self.dev_tree.exists(s):
-                vals = list(self.dev_tree.item(s).get("values") or ["", "", "", ""])
+                vals = list(self.dev_tree.item(s).get("values") or ["", "", "", "", ""])
                 vals[2] = name
                 self.dev_tree.item(s, values=vals, tags=("manual",))
         self.log(f"assigned profile '{name}' to: {', '.join(serials)} (remembered for next time)")
+
+    # ---------- firmware library (DEVICE ROOT firmware; library-only — never flashes) ----------
+    def _fw_cell(self, serial):
+        """The 'firmware' column text for a device row, from its resolved suggestion/override."""
+        r = self.fw_resolved.get(serial)
+        if r is None:
+            return ""
+        if not r.get("firmware_id"):
+            return "(no match)"
+        return r["firmware_id"] + ("" if r.get("ok") else " ⚠")
+
+    def refresh_firmware(self):
+        """Populate the firmware dropdown with every firmware id in the library."""
+        try:
+            ids = [f.id for f in FW.list_firmware(FW.firmware_root())]
+        except Exception:
+            ids = []
+        self.fw_combo["values"] = ids
+        if ids and self.fw_var.get() not in ids:
+            self.fw_var.set(ids[0])
+
+    def _update_fw_status(self):
+        """Show the selected device's resolved firmware + logic-check + payload path under the dropdown."""
+        serial = self._selected_serial()
+        if not serial:
+            self.fw_status_var.set("Select a device to see its firmware suggestion.")
+            return
+        r = self.fw_resolved.get(serial)
+        if not r:
+            self.fw_status_var.set(f"{serial}: no firmware info — click 'Refresh devices'.")
+            return
+        if not r.get("firmware_id"):
+            self.fw_status_var.set(f"{serial}: no match in library — pick one and 'Assign → selected'.")
+            return
+        kind = "manual override" if r.get("manual") else "auto-suggested"
+        head = f"{serial}: {r['firmware_id']}  v{r.get('version') or '?'}  ({kind})"
+        check = "✓ logic-check OK" if r.get("ok") else "⚠ " + "; ".join(r.get("warnings") or ["mismatch"])
+        path = ""
+        fw = r.get("firmware")
+        try:
+            pd = fw.payload_dir(r.get("version")) if fw is not None else None
+            path = f"\npayload: {pd}" if pd else ""
+        except Exception:
+            path = ""
+        self.fw_status_var.set(f"{head}\n{check}{path}")
+
+    def assign_firmware(self):
+        """Assign the dropdown firmware to the selected device row(s) as a sticky MANUAL override."""
+        serials = list(self.dev_tree.selection())
+        if not serials:
+            messagebox.showinfo("CAS", "Select one or more device rows first (Ctrl/Shift-click).")
+            return
+        fid = self.fw_var.get()
+        if not fid:
+            messagebox.showinfo("CAS", "Pick a firmware in the dropdown (Root images tab) first. "
+                                       "Use 'Add / update…' if the library is empty.")
+            return
+        if not messagebox.askyesno(
+                "CAS — assign firmware",
+                f"Set firmware '{fid}' on {len(serials)} device(s) as a manual override?\n  "
+                + "\n  ".join(serials)):
+            return
+        for s in serials:
+            config.set_device_firmware(s, fid, manual=True)   # sticky; always wins over the auto-match
+            FW.log_event(s, fid, None, "assign", True)
+        self.log(f"assigned firmware '{fid}' to: {', '.join(serials)} (remembered). Re-resolving…")
+        self.refresh_devices()                                # re-resolve so the column + status reflect it
+
+    def _add_firmware(self):
+        """Ingest a raw firmware build folder into the library (new version) on a background thread."""
+        folder = filedialog.askdirectory(title="Select a firmware build folder (contains emmc/ or ufs/)")
+        if not folder:
+            return
+
+        def work():
+            fw = FW.ingest(folder, FW.firmware_root())
+            self.log(f"firmware ingested: {fw.id}  v{fw.current()}")
+            self.win.after(0, self.refresh_firmware)
+            self.win.after(0, self.refresh_devices)
+            return True
+        self._run_bg(work, label="Ingesting firmware")
 
     def _run_batch(self, kind, serials, devices=None):
         """Run kind ∈ {download, root, lock} on `serials`, each with its ASSIGNED profile, IN PARALLEL —
