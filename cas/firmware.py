@@ -339,9 +339,14 @@ def ingest(src, root, firmware_id=None, label=None, match=None, copy=True):
         "flash_target": info["flash_target"],
         "current": version,
     })
-    if match:
-        meta["match"] = match
-    meta.setdefault("match", {})
+    # Seed match rules so a freshly-ingested firmware auto-matches immediately: start from the caller's
+    # rules (e.g. serial_prefix for the MQ65/MQ66 split — both report device AIR_X), then fill `device`
+    # from detection if the caller didn't set it. Without this a GUI ingest produced an empty match{} and
+    # nothing ever auto-matched.
+    m = dict(match) if match else dict(meta.get("match") or {})
+    if info["device"] and not m.get("device"):
+        m["device"] = info["device"]
+    meta["match"] = m
     meta["history"].append({
         "version": version,
         "fingerprint": info["fingerprint"],

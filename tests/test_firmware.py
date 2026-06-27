@@ -265,6 +265,20 @@ class TestIngest(unittest.TestCase):
         with self.assertRaises(ValueError):
             FW.ingest(d, self.root, firmware_id="fw-no-label")
 
+    def test_ingest_seeds_device_match_from_detection(self):
+        """A GUI ingest passes no match → ingest must seed match.device from the detected device so the
+        firmware auto-matches instead of staying '(no match)'."""
+        src = fake_build(self.tmp, "x_la2.0.l.user.20260507.000000", device="AIR_X")
+        fw = FW.ingest(src, self.root, firmware_id="fw")
+        self.assertEqual(fw.match_rules().get("device"), "AIR_X")
+
+    def test_ingest_merges_caller_serial_prefix_with_detected_device(self):
+        """Caller's serial_prefix (the MQ65/MQ66 discriminator) is kept AND device filled from detection."""
+        src = fake_build(self.tmp, "y_la2.0.l.user.20260507.000000", device="AIR_X")
+        fw = FW.ingest(src, self.root, firmware_id="fw2", match={"serial_prefix": ["MQ66"]})
+        self.assertEqual(fw.match_rules().get("serial_prefix"), ["MQ66"])
+        self.assertEqual(fw.match_rules().get("device"), "AIR_X")
+
 
 # ---------------------------------------------------------------------------
 # Task 7 (adapted): resolve() — uses fw-local get/set_device_firmware

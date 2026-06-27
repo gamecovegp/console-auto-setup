@@ -1116,14 +1116,32 @@ class App:
         self.refresh_devices()                                # re-resolve so the column + status reflect it
 
     def _add_firmware(self):
-        """Ingest a raw firmware build folder into the library (new version) on a background thread."""
+        """Ingest a raw firmware build folder into the library (new version) on a background thread.
+        Prompts for the firmware id (variants that share a model — e.g. MQ65 vs MQ66, both 'AIR X' —
+        need DISTINCT ids) and an optional serial prefix that drives the per-device auto-match."""
         folder = filedialog.askdirectory(title="Select a firmware build folder (contains emmc/ or ufs/)")
         if not folder:
             return
+        fid = simpledialog.askstring(
+            "Firmware id",
+            "Firmware id — variants that share a model need DISTINCT ids:\n"
+            "  e.g. mangmi-air-x-mq66   (the MQ65 build gets mangmi-air-x-mq65)\n"
+            "Re-using an id adds a new VERSION to that firmware instead.",
+            parent=self.win)
+        if not fid or not fid.strip():
+            return
+        prefix = simpledialog.askstring(
+            "Serial prefix (auto-match)",
+            "Device serial prefix(es) for auto-match, comma-separated — e.g. MQ66\n"
+            "(MQ65/MQ66 both report model 'AIR X', so the serial prefix is what tells them apart).\n"
+            "Leave blank to match by model only.",
+            parent=self.win) or ""
+        prefixes = [p.strip() for p in prefix.split(",") if p.strip()]
+        match = {"serial_prefix": prefixes} if prefixes else None
 
         def work():
-            fw = FW.ingest(folder, FW.firmware_root())
-            self.log(f"firmware ingested: {fw.id}  v{fw.current()}")
+            fw = FW.ingest(folder, FW.firmware_root(), firmware_id=fid.strip(), match=match)
+            self.log(f"firmware ingested: {fw.id}  v{fw.current()}  match={fw.match_rules()}")
             self.win.after(0, self.refresh_firmware)
             self.win.after(0, self.refresh_devices)
             return True
