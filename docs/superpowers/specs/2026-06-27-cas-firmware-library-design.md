@@ -61,7 +61,7 @@ CAS Profiles/_firmware/
     versions/
       <version>/
         payload/                      # the firmware tree as-is (emmc|ufs dir + fh_loader/QSaharaServer/script)
-        version.meta                  # build fingerprint, dev.code, os.version, added, source, bytes
+        version.meta.json             # build fingerprint, dev_code, os_version, storage, flash_target, source
 ```
 
 - `current` is a **key in `meta.json`** (a version dir name) — never a symlink (CIFS + Windows safe; consistent with `config.py`).
@@ -86,16 +86,14 @@ CAS Profiles/_firmware/
 }
 ```
 
-### `version.meta` (per version)
-```
-fingerprint=MANGMI/MANGMI/AIR_X:14/AIR_X_user_20260507/hxh05071410:user/release-keys
-dev_code=MQ66
-os_version=1.1.6
-storage=emmc
-flash_target=init_boot
-added=2026-06-27 11:20
-source=…/MANGMI_Vex6115_FlatBuild_TurboX-C6115_…20260507.165105
-bytes=4039…
+### `version.meta.json` (per version)
+```json
+{
+  "fingerprint": "MANGMI/MANGMI/AIR_X:14/AIR_X_user_20260507/hxh05071410:user/release-keys",
+  "dev_code": "MQ66", "os_version": "1.1.6",
+  "storage": "emmc", "flash_target": "init_boot",
+  "source": "…/MANGMI_Vex6115_FlatBuild_TurboX-C6115_…20260507.165105"
+}
 ```
 
 ### `device_firmware` (in `cas-config.json`, mirrors `device_profiles`)
