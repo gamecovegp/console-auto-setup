@@ -22,6 +22,21 @@ def internal_for(pkg):
     return INTERNAL_FOR.get(pkg)
 
 
+def _dir_bytes(path):
+    """Total size in bytes of all files under `path` (0 if missing). Best-effort — ignores stat errors."""
+    total = 0
+    try:
+        for f in pathlib.Path(path).rglob("*"):
+            if f.is_file():
+                try:
+                    total += f.stat().st_size
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total
+
+
 def _read_meta(path):
     meta = {}
     p = pathlib.Path(path)
@@ -32,6 +47,39 @@ def _read_meta(path):
                 k, v = line.split("=", 1)
                 meta[k.strip()] = v.strip()
     return meta
+
+
+def set_meta_key(path, key, value):
+    """Set key=value in a profile.meta, updating the line in place if present (order + comments preserved)
+    or appending it. Creates the file if missing. Used by the GUI's 'Root images' picker to record
+    stock_init_boot / magisk_apk without clobbering hand-written keys."""
+    p = pathlib.Path(path)
+    lines = p.read_text().splitlines() if p.exists() else []
+    out, replaced = [], False
+    for line in lines:
+        s = line.strip()
+        if s and not s.startswith("#") and "=" in s and s.split("=", 1)[0].strip() == key:
+            out.append(f"{key}={value}")
+            replaced = True
+        else:
+            out.append(line)
+    if not replaced:
+        out.append(f"{key}={value}")
+    p.write_text("\n".join(out) + "\n")
+
+
+def resolve_asset(prof, appdir, rel):
+    """Resolve a profile.meta asset path (patched_init_boot / stock_init_boot / magisk_apk). Prefer a file
+    sitting INSIDE the profile dir — that's where per-unit captured images live — else fall back to
+    appdir-relative (the shared firmware library / repo-relative paths existing profiles use). Absolute
+    paths pass through unchanged."""
+    p = pathlib.Path(rel)
+    if p.is_absolute():
+        return p
+    local = prof.path / rel
+    if local.exists():
+        return local
+    return pathlib.Path(appdir) / rel
 
 
 def manifest_pkgs(manifest_path):
@@ -90,6 +138,14 @@ class Profile:
         if pl.exists():
             return [l.strip() for l in pl.read_text().splitlines() if l.strip()]
         return self.pkgs()
+
+    def has_golden(self):
+        """True if a golden has been captured into this profile (payload + its global.meta both exist)."""
+        return (self.payload / "global.meta").exists()
+
+    def golden_size(self):
+        """Total bytes of the captured golden payload (0 if none) — used for the storage + download ETA."""
+        return _dir_bytes(self.payload) if self.payload.exists() else 0
 
     def __repr__(self):
         return f"<Profile {self.name} frontend={self.meta.get('frontend')}>"

@@ -18,7 +18,7 @@ REM  Prereqs (one-time): Python 3.14 + `py -3.14 -m pip install "pyinstaller>=6.
 REM  plus git on PATH.
 REM ============================================================================
 setlocal EnableDelayedExpansion
-cd /d "%~dp0"
+cd /d "%~dp0.."   REM script lives in scripts\; operate from the repo root
 
 echo(
 echo === [1/3] git pull (latest source) ===
@@ -27,26 +27,29 @@ git pull --ff-only || (echo ERROR: git pull failed ^(local edits? run `git statu
 
 echo(
 echo === clearing old runtime links so the clean build can't recurse into them ===
-for %%D in (windows-kit retroarch-cores profiles Apps) do if exist "dist\cas\%%D" rmdir "dist\cas\%%D" 2>nul
+if exist "dist\cas\windows-kit" rmdir "dist\cas\windows-kit" 2>nul
+for %%D in (retroarch-cores profiles Apps) do if exist "dist\cas\data\%%D" rmdir "dist\cas\data\%%D" 2>nul
 if exist "dist\cas\provision\root\firmware" rmdir "dist\cas\provision\root\firmware" 2>nul
-if exist "dist\cas\ES-DE\downloaded_media" rmdir "dist\cas\ES-DE\downloaded_media" 2>nul
+if exist "dist\cas\data\ES-DE\downloaded_media" rmdir "dist\cas\data\ES-DE\downloaded_media" 2>nul
 
 echo(
 echo === [2/3] build ===
-call build-win.bat || (echo ERROR: build failed. & exit /b 1)
+call scripts\build-win.bat || (echo ERROR: build failed. & exit /b 1)
 
 echo(
 echo === [3/3] link runtime dirs into dist\cas\ (junctions; skips any not present) ===
-for %%D in (windows-kit retroarch-cores profiles Apps) do (
-  if exist "%%D" if not exist "dist\cas\%%D" ( mklink /J "dist\cas\%%D" "%CD%\%%D" >nul && echo   linked %%D )
+if exist "windows-kit" if not exist "dist\cas\windows-kit" ( mklink /J "dist\cas\windows-kit" "%CD%\windows-kit" >nul && echo   linked windows-kit )
+if not exist "dist\cas\data" mkdir "dist\cas\data"
+for %%D in (retroarch-cores profiles Apps) do (
+  if exist "data\%%D" if not exist "dist\cas\data\%%D" ( mklink /J "dist\cas\data\%%D" "%CD%\data\%%D" >nul && echo   linked data\%%D )
 )
 if exist "provision\root\firmware" (
   if not exist "dist\cas\provision\root" mkdir "dist\cas\provision\root"
   if not exist "dist\cas\provision\root\firmware" ( mklink /J "dist\cas\provision\root\firmware" "%CD%\provision\root\firmware" >nul && echo   linked provision\root\firmware )
 )
-if exist "ES-DE\downloaded_media" (
-  if not exist "dist\cas\ES-DE" mkdir "dist\cas\ES-DE"
-  if not exist "dist\cas\ES-DE\downloaded_media" ( mklink /J "dist\cas\ES-DE\downloaded_media" "%CD%\ES-DE\downloaded_media" >nul && echo   linked ES-DE\downloaded_media )
+if exist "data\ES-DE\downloaded_media" (
+  if not exist "dist\cas\data\ES-DE" mkdir "dist\cas\data\ES-DE"
+  if not exist "dist\cas\data\ES-DE\downloaded_media" ( mklink /J "dist\cas\data\ES-DE\downloaded_media" "%CD%\data\ES-DE\downloaded_media" >nul && echo   linked data\ES-DE\downloaded_media )
 )
 
 echo(

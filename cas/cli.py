@@ -82,13 +82,11 @@ def main(argv=None):
         prof = _resolve_profile(adb, a.profile, proot)
         if not prof:
             print("no matching profile — pass --profile NAME"); return 1
-        patched_rel = prof.meta.get("patched_init_boot")
-        if not patched_rel:
-            print("profile has no patched_init_boot set — cannot root"); return 1
-        magisk_rel = prof.meta.get("magisk_apk")
+        stock_rel = prof.meta.get("stock_init_boot") or PV.DEFAULT_STOCK_INIT_BOOT
+        magisk_rel = prof.meta.get("magisk_apk") or PV.DEFAULT_MAGISK_APK
         fb = Fastboot(serial=a.serial, fastboot=a.fastboot)
-        return 0 if PV.root(adb, fb, APPDIR / patched_rel,
-                            magisk_apk=(APPDIR / magisk_rel) if magisk_rel else None,
+        return 0 if PV.root(adb, fb, P.resolve_asset(prof, APPDIR, stock_rel),
+                            magisk_apk=P.resolve_asset(prof, APPDIR, magisk_rel),
                             model_match=prof.meta.get("model_match"), force=a.force) else 1
 
     if a.cmd == "provision":

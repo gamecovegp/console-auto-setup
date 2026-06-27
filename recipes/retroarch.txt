@@ -1,5 +1,0 @@
-All cores downloaded;filedir;files/cores;Online Updater > Core Downloader > download all (or your ship set). Checks files/cores non-empty.
-Overlay transparent (wont click);setting;files/retroarch.cfg::input_overlay_opacity::0.0;Set overlay opacity to 0 so it does not intercept touches. Apply: run.bat setpath retroarch input_overlay_opacity "0.000000"
-Overlay enable (if still clicking);show;files/retroarch.cfg::input_overlay_enable|input_overlay_opacity;If touches still register, set input_overlay_enable = false.
-ROM browser dir mapped;map;rgui_browser_directory;Plain path to the SD ROMs root. Set: run.bat setpath retroarch rgui_browser_directory "/storage/<sd>/ROMs"
-All-Files-Access;perm;-;RetroArch uses plain file access. run: run.bat grant retroarch

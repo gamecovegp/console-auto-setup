@@ -1,4 +1,4 @@
-# ── Build output (regenerate with build-win.bat / build-linux.sh / build-macos.sh) ──
+# ── Build output (regenerate with scripts/build-linux.sh / build-macos.sh / build-win.bat) ──
 /build/
 /dist/
 *.spec.bak
@@ -10,22 +10,24 @@ __pycache__/
 .venv/
 venv/
 
+# ── Superpowers SDD scratch (ledger, review diffs) — process artifacts, never source ──
+.superpowers/
+
 # ── SECRETS — cas-config.json holds the NAS app password (obfuscated). NEVER commit. ──
 cas-config.json
 *.local.json
 
-# ── Golden library, payloads, captures, backups (huge; these live on the NAS, not in git) ──
-/profiles/
-/payloads/
+# ── Operator-supplied runtime + local data — ALL grouped under data/ (huge; on the NAS, not in git). ──
+#   data/ holds: profiles, Apps, ES-DE (+ ES-DE/downloaded_media), retroarch-cores, Bios, payloads,
+#   downloaded_media (master scrape pool), device-firmwares. The app reads them via APPDIR/data/.
+/data/
 /golden_backup_*/
-/results/
 
-# ── Emulator cores / BIOS / app installers / frontend data / raw brand source (large binaries) ──
-/retroarch-cores/
-/Bios/
-/Apps/
-/ES-DE/
-/branding/
+# ── Raw brand source (large binaries) ──
+/assets/branding/
+
+# ── Legacy runner output (scripts/run.sh / run.ps1 write diagnostic reports here) ──
+/scripts/results/
 
 # ── Device tools + firmware (the operator supplies these per-PC; not source) ──
 /platform-tools/

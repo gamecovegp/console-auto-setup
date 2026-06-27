@@ -5,7 +5,7 @@ REM   cas.bat provision --profile odin2mini
 REM   cas.bat provision-all
 REM   cas.bat capture odin2mini
 REM   cas.bat seal --profile odin2mini
-cd /d "%~dp0"
+cd /d "%~dp0.."
 if exist "windows-kit\adb.exe" (
   python -m cas.cli --adb "windows-kit\adb.exe" --fastboot "windows-kit\fastboot.exe" %*
 ) else (

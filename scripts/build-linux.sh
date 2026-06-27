@@ -44,12 +44,14 @@
 #
 set -euo pipefail
 
-# Resolve repo root = dir of this script (cwd-independent; path may contain spaces/brackets).
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve repo root = PARENT of this script's dir (script lives in scripts/; cwd-independent; path may
+# contain spaces/brackets). Build runs from repo root so cas.spec's relative datas (provision/, assets/)
+# and the staged external dirs (data/, platform-tools/) all resolve.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$HERE"
 
 PYTHON="${PYTHON:-python3}"
-SPEC="cas.spec"
+SPEC="scripts/cas.spec"
 
 echo "==> CAS Linux build"
 echo "    repo:   $HERE"
@@ -106,19 +108,20 @@ fi
 # --- stage the EXTERNAL APPDIR siblings beside the binaries -----------------
 # These are NOT bundled (writable / huge / native tools). At runtime cas resolves
 # them via APPDIR = the dir of the executable = dist/cas/.
-PROFILES_SRC="${PROFILES_SRC:-$HERE/profiles}"
+PROFILES_SRC="${PROFILES_SRC:-$HERE/data/profiles}"
 PLATFORM_TOOLS_SRC="${PLATFORM_TOOLS_SRC:-$HERE/platform-tools}"
 
 echo "==> staging external APPDIR dirs into $DIST/"
+mkdir -p "$DIST/data"   # the app reads runtime data via APPDIR/data/
 
-# (1) profiles/ — the profile library. Copy if present (the 7.1 GB payload may be
+# (1) data/profiles/ — the profile library. Copy if present (the 7.1 GB payload may be
 #     intentionally excluded; we still create the dir so the app has a place to write).
 if [ -d "$PROFILES_SRC" ]; then
-  echo "    profiles/        <- $PROFILES_SRC"
-  cp -a "$PROFILES_SRC" "$DIST/profiles"
+  echo "    data/profiles/   <- $PROFILES_SRC"
+  cp -a "$PROFILES_SRC" "$DIST/data/profiles"
 else
-  echo "    profiles/        (source not found; creating empty — drop profiles in later)"
-  mkdir -p "$DIST/profiles"
+  echo "    data/profiles/   (source not found; creating empty — drop profiles in later)"
+  mkdir -p "$DIST/data/profiles"
 fi
 
 # (2) provision/root/firmware/ — per-profile init_boot images. `seal` reads these via
@@ -153,7 +156,7 @@ echo "    CLI:  ($DIST/) ./cas list"
 echo
 echo "    APPDIR layout (everything the app reads is BESIDE the binaries):"
 echo "      $DIST/cas-gui      $DIST/cas"
-echo "      $DIST/profiles/                   (writable; add golden payloads here)"
+echo "      $DIST/data/profiles/              (writable; add golden payloads here)"
 echo "      $DIST/platform-tools/             (adb, fastboot)"
 echo "      $DIST/provision/root/firmware/    (stock/patched init_boot for Seal)"
 echo

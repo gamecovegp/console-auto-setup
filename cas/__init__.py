@@ -7,9 +7,9 @@ Path model (frozen-aware). Two roots, equal in source mode, split when PyInstall
 
   BUNDLE  — read-only resources root. Bundled device-side scripts live at BUNDLE/provision/root/*.sh.
             Frozen: sys._MEIPASS (onefile temp-extract dir, or onedir base). Source: repo ROOT.
-  APPDIR  — writable/external root. profiles/ (3.1 GB, read-write) and external platform-tools/ live
-            beside the executable. Frozen: dir of the executable (for a macOS .app bundle, the dir
-            CONTAINING the .app). Source: repo ROOT.
+  APPDIR  — writable/external root. data/ (profiles, Apps, ES-DE, … — read-write, multi-GB) and
+            external platform-tools/ live beside the executable. Frozen: dir of the executable (for a
+            macOS .app bundle, the dir CONTAINING the .app). Source: repo ROOT. DATA == APPDIR/"data".
 
 In SOURCE mode BUNDLE == APPDIR == repo ROOT, so existing behavior and the unit tests are unchanged.
 
@@ -58,8 +58,11 @@ def _app_root():
 
 
 BUNDLE = _bundle_root()     # read-only bundled resources (device-side scripts)
-APPDIR = _app_root()        # writable/external: profiles/, platform-tools/
+APPDIR = _app_root()        # writable/external: data/, platform-tools/, cas-config.json
 ROOT = APPDIR               # back-compat alias (was: repo root; still == repo root in source mode)
+DATA = APPDIR / "data"      # operator-supplied runtime data, grouped under one dir beside the app:
+#   data/profiles, data/Apps, data/ES-DE/downloaded_media, data/retroarch-cores, … . Source: repo/data.
+#   Frozen: <beside-exe>/data. Build/update scripts stage these into dist/cas/data/.
 
 __version__ = "0.1.0"
 

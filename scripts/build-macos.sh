@@ -55,11 +55,13 @@
 #
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Repo root = PARENT of this script's dir (script lives in scripts/). Build runs from repo root so
+# cas.spec's relative datas (provision/, assets/) and the staged external dirs (data/) resolve.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$HERE"
 
 PYTHON="${PYTHON:-python3}"
-SPEC="cas.spec"
+SPEC="scripts/cas.spec"
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"   # "-" = ad-hoc
 
 echo "==> CAS macOS build"
@@ -135,7 +137,7 @@ xattr -dr com.apple.quarantine "$ONEDIR" 2>/dev/null || true
 # --- stage the EXTERNAL APPDIR siblings BESIDE CAS.app (gotcha #1) ----------
 # For a .app, APPDIR = the dir CONTAINING the .app = dist/. Place the writable/native/
 # firmware trees there so both CAS.app AND the standalone dist/cas/ CLI resolve them.
-PROFILES_SRC="${PROFILES_SRC:-$HERE/profiles}"
+PROFILES_SRC="${PROFILES_SRC:-$HERE/data/profiles}"
 PLATFORM_TOOLS_SRC="${PLATFORM_TOOLS_SRC:-$HERE/platform-tools}"
 DESTS=("dist")          # beside CAS.app
 # Also mirror into the onedir so dist/cas/ works as a self-contained CLI drop too.
@@ -143,13 +145,14 @@ DESTS=("dist")          # beside CAS.app
 
 for D in "${DESTS[@]}"; do
   echo "==> staging external APPDIR dirs into $D/"
-  # profiles/
+  mkdir -p "$D/data"   # the app reads runtime data via APPDIR/data/
+  # data/profiles/
   if [ -d "$PROFILES_SRC" ]; then
-    echo "    profiles/        <- $PROFILES_SRC"
-    rm -rf "$D/profiles"; cp -a "$PROFILES_SRC" "$D/profiles"
+    echo "    data/profiles/   <- $PROFILES_SRC"
+    rm -rf "$D/data/profiles"; cp -a "$PROFILES_SRC" "$D/data/profiles"
   else
-    echo "    profiles/        (source not found; creating empty)"
-    mkdir -p "$D/profiles"
+    echo "    data/profiles/   (source not found; creating empty)"
+    mkdir -p "$D/data/profiles"
   fi
   # provision/root/firmware/  (seal reads APPDIR/<stock_init_boot>)
   if [ -d "$HERE/provision/root/firmware" ]; then

@@ -76,12 +76,37 @@ _APP_LABELS = {
     "org.mupen64plusae.v3.fzurita": "Mupen64Plus  ·  N64",
     "org.es_de.frontend": "ES-DE  ·  front-end",
     "gamehub.lite": "GameHub  ·  PC games",
+    "com.gamecove.gamecove_companion": "GameCove Companion  ·  app",
 }
 
 
 def _app_label(pkg):
     """Human-friendly name for a package (falls back to the package id for anything unmapped)."""
     return _APP_LABELS.get(pkg, pkg)
+
+
+def _human_size(nbytes):
+    """Bytes -> '3.4 GB' / '512 MB' / '— ' for 0."""
+    n = float(nbytes or 0)
+    if n <= 0:
+        return "—"
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.0f} {unit}" if unit in ("B", "KB") else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TB"
+
+
+def _human_eta(secs):
+    """Seconds -> '45s' / '4m 05s' / '1h 12m'."""
+    secs = int(max(0, secs or 0))
+    if secs < 60:
+        return f"{secs}s"
+    m, s = divmod(secs, 60)
+    if m < 60:
+        return f"{m}m {s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h {m:02d}m"
 
 
 class App:
@@ -126,6 +151,7 @@ class App:
 
         setm = tk.Menu(bar, tearoff=0)
         setm.add_command(label="Open library folder", command=self._open_library)
+        setm.add_command(label="Log folder…", command=self.choose_log_dir)
         setm.add_separator()
         setm.add_command(label="NAS login…", command=self.nas_login_dialog)
         bar.add_cascade(label="Settings", menu=setm)
@@ -268,7 +294,7 @@ class App:
         from .config import NAS_DEFAULT, load_config
         target = str(self.profiles_root)
         explicit = os.environ.get("CAS_PROFILES") or load_config().get("library")
-        if not explicit and target == str(APPDIR / "profiles"):
+        if not explicit and target == str(APPDIR / "data" / "profiles"):
             target = NAS_DEFAULT          # default fell back to local — take the user to the NAS instead
         if sys.platform != "win32" and target.startswith("\\\\"):
             target = "smb://" + target[2:].replace("\\", "/")   # \\host\share\.. -> smb://host/share/..
@@ -278,6 +304,22 @@ class App:
                 f"Couldn't open a file manager for:\n{target}\n\n"
                 "On Windows this opens in Explorer. On this machine, open it manually in your file "
                 "manager (paste the address above).")
+
+    def choose_log_dir(self):
+        """Pick a shared folder (e.g. the mounted NAS) where the download/save run-history .jsonl logs are
+        written, so they centralize across benches WITHOUT moving the heavy goldens off the local library.
+        Cancel offers to clear it (logs then fall back to the library root). Logs always fall back to local
+        if the chosen folder is later unreachable, so a run is never lost."""
+        cur = config.load_config().get("log_dir")
+        d = filedialog.askdirectory(
+            title="Run-history log folder — shared/NAS folder for download/save logs  (Cancel to clear)")
+        if d:
+            config.set_log_dir(d)
+            self.log(f"Run-history logs → {d}  (download-history.jsonl / save-history.jsonl).")
+        elif cur and messagebox.askyesno(
+                "CAS", "Clear the shared log folder? Run-history will go to the library root instead."):
+            config.set_log_dir(None)
+            self.log("Run-history logs → library root (shared log folder cleared).")
 
     def _open_path(self, target):
         """Open a folder path or smb:// URL in the OS file manager. Returns True if a viewer was launched.
@@ -310,7 +352,7 @@ class App:
             where = "configured override"
         elif p == NAS_DEFAULT or p.startswith("\\\\"):
             where = "NAS (default)"
-        elif p == str(APPDIR / "profiles"):
+        elif p == str(APPDIR / "data" / "profiles"):
             where = "local — NAS not mounted"
         else:
             where = ""
@@ -423,6 +465,7 @@ class App:
         # Double-click a device row to ASSIGN the dropdown profile to it — quick manual override, works even
         # when auto-match said "(no match)" (e.g. several per-tier profiles share a model). MANUAL ALWAYS WINS.
         self.dev_tree.bind("<Double-1>", self._assign_on_doubleclick)
+        self.dev_tree.bind("<<TreeviewSelect>>", lambda e: self._probe_sd_media())  # auto-detect SD box art
         devbtns = ttk.Frame(devf)
         devbtns.pack(anchor="w", fill="x", pady=(6, 0))
         _tip(ttk.Button(devbtns, text="Refresh devices", command=self.refresh_devices),
@@ -454,27 +497,23 @@ class App:
         self.lib_var = tk.StringVar()
         ttk.Label(prof, textvariable=self.lib_var, foreground="#555").pack(anchor="w", pady=(2, 0))
         self._update_lib_label()
+        # golden status for the selected profile: none saved, or size + estimated download time
+        self.golden_var = tk.StringVar()
+        ttk.Label(prof, textvariable=self.golden_var, foreground="#555").pack(anchor="w")
 
-        # ES-DE box art source (a BENCH setting, persisted in cas-config.json — applies to every Download).
-        # Default: use the SD card (nothing transferred). Optionally push box art from a PC folder to internal.
-        media_row = ttk.Frame(prof)
-        media_row.pack(anchor="w", fill="x", pady=(2, 0))
-        self.media_var = tk.StringVar()
-        _tip(ttk.Button(media_row, text="ES-DE box art…", command=self.choose_es_media),
-             "Where each unit gets ES-DE box art. Default: the SD card (nothing transferred — box art rides "
-             "the SD image). Or pick a PC folder (e.g. .../console-auto-setup/ES-DE) to PUSH box art onto the "
-             "unit's internal storage during Download. Either way ES-DE is pointed at the right place.") \
-            .pack(side="left")
-        ttk.Label(media_row, textvariable=self.media_var, foreground="#555").pack(side="left", padx=(6, 0))
-        self._update_media_label()
+        # The rest of the panel lives in TABS so it isn't one tall wall of controls. The profile selector +
+        # library + golden status above stay visible across all tabs.
+        nb = ttk.Notebook(prof)
+        nb.pack(fill="both", expand=True, pady=(6, 0))
 
-        _tip(ttk.Label(prof, text="Apps & options to include:"),
-             "Tick the apps/emulators this profile installs, plus the behavior options below. "
-             "Untick anything you want to leave OFF for this setup.").pack(anchor="w", pady=(6, 0))
-        # SCROLLABLE apps/options — a long app list never forces the window taller than the screen, so the
-        # action bar + log stay reachable on a small window. 'Save selection' stays pinned below the scroll.
-        scrollwrap = ttk.Frame(prof)
-        scrollwrap.pack(fill="both", expand=True)
+        # ── Tab 1: Apps & options (the manifest) — the primary tab ──
+        apps_tab = ttk.Frame(nb, padding=6)
+        nb.add(apps_tab, text="Apps & options")
+        _tip(ttk.Button(apps_tab, text="Save selection", command=self.save_manifest),
+             "Save which apps and behavior options are ticked. This is exactly what 'Download' installs.") \
+            .pack(side="bottom", anchor="w", pady=(6, 0))          # pinned below the scroll
+        scrollwrap = ttk.Frame(apps_tab)
+        scrollwrap.pack(side="top", fill="both", expand=True)
         _cv = tk.Canvas(scrollwrap, highlightthickness=0, borderwidth=0)
         _vsb = ttk.Scrollbar(scrollwrap, orient="vertical", command=_cv.yview)
         _cv.configure(yscrollcommand=_vsb.set)
@@ -492,9 +531,39 @@ class App:
                                        _cv.bind_all("<Button-4>", _wheel), _cv.bind_all("<Button-5>", _wheel)))
         _cv.bind("<Leave>", lambda e: (_cv.unbind_all("<MouseWheel>"),
                                        _cv.unbind_all("<Button-4>"), _cv.unbind_all("<Button-5>")))
-        _tip(ttk.Button(prof, text="Save selection", command=self.save_manifest),
-             "Save which apps and behavior options are ticked above. This is exactly what "
-             "'Download to device' will install/apply.").pack(anchor="w", pady=(4, 0))
+
+        # ── Tab 2: ES-DE box art (a BENCH setting persisted in cas-config.json) ──
+        media_tab = ttk.Frame(nb, padding=8)
+        nb.add(media_tab, text="ES-DE box art")
+        self.media_mode = tk.StringVar(value="push" if config.es_media_src() else "sd")
+        self.media_path = tk.StringVar(value=config.es_media_src() or "")
+        ttk.Radiobutton(media_tab, text="Use the SD card  (no transfer — box art rides the SD image)",
+                        value="sd", variable=self.media_mode, command=self._on_media_mode).pack(anchor="w")
+        prow = ttk.Frame(media_tab)
+        prow.pack(fill="x", pady=(6, 0))
+        ttk.Radiobutton(prow, text="Push from PC folder:", value="push",
+                        variable=self.media_mode, command=self._on_media_mode).pack(side="left")
+        ttk.Entry(prow, textvariable=self.media_path, width=30).pack(side="left", padx=(4, 0))
+        ttk.Button(prow, text="Browse…", command=self._browse_media).pack(side="left", padx=4)
+        self.sd_media_var = tk.StringVar(value="")    # auto-detected SD status (filled on refresh/select)
+        ttk.Label(media_tab, textvariable=self.sd_media_var, foreground="#555",
+                  wraplength=440, justify="left").pack(anchor="w", pady=(10, 0))
+
+        # ── Tab 3: Root images (for ⓪ Root) — one bundled kit; stock init_boot is the per-family override ──
+        root_tab = ttk.Frame(nb, padding=8)
+        nb.add(root_tab, text="Root images")
+        self.stock_var = tk.StringVar()
+        srow = ttk.Frame(root_tab)
+        srow.pack(fill="x")
+        ttk.Label(srow, text="Stock init_boot:").pack(side="left")
+        ttk.Entry(srow, textvariable=self.stock_var, state="readonly", width=28).pack(side="left", padx=(4, 0))
+        _tip(ttk.Button(srow, text="Browse…", command=self._browse_stock_init_boot),
+             "Override this profile's STOCK init_boot. Blank = the bundled default kit image. ⓪ Root patches "
+             "it with Magisk ON the device and flashes it. Use the unit's OWN firmware image; a different "
+             "model's / SPL's init_boot can bootloop (recoverable on an unlocked unit).").pack(side="left", padx=4)
+        ttk.Label(root_tab, text=f"Default kit (all profiles): {P.pathlib.Path(PV.DEFAULT_STOCK_INIT_BOOT).name}"
+                                 f" + {P.pathlib.Path(PV.DEFAULT_MAGISK_APK).name}",
+                  foreground="#555", wraplength=440, justify="left").pack(anchor="w", pady=(10, 0))
 
         top.columnconfigure(0, weight=1)
         top.columnconfigure(1, weight=1)
@@ -714,10 +783,12 @@ class App:
             w.destroy()
         self.pkg_vars = {}
         self._icon_refs = []                 # keep PhotoImage refs alive (Tk GCs unreferenced images)
+        self._update_golden_status()         # golden: none / size + download ETA
         name = self.prof_var.get()
         if not name:
             return
         prof = P.Profile(P.pathlib.Path(self.profiles_root) / name)
+        self.stock_var.set(prof.meta.get("stock_init_boot", ""))     # blank = the bundled default kit image
         included = set(prof.pkgs())
         # "Select all" — toggles every app checkbox below at once; reflects all-on/all-off live.
         self.selall_var = tk.BooleanVar(value=False)
@@ -737,13 +808,12 @@ class App:
                 cb.configure(image=icon, compound="left")
             _tip(cb, f"Package: {pkg}").pack(anchor="w")   # exact package id on hover (name is friendly)
         self._sync_selall()                                # set the master box from the initial selection
-        # behavior flags: @settings/@hardening/@grants/@homescreen honored by restore.sh on the device;
-        # @companion honored by the PC provision step (installs the Companion app off the PC after restore).
+        # behavior flags: @settings/@hardening/@grants/@homescreen honored by restore.sh on the device.
+        # The GameCove Companion is a normal golden app (ticked in the list above), not a behavior flag.
         self.flag_vars = {}
         flags = prof.flags()
         flag_labels = {"settings": "Display & system settings", "hardening": "Performance & update lock",
-                       "grants": "Folder permissions", "homescreen": "Homescreen layout",
-                       "companion": "Install GameCove Companion app"}
+                       "grants": "Folder permissions", "homescreen": "Homescreen layout"}
         flag_tips = {
             "settings": "Apply the saved display/brightness/animation/screen-timeout preferences.",
             "hardening": "Keep emulators awake (exempt from battery optimization so they're never killed) "
@@ -752,18 +822,12 @@ class App:
                       "ROM/BIOS folders without re-asking on first launch.",
             "homescreen": "Restore the homescreen layout — your app folders, icon/dock arrangement, "
                           "wallpaper (and widgets, best-effort).",
-            "companion": "Install the GameCove Companion app from the PC after restore "
-                         "(Apps/gamecove-companion.apk). Untick to leave it off for this setup.",
         }
         ttk.Label(self.modf, text="— behavior —").pack(anchor="w", pady=(6, 0))
-        for fl in ("settings", "hardening", "grants", "homescreen", "companion"):
+        for fl in ("settings", "hardening", "grants", "homescreen"):
             fv = tk.BooleanVar(value=(flags.get(fl, "on") == "on"))
             self.flag_vars[fl] = fv
             cb = ttk.Checkbutton(self.modf, text=f"{flag_labels.get(fl, fl)}  (@{fl})", variable=fv)
-            if fl == "companion":                       # show the GameCove Companion app's own icon
-                icon = self._icon_from_apks([PV.COMPANION_SRC]) or self._placeholder_icon("GameCove")
-                if icon is not None:
-                    cb.configure(image=icon, compound="left")
             _tip(cb, flag_tips.get(fl, "")).pack(anchor="w")
 
     def refresh_devices(self):
@@ -830,6 +894,7 @@ class App:
         self.dev_tree.tag_configure("manual", foreground="#1a6f1a")
         self.log("refreshed: " + ", ".join(f"{r[0]} → {self.assigned.get(r[0], '?')}" for r in rows)
                  if rows else "refreshed: 0 device(s)")
+        self._probe_sd_media()                             # auto-detect ES-DE/box art on the connected SD
         if changes:                                        # inform the operator an auto-match changed (e.g. SD swap)
             body = "\n".join(f"  {s}:  {old}  →  {new}" for s, old, new in changes)
             messagebox.showinfo(
@@ -1001,8 +1066,17 @@ class App:
                                       initialvalue=self.prof_var.get())
         if not name:
             return
-        if not messagebox.askyesno("CAS", f"Capture device {serial} into profile '{name}'?\n"
-                                          "(the previous payload is kept as .prev for rollback)"):
+        # if the target profile already holds a golden, this OVERWRITES it -> confirm; else just save.
+        prof = P.Profile(P.pathlib.Path(self.profiles_root) / name)
+        if prof.has_golden():
+            if not messagebox.askyesno(
+                    "CAS — overwrite saved golden?",
+                    f"Profile '{name}' already has a saved golden ({_human_size(prof.golden_size())}).\n\n"
+                    f"Overwrite it with device {serial}?\n(the current payload is kept as .prev for rollback)"):
+                return
+        elif not messagebox.askyesno(
+                "CAS — save golden",
+                f"Save device {serial} into profile '{name}'?\n(no golden saved there yet)"):
             return
         def work():
             ok = PV.capture_to_pc(Adb(serial=serial, adb=self.adb_bin), name, _stamp(),
@@ -1034,9 +1108,122 @@ class App:
         mark = "✓" if self._lib_reachable() else "✗ not reachable (map the NAS drive?)"
         self.lib_var.set(f"Library: {root}   {mark}")
 
-    def _update_media_label(self):
-        src = config.es_media_src()
-        self.media_var.set(f"box art: push from {src}" if src else "box art: from SD card (no push)")
+    def _update_golden_status(self):
+        """Show the selected profile's golden: none saved, or its size + an estimated download time
+        (averaged from past Downloads). Sizing runs off-thread so a NAS library never freezes the UI."""
+        if not hasattr(self, "golden_var"):
+            return
+        name = self.prof_var.get()
+        if not name:
+            self.golden_var.set("")
+            return
+        prof = P.Profile(P.pathlib.Path(self.profiles_root) / name)
+        if not prof.has_golden():
+            self.golden_var.set("Golden: none saved yet — use '① Save device → profile' to capture one.")
+            return
+        self.golden_var.set("Golden: saved · sizing…")
+
+        def work():
+            b = prof.golden_size()
+            mbps = config.download_mbps(prof.name)        # prefer this profile's own download history
+            if mbps and b:
+                eta = f" · ~{_human_eta((b / 1048576.0) / mbps)} to download (avg {mbps:.0f} MB/s)"
+            else:
+                eta = " · download time estimated after the first Download"
+            txt = f"Golden: saved · {_human_size(b)}{eta}"
+            self.win.after(0, lambda: self.golden_var.set(txt))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_media_mode(self):
+        """Inline ES-DE box-art radio changed (use the SD card vs push from a PC folder) — persist + react.
+        SD mode auto-detects the card's box art; push mode skips detection (we're uploading anyway)."""
+        if self.media_mode.get() == "push":
+            p = self.media_path.get().strip()
+            if p:
+                config.set_es_media_src(p)
+                self.log(f"ES-DE box art: will PUSH from {p} to each unit on Download.")
+            # empty path -> leave unset; the operator still needs to Browse to a folder
+            self.sd_media_var.set("(push mode — box art comes from the PC folder; SD not checked)")
+        else:
+            config.set_es_media_src(None)
+            self.log("ES-DE box art: using each device's SD card (no per-unit push).")
+            self._probe_sd_media()                          # SD mode -> verify the card actually has box art
+
+    def _browse_media(self):
+        """Pick a PC folder to push box art from (selects the 'push' mode)."""
+        d = filedialog.askdirectory(title="ES-DE box-art folder (an 'ES-DE' or 'downloaded_media' folder)")
+        if d:
+            self.media_path.set(d)
+            self.media_mode.set("push")
+            config.set_es_media_src(d)
+            self.log(f"ES-DE box art: will PUSH from {d} to each unit on Download.")
+
+    def _store_path(self, p):
+        """How a picked Root image is recorded in profile.meta: APPDIR-relative when it lives inside the app
+        bundle (portable across machines + the shared NAS profile library), else the absolute path. Both
+        forms resolve via profiles.resolve_asset at root time."""
+        p = P.pathlib.Path(p).resolve()
+        try:
+            return str(p.relative_to(P.pathlib.Path(APPDIR).resolve()))
+        except ValueError:
+            return str(p)
+
+    def _set_profile_asset(self, key, title, filetypes, var):
+        """Pick a Root image (stock init_boot / Magisk apk) and write it into the SELECTED profile's
+        profile.meta. Persists per-profile so ⓪ Root can find it; the device list isn't touched."""
+        name = self.prof_var.get()
+        if not name:
+            messagebox.showinfo("CAS", "Select a profile first.")
+            return
+        f = filedialog.askopenfilename(title=title, filetypes=filetypes)
+        if not f:
+            return
+        val = self._store_path(f)
+        P.set_meta_key(P.pathlib.Path(self.profiles_root) / name / "profile.meta", key, val)
+        var.set(val)
+        self.log(f"profile '{name}': set {key} = {val}")
+
+    def _browse_stock_init_boot(self):
+        self._set_profile_asset("stock_init_boot", "Pick the device family's STOCK init_boot (.img)",
+                                [("init_boot image", "*.img"), ("all files", "*.*")], self.stock_var)
+
+    def _probe_sd_media(self, serial=None):
+        """AUTO-DETECT whether a device's SD carries an ES-DE folder / box art, shown inline (no button).
+        Probes the selected device, or the only connected one. Best-effort, threaded — never blocks."""
+        if not hasattr(self, "sd_media_var"):
+            return
+        if getattr(self, "media_mode", None) is not None and self.media_mode.get() != "sd":
+            self.sd_media_var.set("(push mode — box art comes from the PC folder; SD not checked)")
+            return                                          # push/upload mode -> no SD detection needed
+        serial = serial or self._selected_serial()
+        if not serial:
+            kids = self.dev_tree.get_children()
+            serial = kids[0] if len(kids) == 1 else None
+        if not serial:
+            self.sd_media_var.set("SD: select a device to auto-detect ES-DE / box art")
+            return
+        self.sd_media_var.set("SD: detecting…")
+
+        def work():
+            try:
+                a = Adb(serial=serial, adb=self.adb_bin)
+                out = a.shell("ls -d /storage/*-*/ES-DE /storage/*-*/ES-DE/downloaded_media "
+                              "/storage/*-*/downloaded_media 2>/dev/null")[1].strip()
+                paths = out.splitlines()
+                esde = any(p.rstrip("/").endswith("/ES-DE") for p in paths)
+                art = any(p.rstrip("/").endswith("downloaded_media") for p in paths)
+                if esde and art:
+                    msg = "SD: ✓ ES-DE folder + box art on the card"
+                elif esde:
+                    msg = "SD: ✓ ES-DE folder on the card — no box art (downloaded_media) inside"
+                elif art:
+                    msg = "SD: ✓ box art on the card — no ES-DE folder"
+                else:
+                    msg = "SD: ✗ no ES-DE folder or box art on the card"
+            except Exception as e:
+                msg = f"SD: could not read ({e})"
+            self.win.after(0, lambda m=msg: self.sd_media_var.set(m))
+        threading.Thread(target=work, daemon=True).start()
 
     def _toggle_all_apps(self):
         """'Select all apps' clicked — set every app checkbox to the master box's state."""
@@ -1176,19 +1363,6 @@ class App:
                 img = None
         cache[key] = img
         return img
-
-    def choose_es_media(self):
-        """Pick the ES-DE box-art SOURCE: a PC folder to push to internal, or clear it to use the SD card."""
-        d = filedialog.askdirectory(
-            title="ES-DE box art: pick a PC folder to PUSH to each unit  (Cancel = use the SD card)")
-        if d:
-            config.set_es_media_src(d)
-            self.log(f"ES-DE box art: will PUSH from {d} to each unit's internal storage on Download.")
-        elif config.es_media_src() and messagebox.askyesno(
-                "ES-DE box art", "Use the SD card for box art instead (stop pushing from the PC)?"):
-            config.set_es_media_src(None)
-            self.log("ES-DE box art: using the SD card (no per-unit push).")
-        self._update_media_label()
 
     def new_profile(self):
         # No regex needed — the profile auto-matches by NAME similarity + SD size. Put the device model and

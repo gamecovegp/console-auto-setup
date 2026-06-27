@@ -39,7 +39,7 @@ Two things are **never** baked into the executable, on every platform:
 
 Only the **three small device-side shell scripts** that the app actually pushes —
 `provision/root/{restore,capture,lib-root}.sh` (~22 KB total) — are bundled read-only
-into the exe (this is exactly the `datas` list in `cas.spec`; `cas.provision` reads them
+into the exe (this is exactly the `datas` list in `scripts/cas.spec`; `cas.provision` reads them
 back at `BUNDLE/provision/root/*.sh`). They're pushed to the device and never user-edited.
 That is the entire payload of the frozen bundle beyond the Python runtime + Tcl/Tk.
 (`provision/root/verify.sh` exists in the source tree but is a manual diagnostic the app
@@ -49,7 +49,8 @@ This is the **BUNDLE vs APPDIR** split that `cas/__init__.py` encodes:
 
 ```
 BUNDLE = sys._MEIPASS if frozen else repo ROOT   # read-only: provision/root/*.sh
-APPDIR = dir(executable) if frozen else repo ROOT # writable: profiles/, platform-tools/
+APPDIR = dir(executable) if frozen else repo ROOT # writable: data/ (profiles, …), platform-tools/
+DATA   = APPDIR/"data"                            # all operator runtime data grouped here
 ```
 
 In source mode `BUNDLE == APPDIR == repo ROOT`, so behavior and the 22 unit tests are
@@ -65,23 +66,24 @@ it once, from one push, with a 3-OS CI matrix:
 - `.github/workflows/build.yml` — `windows-latest` / `ubuntu-latest` / `macos-latest`,
   each: `checkout` → `setup-python 3.14` (auto-fallback to 3.13 if a runner image can't
   resolve 3.14 — the app is version-agnostic stdlib) → run the unit tests →
-  `pip install pyinstaller>=6.11` → `pyinstaller cas.spec` → `upload-artifact dist/`.
-- `cas.spec` — one **onedir** `COLLECT` that emits **both** executables sharing one
+  `pip install pyinstaller>=6.11` → `pyinstaller scripts/cas.spec` → `upload-artifact dist/`.
+- `scripts/cas.spec` — one **onedir** `COLLECT` that emits **both** executables sharing one
   `_internal/` runtime: `cas-gui` (windowed, `python -m cas`) and `cas` (console,
-  `python -m cas.cli`), via the `pyi_entry_gui.py` / `pyi_entry_cli.py` shims.
+  `python -m cas.cli`), via the `scripts/pyi_entry_gui.py` / `scripts/pyi_entry_cli.py` shims.
+  The spec anchors its `datas` to the repo root via `SPECPATH`, so it builds from any CWD.
 
 > PyInstaller is a **build-only** dependency. The app has **no** third-party runtime
 > deps — `tkinter` and `unittest` are stdlib.
 
-**Local Windows build** (instead of pulling the CI artifact): run `build-win.bat`, which
-calls `pyinstaller cas.spec` and leaves the bundle in `dist\cas\`.
+**Local Windows build** (instead of pulling the CI artifact): run `scripts\build-win.bat`, which
+calls `pyinstaller scripts\cas.spec` and leaves the bundle in `dist\cas\`.
 
 ---
 
 ## Operator-side folder layout (Windows)
 
-After grabbing the `cas-windows` CI artifact (or running `build-win.bat`), the operator
-drops `profiles\` and `platform-tools\` **beside the exe**, inside `dist\cas\`:
+After grabbing the `cas-windows` CI artifact (or running `scripts\build-win.bat`), the operator
+drops `data\` (the runtime data) and `platform-tools\` **beside the exe**, inside `dist\cas\`:
 
 ```
 dist\cas\
@@ -89,11 +91,15 @@ dist\cas\
 ├─ cas.exe              # headless CLI for batch/scripts (python -m cas.cli)
 ├─ _internal\           # PyInstaller runtime: Python + Tcl/Tk + bundled provision\root\*.sh
 │  └─ provision\root\   #   restore.sh / capture.sh / lib-root.sh  (read-only, the 3 pushed scripts)
-├─ profiles\            # EXTERNAL, read-write — the 7.1 GB golden library
-│  └─ odin2mini\
-│     ├─ profile.meta
-│     ├─ manifest
-│     └─ golden_root_payload\        (+ golden_root_payload.prev for rollback)
+├─ data\                # EXTERNAL, read-write — all operator runtime data grouped here
+│  ├─ profiles\         #   the 7.1 GB golden library
+│  │  └─ odin2mini\
+│  │     ├─ profile.meta
+│  │     ├─ manifest
+│  │     └─ golden_root_payload\     (+ golden_root_payload.prev for rollback)
+│  ├─ Apps\             #   emulator/companion APKs (gamecove-companion.apk, Magisk-v30.7.apk, …)
+│  ├─ retroarch-cores\  #   curated arm64 RetroArch cores
+│  └─ ES-DE\downloaded_media\        #   ES-DE box art pushed per device
 └─ platform-tools\      # EXTERNAL — vendored adb/fastboot (auto-detected by both exes)
    ├─ adb.exe
    ├─ fastboot.exe
@@ -112,13 +118,13 @@ dist\cas\
   `--fastboot` override it, e.g.
   `cas.exe --adb platform-tools\adb.exe --fastboot platform-tools\fastboot.exe provision-all`.
   (Note: unlike `cas-gui.exe`, the CLI's auto-detect does **not** probe legacy `windows-kit\`.)
-- Updating the golden = replacing/adding dirs under `profiles\`. Updating firmware =
+- Updating the golden = replacing/adding dirs under `data\profiles\`. Updating firmware =
   dropping images under `provision\root\firmware\` next to the exe (APPDIR). Neither
   requires rebuilding the exe.
 
 On **Linux/macOS** the layout is identical (`cas-gui` / `cas` with no `.exe`, `platform-tools/`
 holding the platform's `adb`/`fastboot`); on macOS the `.app`-aware path logic in
-`cas/__init__.py` keeps `profiles/` and `platform-tools/` beside the `.app`, not inside it.
+`cas/__init__.py` keeps `data/` and `platform-tools/` beside the `.app`, not inside it.
 
 ## Updating CAS itself — releases + in-app self-update
 
@@ -141,8 +147,8 @@ git tag v0.2.0 && git push origin v0.2.0
 compares `cas/__init__.py`'s `__version__`, and if a newer build exists prompts to download.
 On accept it downloads this OS's zip, **sha256-verifies** it, then a small helper waits for the
 app to exit, **overwrite-copies** (`robocopy /E`, never `/MIR`) the new bundle over `dist/cas`,
-and relaunches. The external siblings (`profiles/`, `Apps/`, `platform-tools/`, cores, `ES-DE/`,
-`provision/root/firmware/`) live OUTSIDE the bundle, so the swap never touches them.
+and relaunches. The external siblings (`data/` — profiles, Apps, ES-DE, cores — plus
+`platform-tools/` and `provision/root/firmware/`) live OUTSIDE the bundle, so the swap never touches them.
 
 **Bootstrap (one-time):** the updater is in the code, so any build from `main` has it.
 Distribute ONE build to each bench (the app + its sibling folders). After that, tags drive

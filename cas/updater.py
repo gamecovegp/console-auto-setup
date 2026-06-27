@@ -15,8 +15,8 @@ The release publishes a stable `latest.json` asset, reachable at a fixed URL via
 `check()` (pure + network-injected) decides whether a newer build exists for THIS OS.
 `download_and_verify()` fetches + sha256-checks the per-OS zip. `stage_and_relaunch()` extracts
 it and hands off to a tiny OS helper that swaps the bundle once this process exits, then relaunches.
-The runtime siblings (profiles/, Apps/, platform-tools/, cores) live OUTSIDE the bundle, so a swap
-never touches them.
+The runtime siblings (data/ — profiles, Apps, ES-DE, cores — and platform-tools/) live OUTSIDE the
+bundle, so a swap never touches them.
 """
 import hashlib
 import json
@@ -161,8 +161,8 @@ def _write_helper(appdir, new_bundle, platform=None, log=print):
     """Write the wait-swap-relaunch helper for the target OS. Returns its path.
 
     The helper (a) waits for THIS process (pid) to exit, (b) overwrite-copies the new bundle over the
-    install — never purging, so external siblings (profiles/, Apps/, platform-tools/, cores, ES-DE/)
-    survive — and (c) relaunches the GUI, logging every step to <appdir>/cas-update.log.
+    install — never purging, so external siblings (data/ — profiles, Apps, ES-DE, cores — and
+    platform-tools/) survive — and (c) relaunches the GUI, logging every step to <appdir>/cas-update.log.
     """
     platform = platform or sys.platform
     pid = os.getpid()

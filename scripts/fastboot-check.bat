@@ -9,12 +9,13 @@ REM ============================================================
 setlocal enabledelayedexpansion
 pushd "%~dp0"
 
+REM this script lives in scripts\, so repo root (where platform-tools\ sits) is %~dp0..
 set "ADB=adb"
-if exist "%~dp0..\odin-provisioning\platform-tools\adb.exe" set "ADB=%~dp0..\odin-provisioning\platform-tools\adb.exe"
-if exist "%~dp0platform-tools\adb.exe" set "ADB=%~dp0platform-tools\adb.exe"
+if exist "%~dp0..\..\odin-provisioning\platform-tools\adb.exe" set "ADB=%~dp0..\..\odin-provisioning\platform-tools\adb.exe"
+if exist "%~dp0..\platform-tools\adb.exe" set "ADB=%~dp0..\platform-tools\adb.exe"
 set "FB=fastboot"
-if exist "%~dp0..\odin-provisioning\platform-tools\fastboot.exe" set "FB=%~dp0..\odin-provisioning\platform-tools\fastboot.exe"
-if exist "%~dp0platform-tools\fastboot.exe" set "FB=%~dp0platform-tools\fastboot.exe"
+if exist "%~dp0..\..\odin-provisioning\platform-tools\fastboot.exe" set "FB=%~dp0..\..\odin-provisioning\platform-tools\fastboot.exe"
+if exist "%~dp0..\platform-tools\fastboot.exe" set "FB=%~dp0..\platform-tools\fastboot.exe"
 
 echo ============================================================
 echo   FASTBOOT / BOOTLOADER CHECK

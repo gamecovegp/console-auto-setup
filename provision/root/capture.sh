@@ -10,6 +10,20 @@ SD="$(detect_sd)"
 P="${CAS_OUT:-$SD/golden_root_payload}"
 mkdir -p "$P"
 CFAIL=0   # count capture problems; exit non-zero at the end so a corrupt/empty payload is never trusted
+# tar a dir tree with EXCLUDES, robustly. On a LIVE filesystem `tar` exits NON-ZERO when a file changes or
+# vanishes mid-archive — that's BENIGN here, so success is judged by whether the archive is READABLE
+# (tar -tf), NOT by the exit code. (The old code fell back to a NO-exclude tar on ANY non-zero, which on a
+# live /data/data silently re-captured cache/cores/etc. every time — the real cause of oversized goldens.)
+# Only a genuinely UNREADABLE archive falls back to a no-exclude retry, as a last resort.
+# Args: <out.tar> <-C dir> <member> <exclude-path…>   (exclude paths are member-relative, e.g. "$pkg/cache")
+mk_tar(){ out="$1"; cdir="$2"; member="$3"; shift 3
+  exc=""; for e in "$@"; do exc="$exc --exclude=$e"; done
+  tar -cf "$out" -C "$cdir" $exc "$member" 2>/dev/null
+  tar -tf "$out" >/dev/null 2>&1 && return 0
+  warn "archive unreadable WITH excludes ($member) — retrying without excludes (will be larger)"
+  tar -cf "$out" -C "$cdir" "$member" 2>/dev/null
+  tar -tf "$out" >/dev/null 2>&1
+}
 # global.meta: SD serial + the golden's locale/timezone, so restore can CLONE them onto each unit
 # (instead of a hardcoded default). getprop is the source of truth for the persisted tz/locale.
 { echo "golden_serial=${SD##*/}"
@@ -17,6 +31,7 @@ CFAIL=0   # count capture problems; exit non-zero at the end so a corrupt/empty 
   echo "golden_locale=$(getprop persist.sys.locale 2>/dev/null)"
 } > "$P/global.meta"
 user_pkgs > "$P/pkglist.txt"                      # exact app set we clone: ALL 3rd-party minus host tools
+[ -n "$HEAVY_EXCLUDES" ] && log "app-only capture (heavy runtime dirs excluded): $HEAVY_EXCLUDES"
 ok "cloning $(grep -c . "$P/pkglist.txt") apps: $(tr '\n' ' ' < "$P/pkglist.txt")"
 for pkg in $(cat "$P/pkglist.txt"); do
   [ -d "/data/data/$pkg" ] || { warn "$pkg not installed — skip"; continue; }
@@ -25,14 +40,19 @@ for pkg in $(cat "$P/pkglist.txt"); do
   # bundle the app's EXACT installed APK into the payload (self-contained root clone — version-exact,
   # portable, no dependency on the SD's /apps folder). pm path = base + any splits.
   for ap in $(pm path "$pkg" 2>/dev/null | sed 's/^package://'); do cp "$ap" "$P/$pkg/apk/" 2>/dev/null; done
-  # internal app data (skip caches): settings, key binds, mappings, cores (RetroArch), grants-references
-  tar -cf "$P/$pkg/data.tar" -C /data/data --exclude="$pkg/cache" --exclude="$pkg/code_cache" "$pkg" 2>/dev/null \
-    || tar -cf "$P/$pkg/data.tar" -C /data/data "$pkg" 2>/dev/null    # fallback if --exclude unsupported
-  tar -tf "$P/$pkg/data.tar" >/dev/null 2>&1 || { warn "data.tar looks corrupt: $pkg"; CFAIL=$((CFAIL+1)); }
-  # external app data: firmware, BIOS, keys, driver
+  # internal app data — KEEP settings/key binds/mappings/saves/states/grants-references. DROP regenerable or
+  # PC-/APK-sourced bulk: cache+code_cache (regenerate), cores (RetroArch — the PC repushes the full curated
+  # set on restore, so shipping them twice just bloats the golden), app_flutter (Flutter re-extracts these
+  # from the APK on first run — e.g. the Companion's 76 MB kernel_blob), plus any per-app HEAVY dirs (e.g.
+  # GameHub's ~5 GB Wine container — app ships, runtime is set up on-request).
+  heavy=""; for h in $HEAVY_EXCLUDES; do case "$h" in "$pkg"/*) heavy="$heavy $h";; esac; done
+  mk_tar "$P/$pkg/data.tar" /data/data "$pkg" "$pkg/cache" "$pkg/code_cache" "$pkg/cores" "$pkg/app_flutter" $heavy \
+    || { warn "data.tar looks corrupt: $pkg"; CFAIL=$((CFAIL+1)); }
+  # external app data — KEEP firmware/BIOS/keys/nand/driver. DROP regenerable GPU shader caches (rebuilt on
+  # first run — e.g. Eden's ~400 MB files/shader) plus caches/logs.
   if [ -d "/sdcard/Android/data/$pkg" ]; then
-    tar -cf "$P/$pkg/adata.tar" -C /sdcard/Android/data "$pkg" 2>/dev/null
-    tar -tf "$P/$pkg/adata.tar" >/dev/null 2>&1 || { warn "adata.tar looks corrupt: $pkg"; CFAIL=$((CFAIL+1)); }
+    mk_tar "$P/$pkg/adata.tar" /sdcard/Android/data "$pkg" "$pkg/cache" "$pkg/files/shader" "$pkg/files/log" "$pkg/files/logs" \
+      || { warn "adata.tar looks corrupt: $pkg"; CFAIL=$((CFAIL+1)); }
   fi
   # large native-game expansion files (OBB) — some GameHub PC-game ports need them
   [ -d "/sdcard/Android/obb/$pkg" ] && tar -cf "$P/$pkg/obb.tar" -C /sdcard/Android/obb "$pkg" 2>/dev/null

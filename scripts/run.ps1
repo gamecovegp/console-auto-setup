@@ -10,9 +10,10 @@ $ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
-# --- locate adb (bundled in odin-provisioning, else next to us, else PATH) ---
+# --- locate adb (bundled in a sibling odin-provisioning, else repo platform-tools/, else PATH) ---
+# This script lives in scripts/, so repo root is "$root\.." — platform-tools/ sits there.
 $adb = 'adb'
-foreach ($c in @("$root\..\odin-provisioning\platform-tools\adb.exe", "$root\platform-tools\adb.exe")) {
+foreach ($c in @("$root\..\..\odin-provisioning\platform-tools\adb.exe", "$root\..\platform-tools\adb.exe")) {
   if (Test-Path $c) { $adb = $c; break }
 }
 

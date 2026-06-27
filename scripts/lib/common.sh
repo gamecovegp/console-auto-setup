@@ -5,7 +5,8 @@
 
 ADB="${ADB:-adb}"
 if ! command -v "$ADB" >/dev/null 2>&1; then
-  for _c in "../odin-provisioning/platform-tools/adb" "./platform-tools/adb" "/usr/sbin/adb" "/usr/bin/adb"; do
+  # repo root is $DIR/.. (this lib lives in scripts/lib/, sourced by scripts/run.sh which sets DIR).
+  for _c in "${DIR:-.}/../../odin-provisioning/platform-tools/adb" "${DIR:-.}/../platform-tools/adb" "/usr/sbin/adb" "/usr/bin/adb"; do
     [ -x "$_c" ] && ADB="$_c" && break
   done
 fi

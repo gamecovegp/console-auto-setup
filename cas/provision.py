@@ -14,16 +14,27 @@ import tempfile
 import pathlib
 import concurrent.futures
 
-from . import BUNDLE, ROOT
+from . import BUNDLE, DATA
 from . import profiles as P
 
-CORES_SRC = ROOT / "retroarch-cores"   # the curated arm64 RetroArch core set, sourced from the PC
-MEDIA_SRC = ROOT / "ES-DE" / "downloaded_media"   # shared ES-DE box-art pool (box/screenshot/marquee),
+CORES_SRC = DATA / "retroarch-cores"   # the curated arm64 RetroArch core set, sourced from the PC
+MEDIA_SRC = DATA / "ES-DE" / "downloaded_media"   # shared ES-DE box-art pool (box/screenshot/marquee),
 #   pushed per-device but kept OUT of the per-profile golden (it's ~12 GB; bundling it would balloon every
 #   profile). Override the PC source with CAS_MEDIA. The golden carries only the small ES-DE config.
-COMPANION_SRC = ROOT / "Apps" / "gamecove-companion.apk"   # shared GameCove Companion app installer,
-#   sourced from the PC (override CAS_COMPANION_APK). PC-pushed like cores/box-art and kept OUT of the
-#   per-profile golden: one current build serves every unit; bundling it would add ~57 MB to each profile.
+COMPANION_PKG = "com.gamecove.gamecove_companion"   # the GameCove Companion app's package id. It's now a
+#   normal golden app (ticked in the app list); when it's in the manifest its captured module installs
+#   on-device via restore.sh, and the PC-side install below refreshes it to the current PC build.
+COMPANION_SRC = DATA / "Apps" / "gamecove-companion.apk"   # the current GameCove Companion build, sourced
+#   from the PC (override CAS_COMPANION_APK). Installed after restore — when the app is in the manifest —
+#   so every unit ships the current build even if the captured golden module is older.
+
+# DEFAULT ROOT images — used for ANY profile that doesn't override them, so ⓪ Root works fleet-wide with no
+# per-profile picking. One bundled kit serves every profile: the stock init_boot (patched on-device, then
+# flashed) + the Magisk app. APPDIR-relative so they resolve in built kits too (firmware ships under
+# provision/root/, the Magisk apk under data/Apps/ beside the app). Swap these files to change the kit. A
+# profile may still override via stock_init_boot / magisk_apk in its profile.meta.
+DEFAULT_STOCK_INIT_BOOT = "provision/root/firmware/odin2_20231201/init_boot.img"
+DEFAULT_MAGISK_APK = "data/Apps/Magisk-v30.7.apk"
 
 
 def _each_device(devices, worker, parallel, max_workers=8):
@@ -196,12 +207,17 @@ def provision(adb, profile, log=print, dry_push=False, es_media_src=None):
     None (default) = 'sd' mode: nothing is pushed and restore points ES-DE at the unit's SD card."""
     model = adb.getprop("ro.product.model")
     log(f"==> device '{model}' -> profile '{profile.name}'")
-    if adb.is_golden():
-        log("REFUSING: this device carries the golden lock (.cas_golden).")
-        return False
+    # Root FIRST. is_golden() is fail-closed (an ambiguous/blocked `su` reads as golden), so checking it
+    # before root turns the common "MagiskSU grant prompt never tapped" case into a misleading "golden
+    # lock" refusal. Confirming root first means a non-rooted unit gets the correct, actionable message —
+    # and once root is confirmed the golden probe's `su` genuinely answers, so the safety guard still holds.
     if not adb.is_root():
         log("no root — click '⓪ Root device' first (flashes Magisk from the PC), then retry. "
-            "If Magisk is already installed, open it → Superuser → enable the 'Shell' toggle.")
+            "If Magisk is already installed, open it → Superuser → enable the 'Shell' toggle "
+            "(or tap Grant on the on-device Superuser prompt).")
+        return False
+    if adb.is_golden():
+        log("REFUSING: this device carries the golden lock (.cas_golden).")
         return False
     if not adb.has_sd():
         log("REFUSING: no SD card detected. The SD carries ROMs + the volume serial; provisioning "
@@ -221,6 +237,8 @@ def provision(adb, profile, log=print, dry_push=False, es_media_src=None):
     # this tops the set up to the full curated library.)
     push_cores = CORES_SRC.exists() and any(CORES_SRC.glob("*.so"))
 
+    pay_bytes = P.Profile(profile.path).golden_size() if hasattr(profile, "path") else 0
+    t_push = time.monotonic()                          # time push+restore -> records bytes/sec for ETAs
     if not dry_push:
         adb.su(f"rm -rf {DEV}")
         adb.shell(f"mkdir -p {DEV}/payload")
@@ -275,14 +293,57 @@ def provision(adb, profile, log=print, dry_push=False, es_media_src=None):
     if rc != 0:
         log(f"restore FAILED (rc={rc}) — NOT rebooting; the unit is NOT provisioned.")
         return False
+    if not dry_push and pay_bytes:                       # record throughput + which profile/device it was for
+        try:
+            from . import config as _cfg
+            _cfg.record_download(pay_bytes, max(0.001, time.monotonic() - t_push),
+                                 profile=profile.name, serial=getattr(adb, "serial", None), model=model)
+        except Exception:
+            pass
     if not dry_push and "org.es_de.frontend" in pkgs and es_mode == "internal":
         push_es_media(adb, log=log, media_src=es_media_src)   # opt-in: push box art onto internal storage
-    if not dry_push and flags.get("companion", "on") == "on":
-        install_companion(adb, log=log)                # shared Companion app, PC-pushed (gated by @companion)
+    if not dry_push and COMPANION_PKG in pkgs:
+        install_companion(adb, log=log)                # refresh the in-manifest Companion app to the PC build
     if not dry_push:
         adb.su(f"rm -rf {DEV}")
     adb.reboot()
     log(f"==> provisioned '{profile.name}'. Rebooting; verify on device after boot.")
+    return True
+
+
+MAGISK_PATCH = BUNDLE / "provision" / "root" / "magisk-patch"   # aarch64 magiskboot + Magisk's boot_patch.sh
+DEV_PATCH = "/data/local/tmp/cas_magiskpatch"                   # on-device workdir for the patch
+
+
+def patch_init_boot_on_device(adb, stock_init_boot, dest, log=print):
+    """Patch a STOCK init_boot into a Magisk-patched one ON the device, then pull the result to `dest` on
+    the PC for fastboot. Uses Magisk's own boot_patch.sh + the bundled aarch64 magiskboot — which only
+    REWRITE THE IMAGE FILE (no partition touched, no root needed), so it runs on a fresh stock unit. This
+    is what lets root() work from a stock image with no per-profile pre-patched file. Returns True on
+    success; the unit is left unchanged on failure (only an image was produced)."""
+    adb.shell(f"rm -rf {DEV_PATCH}; mkdir -p {DEV_PATCH}")
+    if not adb.push(str(MAGISK_PATCH) + "/.", f"{DEV_PATCH}/"):
+        log("ERROR: could not push the Magisk patch toolkit to the device.")
+        return False
+    if not adb.push(str(stock_init_boot), f"{DEV_PATCH}/init_boot.img"):
+        log("ERROR: could not push the stock init_boot to the device.")
+        return False
+    log("patching the stock init_boot with Magisk ON the device (boot_patch.sh)...")
+    # KEEPVERITY/KEEPFORCEENCRYPT=true: leave dm-verity + encryption alone — we only want root. The shell
+    # exit code isn't reliable across devices, so confirm via a stdout sentinel (same pattern as is_golden).
+    rc, out, err = adb.shell(
+        f"cd {DEV_PATCH} && chmod 755 magiskboot magiskinit magisk init-ld 2>/dev/null; "
+        f"KEEPVERITY=true KEEPFORCEENCRYPT=true sh boot_patch.sh init_boot.img && echo CAS_PATCH_OK")
+    if "CAS_PATCH_OK" not in out:
+        log(f"ERROR: on-device Magisk patch failed (rc={rc}): {((err or out) or '').strip()[:200]}")
+        adb.shell(f"rm -rf {DEV_PATCH}")
+        return False
+    ok = adb.pull(f"{DEV_PATCH}/new-boot.img", str(dest))
+    adb.shell(f"rm -rf {DEV_PATCH}")
+    if not ok:
+        log("ERROR: could not pull the patched init_boot off the device.")
+        return False
+    log("on-device patch complete — Magisk-patched init_boot pulled to the PC.")
     return True
 
 
@@ -310,13 +371,73 @@ def provision_all(make_adb, devices, root="profiles", log=print, profile=None, p
                 if not prof:
                     log(f"[{serial}] no profile matches '{model}'")
                     return ("no-profile", model)
-            ok = provision(adb, prof, log=lambda m, s=serial: log(f"[{s}] {m}"),
-                           es_media_src=es_media_src)
-            return ("ok" if ok else "fail", prof.name)
+            msgs = []                                      # remember each line so a failure can report WHY
+
+            def _wlog(m, s=serial):
+                msgs.append(m)
+                log(f"[{s}] {m}")
+            ok = provision(adb, prof, log=_wlog, es_media_src=es_media_src)
+            if ok:
+                return ("ok", prof.name)
+            # The last line provision() logged before bailing IS the reason (e.g. 'no root…',
+            # 'restore FAILED…'); surface it so the report says WHY, not just which profile.
+            return ("fail", msgs[-1] if msgs else prof.name)
         except Exception as e:  # isolate: one device fault must not abort the whole batch
             log(f"[{serial}] ERROR: {e}")
             return ("error", str(e))
-    return _each_device(devices, worker, parallel)
+    t0 = time.monotonic()
+    results = _each_device(devices, worker, parallel)
+    _log_download_run(root, results, time.monotonic() - t0, log)   # whole-run record -> the NAS library
+    return results
+
+
+def _append_history(root, fname, rec, log=print, summary=""):
+    """Append ONE JSON-line record to <history_dir>/<fname> — the centralized run history. Destination is the
+    shared NAS `log_dir` when configured + reachable (unified cross-bench logs), else the library root
+    (`root`). Best-effort: a write failure WARNS, never aborts; the summary shows WHERE it landed."""
+    import json
+    from . import config
+    dest = config.history_dir(default=root)
+    path = pathlib.Path(dest) / fname
+    try:
+        with open(path, "a", encoding="utf-8") as f:        # one JSON line per event (small -> ~atomic append)
+            f.write(json.dumps(rec) + "\n")
+        if summary:
+            log(f"{summary}  → {path}")                      # show the exact destination (NAS vs local)
+        return True
+    except OSError as e:
+        log(f"warning: could not write {fname} to {dest} ({e}) — is the log dir / NAS reachable?")
+        return False
+
+
+def _log_download_run(root, results, elapsed, log=print):
+    """Append ONE whole-Download record to <library>/download-history.jsonl. Captures the run's TOTAL length
+    (bytes + seconds) and every device + its profile."""
+    import datetime
+    devs, total = [], 0
+    for serial, (status, detail) in results.items():
+        e = {"serial": serial, "status": status}
+        if status == "ok":
+            e["profile"] = detail
+            try:
+                e["bytes"] = P.Profile(pathlib.Path(root) / detail).golden_size()
+            except Exception:
+                e["bytes"] = 0
+            total += e["bytes"]
+        devs.append(e)
+    if not any(d["status"] in ("ok", "fail", "error") for d in devs):
+        return                                              # nothing was actually provisioned -> don't log
+    rec = {
+        "when": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "total_bytes": total,
+        "total_secs": round(elapsed, 1),
+        "ok": sum(1 for d in devs if d["status"] == "ok"),
+        "failed": sum(1 for d in devs if d["status"] in ("fail", "error")),
+        "devices": devs,
+    }
+    _append_history(root, "download-history.jsonl", rec, log,
+                    summary=(f"download run logged → download-history.jsonl: {len(devs)} device(s), "
+                             f"{total // 1048576} MB total in {rec['total_secs']:.0f}s"))
 
 
 def capture_to_pc(adb, name, stamp, root="profiles", log=print, dry_pull=False):
@@ -324,6 +445,7 @@ def capture_to_pc(adb, name, stamp, root="profiles", log=print, dry_pull=False):
     ONLY after the new payload is pulled AND verified — a failed capture/pull never destroys it."""
     pdir = pathlib.Path(root) / name
     dest = pdir / "golden_root_payload"
+    t0 = time.monotonic()
     if not dry_pull:
         adb.shell("mkdir -p /data/local/tmp/cas_scripts")
         if not adb.push(CAPTURE, "/data/local/tmp/cas_scripts/") or \
@@ -376,25 +498,35 @@ def capture_to_pc(adb, name, stamp, root="profiles", log=print, dry_pull=False):
             pl = dest / "pkglist.txt"
             apps = pl.read_text().splitlines() if pl.exists() else []
             P.save_manifest(man, [a.strip() for a in apps if a.strip()],
-                            {"settings": "on", "hardening": "on", "grants": "on", "homescreen": "on",
-                             "companion": "on"},
+                            {"settings": "on", "hardening": "on", "grants": "on", "homescreen": "on"},
                             header=f"# {name} default manifest")
+    if not dry_pull:                                        # log the Save to the centralized NAS history
+        import datetime
+        b = P.Profile(pdir).golden_size()
+        _append_history(root, "save-history.jsonl", {
+            "when": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "profile": name,
+            "serial": getattr(adb, "serial", None),
+            "bytes": b,
+            "secs": round(time.monotonic() - t0, 1),
+        }, log, summary=f"save logged → save-history.jsonl: {name} ({b // 1048576} MB)")
     log(f"==> captured golden into profiles/{name} (prev kept for rollback)")
     return True
 
 
-def root(adb, fastboot, patched_init_boot, magisk_apk=None, log=print, wait=True, model_match=None,
+def root(adb, fastboot, stock_init_boot, magisk_apk=None, log=print, wait=True, model_match=None,
          force=False):
-    """Root a FRESH unit, everything sourced from the PC (run BEFORE provision). Inverse of seal():
-      1) check the patched init_boot matches THIS device model (wrong-model flash bricks boot)
-      2) flash the Magisk-PATCHED init_boot FROM THE PC via fastboot, reboot, confirm it booted
-      3) install the Magisk APP FROM THE PC (adb install pushes the apk off the PC — never the SD)
+    """Root a FRESH unit — Magisk-FIRST, everything sourced from the PC (run BEFORE provision). Inverse of
+    seal():
+      1) install the Magisk APP from the PC (the manager — FIRST, so it's present to own root)
+      2) patch the unit's OWN STOCK init_boot into a Magisk-patched one ON the device (boot_patch.sh —
+         rewrites the image file, needs no root, runs on a fresh stock unit), pulled back to the PC
+      3) flash the patched init_boot to the DETECTED target (init_boot_<active slot>) via fastboot
       4) verify adb-shell root; if MagiskSU hasn't granted the shell uid yet, say exactly what to tap
-    Never strands the unit in fastboot. Refuses to re-flash the golden. Bootloader must be UNLOCKED.
-    force=True proceeds on a model MISMATCH (e.g. a same-chipset sibling) with a loud warning instead of
-    refusing — the caller is responsible for having confirmed + having the unit's own stock init_boot to
-    recover with."""
-    log("ROOT: installing Magisk on this unit (sourced from the PC).")
+    No pre-patched per-profile image is needed — only the unit's stock init_boot (the profile's
+    stock_init_boot). Never strands the unit in fastboot. Refuses the golden. Bootloader must be UNLOCKED.
+    force=True proceeds on a model MISMATCH (e.g. a same-chipset sibling) with a loud warning."""
+    log("ROOT: installing Magisk on this unit (Magisk-first, sourced from the PC).")
 
     rooted = adb.is_root()
     # never re-flash the GOLDEN. is_golden() needs root to read the marker, so only check when rooted
@@ -402,15 +534,14 @@ def root(adb, fastboot, patched_init_boot, magisk_apk=None, log=print, wait=True
     if rooted and adb.is_golden():
         log("REFUSING: this device carries the golden lock (.cas_golden) — will not re-flash it.")
         return False
-    # Already rooted (and not the golden) -> nothing to do; return FAST. Crucially we do NOT re-flash and
-    # do NOT re-install Magisk: re-installing on a live root is slow (11 MB) and disturbs the MagiskSU
-    # shell grant, which made batch root look "stuck"/slow on the first device.
+    # Already rooted (and not the golden) -> nothing to do; return FAST (re-flashing a live root is slow and
+    # disturbs the MagiskSU shell grant, which made batch root look "stuck" on the first device).
     if rooted:
         log("already rooted — Magisk is active; nothing to flash or install. Done.")
         return True
 
-    # --- the unit is NOT rooted: flash the patched init_boot + install the Magisk app ---
-    # (1) model cross-check — flashing another model's init_boot bricks boot. getprop needs no root.
+    # --- the unit is NOT rooted ---
+    # (0) model cross-check — patching/flashing another model's init_boot bricks boot. getprop needs no root.
     if model_match:
         model = adb.getprop("ro.product.model")
         if not re.search(model_match, model):
@@ -419,46 +550,56 @@ def root(adb, fastboot, patched_init_boot, magisk_apk=None, log=print, wait=True
                     "Wrong-model init_boot would brick the unit. Pick the matching profile, or force.")
                 return False
             log(f"⚠ WARNING: device '{model}' does NOT match the profile ('{model_match}') — proceeding by "
-                "FORCE. This init_boot was built for a DIFFERENT device; if the unit bootloops, re-flash "
+                "FORCE. This stock init_boot is for a DIFFERENT device; if the unit bootloops, re-flash "
                 "its OWN stock init_boot to recover.")
 
-    patched = str(patched_init_boot)
-    if not pathlib.Path(patched).exists():
-        log(f"ERROR: patched init_boot not found on PC: {patched} — cannot root.")
+    stock = str(stock_init_boot)
+    if not pathlib.Path(stock).exists():
+        log(f"ERROR: stock init_boot not found on PC: {stock} — cannot root. Put the unit's stock "
+            "init_boot (from its firmware) in the profile's stock_init_boot.")
         return False
 
-    # (2) flash the Magisk-patched init_boot.
-    log("step 1/3: rebooting to bootloader to flash the Magisk-patched init_boot (from PC)...")
-    adb.raw("reboot", "bootloader")
-    if wait and not fastboot.wait(on_tick=lambda s: log(f"  …waiting for fastboot ({s}s)")):
-        log("ERROR: device did not enter fastboot. Aborting (it should still be bootable).")
-        return False
-    log("step 2/3: flashing init_boot_a (patched)...")
-    if not fastboot.flash("init_boot_a", patched):
-        log("ERROR: patched init_boot flash failed (is the bootloader UNLOCKED?) — booting back to "
-            "the OS, NOT rooted.")
-        fastboot.reboot()                              # never strand the unit in fastboot
-        return False
-    fastboot.reboot()
-    log("flashed; rebooting to system. step 3/3: waiting for the device to finish booting (1-3 min)...")
+    # Resolve the flash target (partition + active slot) NOW, while adb is still up — it can't be read once
+    # the unit is in fastboot. Detected, not hardcoded, so a slot-B / pre-init_boot unit isn't mis-flashed.
+    target = adb.boot_flash_target()
+
+    # (1) install the Magisk APP FIRST (from the PC). Needs no root; it's the manager that owns root after
+    #     the flash. `adb install` pushes the apk off the PC filesystem (never the SD), then pm-installs it.
+    if magisk_apk:
+        mp = str(magisk_apk)
+        if not pathlib.Path(mp).exists():
+            log(f"warning: Magisk apk not found on PC: {mp} — skipping app install (will still root via flash).")
+        else:
+            log(f"step 1/4: installing the Magisk app from PC: {pathlib.Path(mp).name} ...")
+            rc, _, err = adb.raw("install", "-r", mp)
+            log("Magisk app installed (from PC)." if rc == 0 else
+                f"warning: Magisk app install returned {rc}: {err.strip()} (continuing to flash).")
+
+    # (2) patch the unit's STOCK init_boot into a Magisk-patched one ON the device, pulled to a PC temp.
+    with tempfile.TemporaryDirectory() as td:
+        patched = str(pathlib.Path(td) / "patched_init_boot.img")
+        log("step 2/4: patching the stock init_boot with Magisk on the device...")
+        if not patch_init_boot_on_device(adb, stock, patched, log=log):
+            log("ERROR: on-device Magisk patch failed — NOT flashing, unit unchanged.")
+            return False
+
+        # (3) flash the patched init_boot.
+        log(f"step 3/4: rebooting to bootloader to flash the patched {target}...")
+        adb.raw("reboot", "bootloader")
+        if wait and not fastboot.wait(on_tick=lambda s: log(f"  …waiting for fastboot ({s}s)")):
+            log("ERROR: device did not enter fastboot. Aborting (it should still be bootable).")
+            return False
+        if not fastboot.flash(target, patched):
+            log("ERROR: patched init_boot flash failed (is the bootloader UNLOCKED?) — booting back to "
+                "the OS, NOT rooted.")
+            fastboot.reboot()                          # never strand the unit in fastboot
+            return False
+        fastboot.reboot()
+    log("flashed; rebooting to system. step 4/4: waiting for the device to finish booting (1-3 min)...")
     if wait and not adb.wait_boot(on_tick=lambda s: log(f"  …still booting ({s}s)")):
         log("ERROR: unit did not boot after the root flash — investigate before retrying.")
         return False
     log("device booted.")
-
-    # (3) install the Magisk APP from the PC. `adb install` pushes the apk off the PC filesystem (never
-    #     the SD), then pm-installs it — so the app is present to manage root.
-    if magisk_apk:
-        mp = str(magisk_apk)
-        if not pathlib.Path(mp).exists():
-            log(f"warning: Magisk apk not found on PC: {mp} — skipped app install (root via init_boot active).")
-        else:
-            log(f"installing the Magisk app from PC: {pathlib.Path(mp).name} ...")
-            rc, _, err = adb.raw("install", "-r", mp)
-            if rc == 0:
-                log("Magisk app installed (from PC).")
-            else:
-                log(f"warning: Magisk app install returned {rc}: {err.strip()} (root via init_boot still active).")
 
     # (4) verify adb-shell root.
     if not wait:
@@ -504,6 +645,11 @@ def seal(adb, fastboot, stock_init_boot, log=print, wait=True, model_match=None,
         log(f"ERROR: stock init_boot not found: {stock} — cannot un-root. Aborting seal.")
         return False
 
+    # Detect the flash target (partition + active slot) while adb is up — lost once in fastboot. Flashing
+    # stock to the wrong/idle slot would leave the unit still rooted (the post-flash is_root check catches
+    # that, but targeting the live slot is what actually un-roots it).
+    target = adb.boot_flash_target()
+
     if adb.is_root():
         rc, _, err = adb.su("pm uninstall com.topjohnwu.magisk")
         if rc != 0:
@@ -518,7 +664,7 @@ def seal(adb, fastboot, stock_init_boot, log=print, wait=True, model_match=None,
     if wait and not fastboot.wait(on_tick=lambda s: log(f"  …waiting for fastboot ({s}s)")):
         log("ERROR: device did not enter fastboot. Aborting seal (device should still be bootable).")
         return False
-    if not fastboot.flash("init_boot_a", stock):
+    if not fastboot.flash(target, stock):
         log("ERROR: stock init_boot flash failed — booting back to the (still-rooted) OS, NOT sealing.")
         fastboot.reboot()                                  # never strand the unit in fastboot
         return False
@@ -548,7 +694,7 @@ def root_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
     """Batch ROOT: every connected 'device'-state unit, in PARALLEL by default (all units reboot/flash at
     once — the big win, since root is reboot-dominated). Profile per device: profile_map[serial] > `profile`
     > auto-match by model. force_serials = serials to flash even on a model mismatch (a deliberate, already-
-    confirmed assignment). Devices with no profile / no patched_init_boot / the golden are skipped. Returns
+    confirmed assignment). Devices with no profile / no stock_init_boot / the golden are skipped. Returns
     {serial: (status, detail)}, failures isolated.
     (param is profiles_root, NOT root, so it can't shadow the root() function called below.)"""
     appdir = pathlib.Path(appdir) if appdir else pathlib.Path(".")
@@ -576,13 +722,12 @@ def root_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
                 if not prof:
                     log(f"[{serial}] no profile matches '{model}' — skip")
                     return ("no-profile", model)
-            patched_rel = prof.meta.get("patched_init_boot")
-            if not patched_rel:
-                log(f"[{serial}] profile '{prof.name}' has no patched_init_boot — skip")
-                return ("no-init_boot", prof.name)
-            magisk_rel = prof.meta.get("magisk_apk")
-            ok = root(adb, make_fb(serial), appdir / patched_rel,
-                      magisk_apk=(appdir / magisk_rel) if magisk_rel else None,
+            # Default kit images for ANY profile that doesn't override them — so Root works fleet-wide
+            # without per-profile picking. A profile.meta key still wins when present.
+            stock_rel = prof.meta.get("stock_init_boot") or DEFAULT_STOCK_INIT_BOOT
+            magisk_rel = prof.meta.get("magisk_apk") or DEFAULT_MAGISK_APK
+            ok = root(adb, make_fb(serial), P.resolve_asset(prof, appdir, stock_rel),
+                      magisk_apk=P.resolve_asset(prof, appdir, magisk_rel),
                       log=lambda m, s=serial: log(f"[{s}] {m}"),
                       model_match=prof.meta.get("model_match"), force=(serial in force_serials))
             return ("ok" if ok else "fail", prof.name)
@@ -624,11 +769,12 @@ def seal_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
                 if not prof:
                     log(f"[{serial}] no profile matches '{model}' — skip")
                     return ("no-profile", model)
-            stock_rel = prof.meta.get("stock_init_boot")
-            if not stock_rel:
-                log(f"[{serial}] profile '{prof.name}' has no stock_init_boot — skip")
-                return ("no-init_boot", prof.name)
-            ok = seal(adb, make_fb(serial), appdir / stock_rel,
+            # Mirror root_all: fall back to the bundled default kit's STOCK init_boot so ③ Lock un-roots
+            # fleet-wide with no per-profile picking (a profile.meta override still wins). It's the same image
+            # whose Magisk-patched form ⓪ Root flashed, so flashing it back cleanly un-roots. seal() still
+            # model-checks (won't flash a wrong-model image) and CONFIRMS un-root before disabling adb.
+            stock_rel = prof.meta.get("stock_init_boot") or DEFAULT_STOCK_INIT_BOOT
+            ok = seal(adb, make_fb(serial), P.resolve_asset(prof, appdir, stock_rel),
                       log=lambda m, s=serial: log(f"[{s}] {m}"),
                       model_match=prof.meta.get("model_match"), force=(serial in force_serials))
             return ("ok" if ok else "fail", prof.name)

@@ -1,8 +1,0 @@
-prod.keys (decryption keys);file;files/keys/prod.keys;REQUIRED. Put prod.keys in files/keys/. Clones via Method A when android-data is rw.
-title.keys (optional);file;files/keys/title.keys;Optional companion to prod.keys.
-Switch firmware (registered);filedir;files/nand/system/Contents/registered;Install firmware in Eden. Large. Clones via files/. Path can vary by build.
-GPU driver installed (Turnip);filedir;files/gpu_drivers;Eden > Settings > GPU driver manager. Odin = Adreno -> a Mr.Purple Turnip build.
-GPU driver selected;show;files/config/config.ini::driver|gpu;Confirm the installed driver is selected. Also check qt-config.ini.
-Disable device/screen overlay;show;files/config/config.ini::overlay|on_screen|osc|fps;Identify the overlay key here, then we auto-set it OFF.
-Switch games folder mapped;map;gamedirs|game_dirs;Setup Emulator Data -> add the switch ROMs folder.
-All-Files-Access;perm;-;Grant so Eden reads keys/firmware/games. run: run.bat grant eden

@@ -20,6 +20,11 @@ manifest_flag(){ f="$1"; n="$2"; sed -n "s/^@${n}[[:space:]]\{1,\}//p" "$f" 2>/d
 # Host/provisioning tools that must NOT be cloned onto shipped units (seal removes them anyway), plus
 # Magisk (root provides it per-unit via init_boot). Everything else third-party gets cloned.
 EXCLUDE_PKGS="com.termux moe.shizuku.privileged.api com.topjohnwu.magisk"
+# Per-app HEAVY data dirs excluded from the captured data.tar — the app + its small config still ship (so it
+# stays a tickable option in the list), but a regenerable/reconfigurable bulk payload does NOT bloat the
+# golden. GameHub's Wine/Box64 container (files/usr, ~5 GB) is set up on-request per unit, so the golden
+# ships GameHub APP-ONLY. Format: "pkg/reldir pkg/reldir …" (member-relative — matches mk_tar's exclude form).
+HEAVY_EXCLUDES="gamehub.lite/files/usr gamehub.lite/files/xj_winemu"
 # Every user-installed app on the golden, minus the host tools — this is the set capture clones.
 user_pkgs(){
   for p in $(pm list packages -3 2>/dev/null | sed 's/^package://'); do

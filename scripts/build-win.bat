@@ -12,7 +12,8 @@ REM     py -3.14 -m pip install "pyinstaller>=6.11"     REM 6.11+ supports Pytho
 REM ============================================================================
 
 setlocal
-cd /d "%~dp0"
+REM script lives in scripts\ — build from the repo root so cas.spec's relative datas resolve.
+cd /d "%~dp0.."
 
 echo(
 echo === [1/4] Sanity: Python + PyInstaller ===
@@ -30,8 +31,8 @@ if exist "build" rmdir /s /q "build"
 if exist "dist"  rmdir /s /q "dist"
 
 echo(
-echo === [3/4] PyInstaller (cas.spec -^> dist\cas\) ===
-%PY% -m PyInstaller --noconfirm --clean cas.spec || (
+echo === [3/4] PyInstaller (scripts\cas.spec -^> dist\cas\) ===
+%PY% -m PyInstaller --noconfirm --clean scripts\cas.spec || (
     echo ERROR: PyInstaller build failed. & exit /b 1
 )
 

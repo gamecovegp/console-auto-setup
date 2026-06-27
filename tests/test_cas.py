@@ -19,10 +19,17 @@ class FakeRunner:
     """Records calls; returns canned (rc, out, err) shaped like the real adb."""
 
     def __init__(self, model="Odin2 Mini", golden=False, root=True, boot="1", sd=True,
-                 push_ok=True, pull_ok=True):
+                 push_ok=True, pull_ok=True, su_blocked=False, slot="_a", first_api="33"):
         self.calls = []
         self.model, self.golden, self.root, self.boot, self.sd = model, golden, root, boot, sd
         self.push_ok, self.pull_ok = push_ok, pull_ok
+        # su_blocked models a real device whose MagiskSU grant prompt was never tapped: EVERY `su` call
+        # hangs until the runner's timeout fires, which subprocess_runner reports as (124, "", "timeout…").
+        self.su_blocked = su_blocked
+        # slot = ro.boot.slot_suffix ('_a'/'_b', or '' for A-only); first_api = ro.product.first_api_level
+        # (>=33 means the unit LAUNCHED on Android 13+ and so has an init_boot partition). Defaults model an
+        # A/B A13 unit on slot A — so the detected flash target stays 'init_boot_a' (existing assertions hold).
+        self.slot, self.first_api = slot, first_api
 
     def __call__(self, args, input_text=None, timeout=900):
         self.calls.append(list(args))
@@ -36,6 +43,8 @@ class FakeRunner:
             return (0 if self.pull_ok else 1), "", ""
         if "shell" in args:
             if "/debug_ramdisk/su" in args:
+                if self.su_blocked:
+                    return 124, "", f"timeout after {timeout}s"
                 cmd = args[-1]
                 if cmd == "id":
                     return (0, "uid=0(root)\n", "") if self.root else (1, "", "Permission denied")
@@ -49,9 +58,13 @@ class FakeRunner:
                     return 0, ("/storage/9C33-6BBD\n" if self.sd else ""), ""
                 return 0, "", ""
             tail = args[-1]
+            if "boot_patch.sh" in tail:                 # on-device Magisk patch -> stdout sentinel
+                return 0, "- Patching ramdisk\n- Repacking boot image\nCAS_PATCH_OK\n", ""
             if tail.startswith("getprop"):
                 key = tail.split()[-1]
-                val = {"ro.product.model": self.model, "sys.boot_completed": self.boot}.get(key, "")
+                val = {"ro.product.model": self.model, "sys.boot_completed": self.boot,
+                       "ro.boot.slot_suffix": self.slot,
+                       "ro.product.first_api_level": self.first_api}.get(key, "")
                 return 0, val + "\n", ""
             if "CAS_XOK" in tail:                       # box-art tar unpack confirmation sentinel
                 return 0, "CAS_XOK\n", ""
@@ -91,6 +104,19 @@ class TestAdb(unittest.TestCase):
 
     def test_not_root(self):
         self.assertFalse(Adb(runner=FakeRunner(root=False)).is_root())
+
+    def test_boot_flash_target_init_boot_ab(self):
+        # A unit launched on Android 13+ (first_api>=33) is A/B -> flash 'init_boot_<active slot>'.
+        self.assertEqual(Adb(runner=FakeRunner(first_api="33", slot="_a")).boot_flash_target(), "init_boot_a")
+        self.assertEqual(Adb(runner=FakeRunner(first_api="33", slot="_b")).boot_flash_target(), "init_boot_b")
+
+    def test_boot_flash_target_legacy_boot(self):
+        # A unit that did NOT launch on 13 (first_api<33) keeps the patchable ramdisk in 'boot', not init_boot.
+        self.assertEqual(Adb(runner=FakeRunner(first_api="31", slot="_a")).boot_flash_target(), "boot_a")
+
+    def test_boot_flash_target_a_only(self):
+        # A-only device (empty slot_suffix) -> no slot suffix appended.
+        self.assertEqual(Adb(runner=FakeRunner(first_api="33", slot="")).boot_flash_target(), "init_boot")
 
     def test_list_devices(self):
         devs = list_devices(runner=FakeRunner())
@@ -146,6 +172,31 @@ class TestProfiles(unittest.TestCase):
                              ["org.es_de.frontend", "dev.eden.eden_emulator", "org.citra.emu"])
             self.assertEqual(prof.flags(), {"settings": "on", "hardening": "on"})
 
+    def test_set_meta_key_updates_existing_and_adds_new(self):
+        # The GUI's 'Root images' Browse writes stock_init_boot / magisk_apk into profile.meta in place,
+        # leaving other keys + comments intact.
+        with tempfile.TemporaryDirectory() as t:
+            m = pathlib.Path(t) / "profile.meta"
+            m.write_text("# header comment\nmodel_match=Foo\nfrontend=es-de\n")
+            P.set_meta_key(m, "frontend", "retroarch")                                  # update in place
+            P.set_meta_key(m, "stock_init_boot", "provision/root/firmware/x/init_boot.img")  # append new
+            meta = P._read_meta(m)
+            self.assertEqual(meta["frontend"], "retroarch")
+            self.assertEqual(meta["model_match"], "Foo")                                # untouched
+            self.assertEqual(meta["stock_init_boot"], "provision/root/firmware/x/init_boot.img")
+            self.assertIn("# header comment", m.read_text())                            # comments preserved
+
+    def test_resolve_asset_prefers_profile_local_then_appdir(self):
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, "p", "M")
+            (prof.path / "patched_init_boot.img").write_bytes(b"x")         # captured: lives in the profile
+            # profile-local file wins even though appdir has no such file
+            self.assertEqual(P.resolve_asset(prof, t, "patched_init_boot.img"),
+                             prof.path / "patched_init_boot.img")
+            # a name that only exists appdir-relative (the shared firmware library) falls back to appdir
+            (pathlib.Path(t) / "shared.img").write_bytes(b"x")
+            self.assertEqual(P.resolve_asset(prof, t, "shared.img"), pathlib.Path(t) / "shared.img")
+
     def test_match_profile(self):
         with tempfile.TemporaryDirectory() as t:
             make_profile(t, "odin2mini", "Odin2 ?Mini")
@@ -185,6 +236,19 @@ class TestProfiles(unittest.TestCase):
             self.assertEqual(P.match_profile("Retroid Pocket 6", t, sd_gb=238).name, "retroid-pocket-6-256")
             self.assertIsNone(P.match_profile("Retroid Pocket 6", t))    # no size -> ambiguous, assign manually
 
+    def test_golden_presence_and_size(self):
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t)                              # writes global.meta + per-app data.tar
+            self.assertTrue(prof.has_golden())
+            self.assertGreater(prof.golden_size(), 0)
+            d = pathlib.Path(t) / "empty"
+            d.mkdir()
+            (d / "profile.meta").write_text("model_match=\n")
+            (d / "manifest").write_text("# empty\n")
+            empty = P.Profile(d)
+            self.assertFalse(empty.has_golden())               # no payload -> no golden
+            self.assertEqual(empty.golden_size(), 0)
+
     def test_internal_for(self):
         self.assertEqual(P.internal_for("org.es_de.frontend"), "ES-DE")
         self.assertEqual(P.internal_for("com.retroarch.aarch64"), "RetroArch")
@@ -218,7 +282,7 @@ class TestConfig(unittest.TestCase):
             saved = C.nas_default_path
             try:
                 C.nas_default_path = lambda: str(pathlib.Path(t) / "no-nas-here")  # NAS not mounted
-                self.assertEqual(C.library_root(), APPDIR / "profiles")
+                self.assertEqual(C.library_root(), APPDIR / "data" / "profiles")
             finally:
                 C.nas_default_path = saved
 
@@ -273,6 +337,26 @@ class TestConfig(unittest.TestCase):
             C.set_device_profile("ABC123", None)                                     # forget one
             self.assertNotIn("ABC123", C.get_device_profiles())
             self.assertIn("2ee078bd", C.get_device_profiles())                        # the other survives
+
+    def test_download_stats_average_and_tracking(self):
+        from cas import config as C
+        with tempfile.TemporaryDirectory() as t:
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cas-config.json")
+            self.assertIsNone(C.download_mbps())                 # nothing recorded yet
+            C.record_download(100 * 1048576, 10, profile="rp6-512", serial="2ee078bd", model="Retroid Pocket 6")
+            C.record_download(100 * 1048576, 10, profile="rp6-512", serial="2ee078bd")
+            self.assertAlmostEqual(C.download_mbps(), 10.0, places=3)
+            # the record carries which profile + device
+            rec = C.download_stats()[-1]
+            self.assertEqual(rec["profile"], "rp6-512")
+            self.assertEqual(rec["serial"], "2ee078bd")
+            # a slower sample for ANOTHER profile -> per-profile avg prefers the matching profile's history
+            C.record_download(100 * 1048576, 50, profile="odin2-mini", serial="ABC123")  # 2 MB/s
+            self.assertAlmostEqual(C.download_mbps("rp6-512"), 10.0, places=3)
+            self.assertAlmostEqual(C.download_mbps("odin2-mini"), 2.0, places=3)
+            C.record_download(0, 5)                              # ignored (no bytes)
+            C.record_download(50 * 1048576, 0)                   # ignored (no time)
+            self.assertAlmostEqual(C.download_mbps("rp6-512"), 10.0, places=3)
 
     def test_nas_share_root(self):
         from cas import config as C
@@ -366,6 +450,31 @@ class TestProvision(unittest.TestCase):
             prof = make_profile(t)
             ok = PV.provision(Adb(runner=FakeRunner(root=False)), prof, log=lambda m: None, dry_push=True)
             self.assertFalse(ok)
+
+    def test_provision_blocked_su_reports_no_root_not_golden(self):
+        # Real-world failure: Magisk's grant prompt was never tapped, so every `su` BLOCKS -> timeout (124).
+        # is_golden() is fail-closed, so if it runs FIRST it wrongly cries "golden lock". The user must see
+        # the real cause — no root — so they grant Magisk/root instead of thinking the unit is sealed.
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t)
+            logs = []
+            ok = PV.provision(Adb(runner=FakeRunner(su_blocked=True)), prof, log=logs.append, dry_push=True)
+            self.assertFalse(ok)
+            blob = " ".join(logs).lower()
+            self.assertIn("no root", blob)
+            self.assertNotIn("golden", blob)
+
+    def test_provision_all_detail_is_real_reason_not_profile_name(self):
+        # The mini-report's per-device detail must carry the ACTUAL failure reason, not just the profile
+        # name (which told the user nothing about WHY it failed).
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t)
+            res = PV.provision_all(lambda s: Adb(runner=FakeRunner(su_blocked=True)),
+                                   [("ABC123", "device")], profile=prof, log=lambda m: None)
+            status, detail = res["ABC123"]
+            self.assertEqual(status, "fail")
+            self.assertNotEqual(detail, prof.name)
+            self.assertIn("no root", detail.lower())
 
     def test_provision_refuses_no_sd(self):
         with tempfile.TemporaryDirectory() as t:
@@ -471,6 +580,63 @@ class TestProvision(unittest.TestCase):
             self.assertEqual(res["ABC123"], ("ok", "odin2mini"))
             self.assertEqual(res["DEF456"][0], "skip")
 
+    def test_download_run_logged_to_library(self):
+        # the WHOLE Download is recorded (total length + each device/profile) to the library, every run
+        import json
+        with tempfile.TemporaryDirectory() as t:
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cas-config.json")   # isolate: no log_dir override
+            try:
+                make_profile(t, "odin2mini", "Odin2 ?Mini")
+                res = PV.provision_all(lambda s: Adb(serial=s, runner=FakeRunner()),
+                                       [("ABC123", "device")], root=t, log=lambda m: None,
+                                       profile_map={"ABC123": P.Profile(pathlib.Path(t) / "odin2mini")})
+                self.assertEqual(res["ABC123"][0], "ok")
+                hist = pathlib.Path(t) / "download-history.jsonl"
+                self.assertTrue(hist.exists())              # written into the library dir (no log_dir set)
+                rec = json.loads(hist.read_text().splitlines()[-1])
+                self.assertEqual(rec["ok"], 1)
+                self.assertIn("total_bytes", rec)
+                self.assertIn("total_secs", rec)
+                self.assertEqual(rec["devices"][0]["serial"], "ABC123")
+                self.assertEqual(rec["devices"][0]["profile"], "odin2mini")
+            finally:
+                os.environ.pop("CAS_CONFIG", None)
+
+    def test_append_history_writes_jsonl(self):
+        # the shared run-history appender used by BOTH download-history.jsonl and save-history.jsonl
+        import json
+        with tempfile.TemporaryDirectory() as t:
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cas-config.json")   # isolate: no log_dir set
+            try:
+                PV._append_history(t, "save-history.jsonl", {"profile": "rp6-512", "bytes": 123}, log=lambda m: None)
+                PV._append_history(t, "save-history.jsonl", {"profile": "odin2", "bytes": 456}, log=lambda m: None)
+                lines = (pathlib.Path(t) / "save-history.jsonl").read_text().splitlines()
+                self.assertEqual(len(lines), 2)
+                self.assertEqual(json.loads(lines[0])["profile"], "rp6-512")
+                self.assertEqual(json.loads(lines[1])["bytes"], 456)
+            finally:
+                os.environ.pop("CAS_CONFIG", None)
+
+    def test_append_history_routes_to_log_dir(self):
+        # A configured + reachable shared log_dir (e.g. the NAS) receives the run history, NOT the library
+        # root — so logs centralize across benches while goldens stay on a fast LOCAL library. An unreachable
+        # log_dir falls back to the library root so a run is never lost.
+        from cas import config as C
+        with tempfile.TemporaryDirectory() as t:
+            lib = pathlib.Path(t) / "lib"; lib.mkdir()
+            nas = pathlib.Path(t) / "nas"; nas.mkdir()
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cas-config.json")
+            try:
+                C.set_log_dir(str(nas))
+                PV._append_history(str(lib), "download-history.jsonl", {"ok": 1}, log=lambda m: None)
+                self.assertTrue((nas / "download-history.jsonl").exists())     # landed on the NAS log dir
+                self.assertFalse((lib / "download-history.jsonl").exists())    # NOT the library root
+                C.set_log_dir(str(pathlib.Path(t) / "gone"))                   # unreachable -> graceful fallback
+                PV._append_history(str(lib), "save-history.jsonl", {"ok": 1}, log=lambda m: None)
+                self.assertTrue((lib / "save-history.jsonl").exists())         # fell back to the library root
+            finally:
+                os.environ.pop("CAS_CONFIG", None)
+
     def test_capture_to_pc_invokes_capture(self):
         r = FakeRunner()
         with tempfile.TemporaryDirectory() as t:
@@ -478,6 +644,35 @@ class TestProvision(unittest.TestCase):
                              log=lambda m: None, dry_pull=True)
             self.assertIn("capture.sh", "\n".join(r.cmds()))
             self.assertIn("CAS_OUT=/data/local/tmp", "\n".join(r.cmds()))
+
+    def test_patch_init_boot_on_device_pushes_toolkit_and_pulls(self):
+        # On-device patch: push the aarch64 toolkit + the stock init_boot, run boot_patch.sh, pull the
+        # patched new-boot.img back to the PC. No root needed (it only rewrites the image file).
+        r = FakeRunner()
+        with tempfile.TemporaryDirectory() as t:
+            stock = pathlib.Path(t) / "stock.img"
+            stock.write_bytes(b"x")
+            ok = PV.patch_init_boot_on_device(Adb(runner=r), stock, pathlib.Path(t) / "patched.img",
+                                              log=lambda m: None)
+        self.assertTrue(ok)
+        cmds = "\n".join(r.cmds())
+        self.assertIn("boot_patch.sh", cmds)              # ran Magisk's patcher on the device
+        self.assertIn("push", cmds)                       # pushed toolkit + stock
+        self.assertIn("pull", cmds)                       # pulled new-boot.img back
+
+    def test_patch_init_boot_on_device_fails_without_sentinel(self):
+        # No CAS_PATCH_OK in boot_patch.sh output -> treat as failure (don't flash a non-patched image).
+        class _NoPatch(FakeRunner):
+            def __call__(self, args, input_text=None, timeout=900):
+                if "shell" in args and "boot_patch.sh" in args[-1]:
+                    return 1, "- aborting\n", "magiskboot: not executable"
+                return super().__call__(args, input_text, timeout)
+        with tempfile.TemporaryDirectory() as t:
+            stock = pathlib.Path(t) / "stock.img"
+            stock.write_bytes(b"x")
+            ok = PV.patch_init_boot_on_device(Adb(runner=_NoPatch()), stock,
+                                              pathlib.Path(t) / "patched.img", log=lambda m: None)
+        self.assertFalse(ok)
 
 
 class FbRunner:
@@ -515,6 +710,19 @@ class TestSeal(unittest.TestCase):
         self.assertIn("flash init_boot_a", "\n".join(fb.cmds()))  # un-rooted via stock init_boot
         # USB-debugging-off must be the LAST adb command issued
         self.assertIn("adb_enabled 0", ra.cmds()[-1])
+
+    def test_seal_flashes_detected_active_slot(self):
+        # Un-root must flash STOCK to the ACTIVE slot — init_boot_b on a slot-B unit, not a hardcoded _a.
+        ra, fb = FakeRunner(slot="_b"), FbRunner()
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            stock = f.name
+        try:
+            ok = PV.seal(Adb(runner=ra), Fastboot(runner=fb), stock, log=lambda m: None, wait=False)
+        finally:
+            os.unlink(stock)
+        self.assertTrue(ok)
+        self.assertIn("flash init_boot_b", "\n".join(fb.cmds()))
+        self.assertNotIn("flash init_boot_a", "\n".join(fb.cmds()))
 
     def test_seal_hides_dev_options_even_without_root(self):
         # Regression: Developer Options must be hidden even when is_root() is False (a flaky su grant
@@ -593,6 +801,48 @@ class TestRoot(unittest.TestCase):
         a = "\n".join(ra.cmds())
         self.assertIn("install", a)                                  # installed the Magisk app...
         self.assertIn(apk, a)                                        # ...from the PC apk path (not the SD)
+
+    def test_root_installs_magisk_before_patching(self):
+        # Magisk-first: the app install must happen BEFORE the on-device init_boot patch (and the flash).
+        ra, fb = FakeRunner(root=False), FbRunner()
+        stock, apk = self._pc_assets()
+        try:
+            ok = PV.root(Adb(runner=ra), Fastboot(runner=fb), stock, magisk_apk=apk,
+                         log=lambda m: None, wait=False)
+        finally:
+            os.unlink(stock); os.unlink(apk)
+        self.assertTrue(ok)
+        cmds = ra.cmds()
+        install_i = next(i for i, c in enumerate(cmds) if "install" in c)
+        patch_i = next(i for i, c in enumerate(cmds) if "boot_patch.sh" in c)
+        self.assertLess(install_i, patch_i)                         # Magisk app installed FIRST
+        self.assertIn("flash init_boot_a", "\n".join(fb.cmds()))    # then flashed the on-device-patched img
+
+    def test_root_refuses_when_stock_missing(self):
+        # No stock init_boot on the PC -> can't patch -> refuse, and never flash.
+        ra, fb = FakeRunner(root=False), FbRunner()
+        _, apk = self._pc_assets()
+        try:
+            ok = PV.root(Adb(runner=ra), Fastboot(runner=fb), "/nonexistent/stock.img",
+                         magisk_apk=apk, log=lambda m: None, wait=False)
+        finally:
+            os.unlink(apk)
+        self.assertFalse(ok)
+        self.assertNotIn("flash", "\n".join(fb.cmds()))
+
+    def test_root_flashes_detected_active_slot(self):
+        # On a unit booted to slot B, root MUST flash init_boot_b — a hardcoded _a would patch the IDLE
+        # slot and leave the unit unrooted. The target is detected from the device before fastboot.
+        ra, fb = FakeRunner(root=False, slot="_b"), FbRunner()
+        patched, apk = self._pc_assets()
+        try:
+            ok = PV.root(Adb(runner=ra), Fastboot(runner=fb), patched, magisk_apk=apk,
+                         log=lambda m: None, wait=False)
+        finally:
+            os.unlink(patched); os.unlink(apk)
+        self.assertTrue(ok)
+        self.assertIn("flash init_boot_b", "\n".join(fb.cmds()))
+        self.assertNotIn("flash init_boot_a", "\n".join(fb.cmds()))
 
     def test_root_refuses_model_mismatch(self):
         ra, fb = FakeRunner(model="Retroid Pocket 6", root=False), FbRunner()
@@ -674,6 +924,24 @@ class TestBatch(unittest.TestCase):
             self.assertEqual(res["ABC123"], ("ok", "odin2mini"))    # matched -> rooted (already-rooted path)
             self.assertEqual(res["DEF456"][0], "skip")              # unauthorized skipped
 
+    def test_root_all_uses_default_images_when_profile_unset(self):
+        # A profile with NO stock_init_boot/magisk_apk must NOT skip — it falls back to the bundled default
+        # kit, so ⓪ Root works fleet-wide with no per-profile picking.
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, "p", "Odin2 ?Mini")
+            (prof.path / "profile.meta").write_text("model_match=Odin2 ?Mini\n")   # no root images set
+            res = PV.root_all(
+                lambda s: Adb(serial=s, runner=FakeRunner(model="Odin2 Mini", root=True)),
+                lambda s: Fastboot(serial=s, runner=FbRunner()),
+                [("ABC123", "device")], profiles_root=t, appdir=t, log=lambda m: None)
+            self.assertEqual(res["ABC123"][0], "ok")        # used the default kit — did NOT skip 'no-init_boot'
+
+    def test_default_root_images_exist(self):
+        # The bundled default kit images must actually ship (guard against a rename/move breaking ⓪ Root).
+        from cas import APPDIR
+        self.assertTrue((pathlib.Path(APPDIR) / PV.DEFAULT_STOCK_INIT_BOOT).exists(), PV.DEFAULT_STOCK_INIT_BOOT)
+        self.assertTrue((pathlib.Path(APPDIR) / PV.DEFAULT_MAGISK_APK).exists(), PV.DEFAULT_MAGISK_APK)
+
     def test_provision_all_uses_selected_profile_over_model(self):
         with tempfile.TemporaryDirectory() as t:
             prof = make_profile(t, "odin2mini", "Odin2 ?Mini")     # matches Odin, NOT Retroid
@@ -707,6 +975,25 @@ class TestBatch(unittest.TestCase):
                 lambda s: Adb(serial=s, runner=FakeRunner(model="Odin2 Mini", root=True)),
                 mkfb, [("ABC123", "device")], profiles_root=t, appdir=t, log=lambda m: None)
             self.assertIn("flash init_boot_a", "\n".join(fbs["ABC123"].cmds()))  # matched -> stock flash issued
+
+    def test_seal_all_uses_default_init_boot_when_profile_unset(self):
+        # A profile with NO stock_init_boot must NOT skip Lock — it falls back to the bundled default kit
+        # (mirroring Root), so ③ Lock un-roots fleet-wide with no per-profile picking. Regression guard for
+        # the root_all/seal_all asymmetry that skipped 'no-init_boot' on default-kit profiles.
+        from cas import APPDIR
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, "p", "Odin2 ?Mini")
+            (prof.path / "profile.meta").write_text("model_match=Odin2 ?Mini\n")   # no root images set
+            fbs = {}
+
+            def mkfb(s):
+                fbs[s] = FbRunner()
+                return Fastboot(serial=s, runner=fbs[s])
+            res = PV.seal_all(
+                lambda s: Adb(serial=s, runner=FakeRunner(model="Odin2 Mini", root=True)),
+                mkfb, [("ABC123", "device")], profiles_root=t, appdir=APPDIR, log=lambda m: None)
+            self.assertNotEqual(res["ABC123"][0], "no-init_boot")               # did NOT skip
+            self.assertIn("flash init_boot", "\n".join(fbs["ABC123"].cmds()))   # used default kit -> stock flash
 
     def test_root_all_profile_map_routes_per_device_and_skips_none(self):
         # profile_map overrides auto-match: a device whose MODEL matches nothing still gets the mapped
@@ -767,7 +1054,8 @@ class TestEsMedia(unittest.TestCase):
 
 
 class TestCompanionInstall(unittest.TestCase):
-    """The shared GameCove Companion app installs from the PC (adb install), kept out of the golden."""
+    """The GameCove Companion is a normal golden app; when it's in the manifest the PC-side install
+    (adb install) refreshes it to the current PC build after restore. Not in the manifest -> skipped."""
 
     def test_installs_from_pc_when_apk_present(self):
         with tempfile.TemporaryDirectory() as t:
@@ -785,9 +1073,9 @@ class TestCompanionInstall(unittest.TestCase):
             Adb(runner=r), log=lambda m: None, apk_src="/no/such/companion.apk"))
         self.assertNotIn("install", "\n".join(r.cmds()))
 
-    def test_provision_installs_companion_from_pc(self):
+    def test_provision_installs_companion_when_in_manifest(self):
         with tempfile.TemporaryDirectory() as t:
-            prof = make_profile(t)
+            prof = make_profile(t, apps=["org.es_de.frontend", PV.COMPANION_PKG])  # Companion ticked
             apk = pathlib.Path(t) / "gamecove-companion.apk"
             apk.write_bytes(b"x")
             os.environ["CAS_COMPANION_APK"] = str(apk)
@@ -799,13 +1087,11 @@ class TestCompanionInstall(unittest.TestCase):
             self.assertTrue(ok)
             a = "\n".join(r.cmds())
             self.assertIn("install", a)            # companion installed during provisioning
-            self.assertIn(str(apk), a)
+            self.assertIn(str(apk), a)             # ...from the current PC build
 
-    def test_provision_skips_companion_when_flag_off(self):
+    def test_provision_skips_companion_when_not_in_manifest(self):
         with tempfile.TemporaryDirectory() as t:
-            prof = make_profile(t)
-            P.save_manifest(prof.manifest_path, prof.pkgs(),       # @companion off
-                            {"settings": "on", "companion": "off"}, header="# t")
+            prof = make_profile(t)                 # default apps: Companion NOT ticked / not in manifest
             apk = pathlib.Path(t) / "gamecove-companion.apk"
             apk.write_bytes(b"x")
             os.environ["CAS_COMPANION_APK"] = str(apk)
@@ -815,23 +1101,7 @@ class TestCompanionInstall(unittest.TestCase):
             finally:
                 os.environ.pop("CAS_COMPANION_APK", None)
             self.assertTrue(ok)
-            self.assertNotIn(str(apk), "\n".join(r.cmds()))        # flag off -> NOT installed
-
-    def test_provision_installs_companion_when_flag_on(self):
-        with tempfile.TemporaryDirectory() as t:
-            prof = make_profile(t)
-            P.save_manifest(prof.manifest_path, prof.pkgs(),
-                            {"settings": "on", "companion": "on"}, header="# t")
-            apk = pathlib.Path(t) / "gamecove-companion.apk"
-            apk.write_bytes(b"x")
-            os.environ["CAS_COMPANION_APK"] = str(apk)
-            try:
-                r = FakeRunner()
-                ok = PV.provision(Adb(runner=r), prof, log=lambda m: None)
-            finally:
-                os.environ.pop("CAS_COMPANION_APK", None)
-            self.assertTrue(ok)
-            self.assertIn(str(apk), "\n".join(r.cmds()))           # flag on -> installed
+            self.assertNotIn(str(apk), "\n".join(r.cmds()))        # not in manifest -> NOT installed
 
 
 class TestUpdater(unittest.TestCase):
@@ -943,7 +1213,7 @@ class TestUpdater(unittest.TestCase):
         root = tempfile.mkdtemp()
         appdir = pathlib.Path(root, "appdir"); (appdir / "_internal").mkdir(parents=True)
         (appdir / "cas-gui").write_text("OLD"); (appdir / "_internal" / "V").write_text("0.1.0")
-        (appdir / "profiles").mkdir(); (appdir / "profiles" / "keep").write_text("precious")
+        (appdir / "data" / "profiles").mkdir(parents=True); (appdir / "data" / "profiles" / "keep").write_text("precious")
         zp = pathlib.Path(root, "cas.zip")
         with zipfile.ZipFile(zp, "w") as z:
             z.writestr("cas/cas-gui", "NEW"); z.writestr("cas/_internal/V", "0.2.1")
@@ -959,7 +1229,7 @@ class TestUpdater(unittest.TestCase):
         subprocess.run(["/bin/sh", str(captured["h"])], timeout=15)   # run helper directly (pid already dead)
         self.assertEqual((appdir / "_internal" / "V").read_text(), "0.2.1")   # swap took
         self.assertEqual((appdir / "cas-gui").read_text(), "NEW")
-        self.assertEqual((appdir / "profiles" / "keep").read_text(), "precious")  # sibling untouched
+        self.assertEqual((appdir / "data" / "profiles" / "keep").read_text(), "precious")  # sibling untouched
 
 
 if __name__ == "__main__":

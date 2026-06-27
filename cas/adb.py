@@ -190,6 +190,30 @@ class Adb:
     def boot_completed(self):
         return self.getprop("sys.boot_completed") == "1"
 
+    def slot_suffix(self):
+        """A/B active-slot suffix ('_a'/'_b') to target the LIVE slot, or '' on A-only devices. getprop,
+        no root."""
+        return self.getprop("ro.boot.slot_suffix").strip()
+
+    def boot_partition(self):
+        """The partition holding the Magisk-patchable ramdisk: 'init_boot' on units LAUNCHED with Android
+        13+ (ro.product.first_api_level >= 33 — where Google split the generic ramdisk into its own
+        partition), else 'boot' (older or merely-upgraded units keep the ramdisk in boot). getprop, no
+        root — so we can read it on a fresh stock unit before touching fastboot."""
+        try:
+            api = int(self.getprop("ro.product.first_api_level") or 0)
+        except ValueError:
+            api = 0
+        return "init_boot" if api >= 33 else "boot"
+
+    def boot_flash_target(self):
+        """The exact fastboot partition to flash this unit's (patched/stock) ramdisk to — e.g.
+        'init_boot_a' (A/B, A13), 'init_boot' (A-only, A13), or 'boot_a' (legacy A/B). DETECTED, never
+        assumed: hardcoding 'init_boot_a' would flash the IDLE slot on a slot-B unit (leaving it unrooted/
+        unsealed) or the wrong partition on a pre-init_boot unit. Read it while adb is still up — it's lost
+        once the unit drops to fastboot."""
+        return self.boot_partition() + self.slot_suffix()
+
     def is_golden(self):
         """True if the device carries the golden lock. FAIL-CLOSED: ambiguous/empty/errored su output
         is treated as GOLDEN (so provisioning refuses) — we never wipe a device we can't clear."""

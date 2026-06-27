@@ -29,12 +29,12 @@
 #      BUNDLE\provision\root\*.sh. These are pushed to the device, never user-edited.
 #
 # WHAT is DELIBERATELY NOT bundled:
-#   * profiles\         (writable; golden_root_payload\ is ~3.1 GB) -> EXTERNAL, beside exe.
-#   * payloads\, retroarch-cores\, *.apk, *.img                     -> EXTERNAL / not needed in exe.
+#   * data\ (profiles\ writable golden ~3.1 GB; Apps\, retroarch-cores\, ES-DE\, *.apk, *.img)
+#                                                                    -> EXTERNAL, beside exe at APPDIR\data\.
 #   * platform-tools\ (adb.exe / fastboot.exe)                      -> EXTERNAL, beside exe.
 #   * provision\root\firmware\ (stock/patched init_boot.img used by Seal) -> EXTERNAL,
 #     resolved off APPDIR via profile.meta stock_init_boot=... . The OPERATOR must drop
-#     this dir beside the exe or Seal fails — see build-win.bat / PACKAGING.md.
+#     this dir beside the exe or Seal fails — see scripts\build-win.bat / docs\PACKAGING.md.
 #
 # tkinter / Tcl-Tk: PyInstaller's bundled hooks (hook-tkinter, the Tk runtime hook)
 # collect tkinter, _tkinter, and the Tcl/Tk DLLs + the tcl\ / tk\ data dirs automatically;
@@ -51,14 +51,23 @@
 
 import sys
 
+import os
 from PyInstaller.utils.hooks import collect_all
+
+# This spec lives in scripts/. Anchor every source path to the REPO ROOT (parent of SPECPATH) so the
+# build is independent of the current directory when pyinstaller runs — provision/ and assets/ stay at
+# the repo root, the entry shims live here in scripts/.
+REPO = os.path.dirname(os.path.abspath(SPECPATH))
+def _p(*parts):
+    return os.path.join(REPO, *parts)
 
 # --- read-only device-side shell scripts -> provision\root\ inside BUNDLE ---
 datas = [
-    ('provision/root/restore.sh',  'provision/root'),
-    ('provision/root/capture.sh',  'provision/root'),
-    ('provision/root/lib-root.sh', 'provision/root'),
-    ('assets/cas-window.png',      'assets'),          # GameCove logo for the Tk window/taskbar icon
+    (_p('provision/root/restore.sh'),  'provision/root'),
+    (_p('provision/root/capture.sh'),  'provision/root'),
+    (_p('provision/root/lib-root.sh'), 'provision/root'),
+    (_p('assets/cas-window.png'),      'assets'),          # GameCove logo for the Tk window/taskbar icon
+    (_p('assets/app-icons/*.png'),     'assets/app-icons'),  # curated per-app launcher icons for the app list
 ]
 
 # Belt-and-braces: make sure tkinter's submodules + Tcl/Tk data come along.
@@ -79,7 +88,7 @@ hiddenimports = list(tk_hidden) + [
 
 # --- analysis: one per executable; COLLECT dedupes the shared (identical) datas/binaries ---
 a_gui = Analysis(
-    ['pyi_entry_gui.py'],
+    [_p('scripts/pyi_entry_gui.py')],
     pathex=[],
     binaries=tk_binaries,
     datas=datas,
@@ -95,7 +104,7 @@ a_gui = Analysis(
 )
 
 a_cli = Analysis(
-    ['pyi_entry_cli.py'],
+    [_p('scripts/pyi_entry_cli.py')],
     pathex=[],
     binaries=tk_binaries,
     datas=datas,
@@ -128,7 +137,7 @@ exe_gui = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='assets/cas-dark.ico',   # GameCove logo (dark/purple). Swap to assets/cas-light.ico if preferred.
+    icon=_p('assets/cas-dark.ico'),   # GameCove logo (dark/purple). Swap to assets/cas-light.ico if preferred.
 )
 
 # --- CLI exe: console (must show stdout/stderr for scripted/batch runs) ---
@@ -147,7 +156,7 @@ exe_cli = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='assets/cas-dark.ico',   # same GameCove logo on the CLI exe
+    icon=_p('assets/cas-dark.ico'),   # same GameCove logo on the CLI exe
 )
 
 # --- ONE COLLECT dir holds BOTH exes + the shared runtime/datas, side by side ---
@@ -182,7 +191,7 @@ if sys.platform == 'darwin':
     app = BUNDLE(
         coll,
         name='CAS.app',
-        icon='assets/cas.icns',   # GameCove logo for the macOS .app
+        icon=_p('assets/cas.icns'),   # GameCove logo for the macOS .app
         bundle_identifier='com.luxium.cas',
         version='0.1.0',
         info_plist={
