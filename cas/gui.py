@@ -80,6 +80,10 @@ _APP_LABELS = {
     "com.gamecove.gamecove_companion": "GameCove Companion  ·  app",
 }
 
+# The ES-DE front-end package. Its box art only matters when ES-DE itself is installed, so the
+# "ES-DE box art" tab is shown/hidden to follow this app's checkbox (see _sync_media_tab).
+_ESDE_PKG = "org.es_de.frontend"
+
 
 def _app_label(pkg):
     """Human-friendly name for a package (falls back to the package id for anything unmapped)."""
@@ -553,6 +557,7 @@ class App:
         # library + golden status above stay visible across all tabs.
         nb = ttk.Notebook(prof)
         nb.pack(fill="both", expand=True, pady=(6, 0))
+        self.nb = nb
 
         # ── Tab 1: Apps & options (the manifest) — the primary tab ──
         apps_tab = ttk.Frame(nb, padding=6)
@@ -581,8 +586,11 @@ class App:
                                        _cv.unbind_all("<Button-4>"), _cv.unbind_all("<Button-5>")))
 
         # ── Tab 2: ES-DE box art (a BENCH setting persisted in cas-config.json) ──
+        # Only shown when ES-DE is in the current selection — _sync_media_tab() hides/restores it as the
+        # ES-DE app checkbox (or the profile) changes; box art is meaningless without the front-end.
         media_tab = ttk.Frame(nb, padding=8)
         nb.add(media_tab, text="ES-DE box art")
+        self.media_tab = media_tab
         self.media_mode = tk.StringVar(value="push" if config.es_media_src() else "sd")
         self.media_path = tk.StringVar(value=config.es_media_src() or "")
         ttk.Radiobutton(media_tab, text="Use the SD card  (no transfer — box art rides the SD image)",
@@ -857,6 +865,7 @@ class App:
         self._update_golden_status()         # golden: none / size + download ETA
         name = self.prof_var.get()
         if not name:
+            self._sync_media_tab()                         # no profile -> no ES-DE -> hide the box-art tab
             return
         prof = P.Profile(P.pathlib.Path(self.profiles_root) / name)
         self.stock_var.set(prof.meta.get("stock_init_boot", ""))     # blank = the bundled default kit image
@@ -872,13 +881,14 @@ class App:
             var = tk.BooleanVar(value=(pkg in included))
             self.pkg_vars[pkg] = var
             cb = ttk.Checkbutton(self.modf, text=f" {_app_label(pkg)}", variable=var,
-                                 command=self._sync_selall)
+                                 command=self._on_app_toggle)
             # real launcher icon from the app's bundled APK, else a uniform placeholder so rows align
             icon = self._app_icon(prof, pkg) or self._placeholder_icon(_app_label(pkg))
             if icon is not None:
                 cb.configure(image=icon, compound="left")
             _tip(cb, f"Package: {pkg}").pack(anchor="w")   # exact package id on hover (name is friendly)
         self._sync_selall()                                # set the master box from the initial selection
+        self._sync_media_tab()                             # ES-DE box-art tab follows the ES-DE checkbox
         # behavior flags: @settings/@hardening/@grants/@homescreen honored by restore.sh on the device.
         # The GameCove Companion is a normal golden app (ticked in the list above), not a behavior flag.
         self.flag_vars = {}
@@ -1414,6 +1424,28 @@ class App:
         on = self.selall_var.get()
         for v in self.pkg_vars.values():
             v.set(on)
+        self._sync_media_tab()                             # ES-DE may have just been (un)ticked
+
+    def _on_app_toggle(self):
+        """An app checkbox flipped: keep the 'Select all' master in sync, and show/hide the
+        'ES-DE box art' tab so it only appears when ES-DE is part of the selection."""
+        self._sync_selall()
+        self._sync_media_tab()
+
+    def _sync_media_tab(self):
+        """Show the 'ES-DE box art' tab only when ES-DE is in the current selection — its box art is
+        meaningless without the front-end installed. Hidden tabs keep their config and original position,
+        so add() restores this one where it was. Defensive: no-op before the notebook is built."""
+        nb = getattr(self, "nb", None)
+        tab = getattr(self, "media_tab", None)
+        if nb is None or tab is None:
+            return
+        v = self.pkg_vars.get(_ESDE_PKG)
+        want = bool(v and v.get())
+        try:
+            nb.add(tab) if want else nb.hide(tab)
+        except tk.TclError:
+            pass
 
     def _sync_selall(self):
         """Keep the 'Select all apps' box in sync: ticked only when every app is ticked."""
