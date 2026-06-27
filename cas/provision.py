@@ -514,17 +514,25 @@ def capture_to_pc(adb, name, stamp, root="profiles", log=print, dry_pull=False):
     return True
 
 
-def fastboot_flasher(fastboot, wait=True):
+def fastboot_flasher(fastboot, wait=True, on_critical=None):
     """Flash backend: reboot to BOOTLOADER fastboot and write the patched image to `target`. Works on units
     whose bootloader implements `flash` (Retroid/AYN/Odin). Returns callable(adb, target, image, log)->bool;
-    always reboots back to the OS, never strands the unit in fastboot."""
+    always reboots back to the OS, never strands the unit in fastboot. `on_critical(bool)` brackets the
+    actual partition write so the GUI can warn before a Cancel that could brick."""
     def _flash(adb, target, image, log):
         log(f"rebooting to bootloader to flash {target} (fastboot)...")
         adb.raw("reboot", "bootloader")
         if wait and not fastboot.wait(on_tick=lambda s: log(f"  …waiting for fastboot ({s}s)")):
             log("ERROR: device did not enter fastboot. Aborting (it should still be bootable).")
             return False
-        if not fastboot.flash(target, image):
+        if on_critical:
+            on_critical(True)
+        try:
+            ok = fastboot.flash(target, image)
+        finally:
+            if on_critical:
+                on_critical(False)
+        if not ok:
             log("ERROR: patched flash failed — this bootloader's fastboot may not support 'flash' "
                 "(e.g. MANGMI → needs the EDL backend). Booting back to the OS, NOT rooted.")
             fastboot.reboot()                          # never strand the unit in fastboot
@@ -534,10 +542,11 @@ def fastboot_flasher(fastboot, wait=True):
     return _flash
 
 
-def edl_flasher(edl, geometry, wait=True):
+def edl_flasher(edl, geometry, wait=True, on_critical=None):
     """Flash backend using Qualcomm EDL / Firehose — for units whose bootloader fastboot can't write
     (MANGMI). Reboots to EDL, Firehose-writes the patched image to `target` at the firmware `geometry`
-    (init_boot_<slot> sector/LUN), then resets. Returns callable(adb, target, image, log)->bool."""
+    (init_boot_<slot> sector/LUN), then resets. Returns callable(adb, target, image, log)->bool.
+    `on_critical(bool)` brackets the Firehose write for the GUI's Cancel brick-warning."""
     def _flash(adb, target, image, log):
         log(f"rebooting to EDL to flash {target} (Firehose)...")
         adb.raw("reboot", "edl")
@@ -547,7 +556,13 @@ def edl_flasher(edl, geometry, wait=True):
             log("ERROR: no EDL serial port appeared (qcserial driver? hold power ~12s to recover).")
             return False
         with tempfile.TemporaryDirectory() as td:
-            ok = edl.flash_partition(port, target, image, geometry, td, log=log)
+            if on_critical:
+                on_critical(True)
+            try:
+                ok = edl.flash_partition(port, target, image, geometry, td, log=log)
+            finally:
+                if on_critical:
+                    on_critical(False)
             # ALWAYS reboot out of EDL — even on failure — so a failed flash never strands the unit on a
             # black EDL screen (init_boot is untouched unless the Firehose write actually started).
             if not edl.reset(port, td):
@@ -556,15 +571,16 @@ def edl_flasher(edl, geometry, wait=True):
     return _flash
 
 
-def flasher_for_firmware(firmware, fastboot, slot, version=None, runner=None):
+def flasher_for_firmware(firmware, fastboot, slot, version=None, runner=None, on_critical=None):
     """Pick the flash backend for a resolved Firmware (brand-agnostic root):
       * flash_method == 'edl'  -> edl_flasher using the build's bundled QSaharaServer/fh_loader/programmer
                                   and the init_boot_<slot> geometry from its rawprogram.
       * else (or no firmware)  -> fastboot_flasher.
     Returns (flasher, None) on success, or (None, reason) when EDL is required but the build lacks the
-    tools/geometry — so the caller can surface a clear error instead of silently falling back."""
+    tools/geometry — so the caller can surface a clear error instead of silently falling back. The EDL
+    backend inherits the Fastboot's cancel Event so an EDL flash is cancelable too."""
     if firmware is None or firmware.flash_method != "edl":
-        return fastboot_flasher(fastboot), None
+        return fastboot_flasher(fastboot, on_critical=on_critical), None
     from .adb import Edl, subprocess_runner
     tools = firmware.edl_tools(version)
     geom = firmware.init_boot_geometry(slot, version)
@@ -573,8 +589,8 @@ def flasher_for_firmware(firmware, fastboot, slot, version=None, runner=None):
     if not geom:
         return None, f"EDL firmware has no rawprogram entry for init_boot{slot}."
     q, f, p = tools
-    edl = Edl(q, f, p, runner=(runner or subprocess_runner))
-    return edl_flasher(edl, geom), None
+    edl = Edl(q, f, p, runner=(runner or subprocess_runner), cancel=getattr(fastboot, "cancel", None))
+    return edl_flasher(edl, geom, on_critical=on_critical), None
 
 
 def root(adb, fastboot, stock_init_boot, magisk_apk=None, log=print, wait=True, model_match=None,
@@ -743,7 +759,7 @@ def seal(adb, fastboot, stock_init_boot, log=print, wait=True, model_match=None,
 
 
 def root_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, log=print, profile=None,
-             profile_map=None, force_serials=None, parallel=True):
+             profile_map=None, force_serials=None, parallel=True, on_critical=None):
     """Batch ROOT: every connected 'device'-state unit, in PARALLEL by default (all units reboot/flash at
     once — the big win, since root is reboot-dominated). Profile per device: profile_map[serial] > `profile`
     > auto-match by model. force_serials = serials to flash even on a model mismatch (a deliberate, already-
@@ -759,6 +775,8 @@ def root_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
             return ("skip", state)
         try:
             adb = make_adb(serial)
+            if adb.cancel is not None and adb.cancel.is_set():
+                return ("cancelled", "")
             if adb.is_root() and adb.is_golden():
                 log(f"[{serial}] is the GOLDEN — skipped (never re-root the master)")
                 return ("skip-golden", "")
@@ -780,6 +798,7 @@ def root_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
             stock_rel = prof.meta.get("stock_init_boot") or DEFAULT_STOCK_INIT_BOOT
             magisk_rel = prof.meta.get("magisk_apk") or DEFAULT_MAGISK_APK
             stock_path = P.resolve_asset(prof, appdir, stock_rel)
+            fb = make_fb(serial)
             # Brand-agnostic flash: a resolved device-root-firmware supplies the unit's OWN stock init_boot
             # and — for EDL units whose bootloader fastboot can't write (e.g. MANGMI) — the Firehose flasher.
             # Fail-safe: any firmware-lookup error → fall back to the fastboot path + profile/default stock.
@@ -793,18 +812,23 @@ def root_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
                     if sb:
                         stock_path = str(sb)            # the unit's own init_boot from its firmware build
                     if fw.flash_method == "edl":
-                        flasher, reason = flasher_for_firmware(fw, make_fb(serial), adb.slot_suffix(),
-                                                               version=fwres.get("version"))
+                        flasher, reason = flasher_for_firmware(fw, fb, adb.slot_suffix(),
+                                                               version=fwres.get("version"),
+                                                               on_critical=on_critical)
                         if flasher is None:
                             log(f"[{serial}] EDL firmware '{fw.id}' unusable: {reason}")
                             return ("fail", reason)
             except Exception as e:
                 log(f"[{serial}] firmware lookup skipped ({e}); using fastboot + profile stock")
-            ok = root(adb, make_fb(serial), stock_path,
+            if flasher is None:
+                flasher = fastboot_flasher(fb, on_critical=on_critical)   # default path WITH the flash marker
+            ok = root(adb, fb, stock_path,
                       magisk_apk=P.resolve_asset(prof, appdir, magisk_rel),
                       log=lambda m, s=serial: log(f"[{s}] {m}"),
                       model_match=prof.meta.get("model_match"), force=(serial in force_serials),
                       flasher=flasher)
+            if adb.cancel is not None and adb.cancel.is_set():
+                return ("cancelled", prof.name)
             return ("ok" if ok else "fail", prof.name)
         except Exception as e:
             log(f"[{serial}] ERROR: {e}")
@@ -813,7 +837,7 @@ def root_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
 
 
 def seal_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, log=print, profile=None,
-             profile_map=None, force_serials=None, parallel=True):
+             profile_map=None, force_serials=None, parallel=True, on_critical=None):
     """Batch SEAL: every connected 'device'-state unit, in PARALLEL by default (each un-roots + reboots at
     once, mirroring root_all). Profile per device: profile_map[serial] > `profile` > auto-match by model.
     force_serials = serials to seal even on a model mismatch (deliberate, already-confirmed). The golden and
@@ -828,6 +852,8 @@ def seal_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
             return ("skip", state)
         try:
             adb = make_adb(serial)
+            if adb.cancel is not None and adb.cancel.is_set():
+                return ("cancelled", "")
             if adb.is_root() and adb.is_golden():
                 log(f"[{serial}] is the GOLDEN — skipped (never seal the master)")
                 return ("skip-golden", "")
@@ -850,6 +876,7 @@ def seal_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
             # model-checks (won't flash a wrong-model image) and CONFIRMS un-root before disabling adb.
             stock_rel = prof.meta.get("stock_init_boot") or DEFAULT_STOCK_INIT_BOOT
             stock_path = P.resolve_asset(prof, appdir, stock_rel)
+            fb = make_fb(serial)
             # Brand-agnostic un-root: a resolved device-root-firmware supplies the unit's OWN stock init_boot
             # and — for EDL units whose bootloader fastboot can't write (e.g. MANGMI) — the Firehose flasher.
             # Fail-safe: any firmware-lookup error → fall back to the fastboot path + profile/default stock.
@@ -863,17 +890,22 @@ def seal_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
                     if sb:
                         stock_path = str(sb)
                     if fw.flash_method == "edl":
-                        flasher, reason = flasher_for_firmware(fw, make_fb(serial), adb.slot_suffix(),
-                                                               version=fwres.get("version"))
+                        flasher, reason = flasher_for_firmware(fw, fb, adb.slot_suffix(),
+                                                               version=fwres.get("version"),
+                                                               on_critical=on_critical)
                         if flasher is None:
                             log(f"[{serial}] EDL firmware '{fw.id}' unusable: {reason}")
                             return ("fail", reason)
             except Exception as e:
                 log(f"[{serial}] firmware lookup skipped ({e}); using fastboot + profile stock")
-            ok = seal(adb, make_fb(serial), stock_path,
+            if flasher is None:
+                flasher = fastboot_flasher(fb, on_critical=on_critical)
+            ok = seal(adb, fb, stock_path,
                       log=lambda m, s=serial: log(f"[{s}] {m}"),
                       model_match=prof.meta.get("model_match"), force=(serial in force_serials),
                       flasher=flasher)
+            if adb.cancel is not None and adb.cancel.is_set():
+                return ("cancelled", prof.name)
             return ("ok" if ok else "fail", prof.name)
         except Exception as e:
             log(f"[{serial}] ERROR: {e}")

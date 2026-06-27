@@ -1417,5 +1417,49 @@ class TestFlashers(unittest.TestCase):
             self.assertEqual(seen.get("image"), str(stock))     # seal un-roots by flashing STOCK
 
 
+class TestCancel(unittest.TestCase):
+    def test_subprocess_runner_cancel_kills_and_returns_CANCELLED(self):
+        import threading
+        from cas.adb import subprocess_runner, CANCELLED, is_cancelled
+        ev = threading.Event(); ev.set()                 # pre-set → first poll aborts immediately
+        rc, out, err = subprocess_runner([sys.executable, "-c", "import time; time.sleep(30)"], cancel=ev)
+        self.assertEqual(rc, CANCELLED)
+        self.assertTrue(is_cancelled(rc))
+
+    def test_subprocess_runner_without_cancel_is_unchanged(self):
+        from cas.adb import subprocess_runner
+        rc, out, _ = subprocess_runner([sys.executable, "-c", "print('hi')"])
+        self.assertEqual((rc, out.strip()), (0, "hi"))
+
+    def test_wait_loops_bail_on_cancel(self):
+        import threading
+        from cas.adb import Adb, Fastboot, Edl
+        ev = threading.Event(); ev.set()
+        self.assertFalse(Adb(runner=FakeRunner(), cancel=ev).wait_boot(timeout=10))
+        self.assertFalse(Fastboot(runner=lambda *a, **k: (0, "", ""), cancel=ev).wait(timeout=10))
+        self.assertIsNone(Edl("/x/q", "/x/f", "/x/p", cancel=ev).find_port(timeout=10))
+
+    def test_root_all_worker_reports_cancelled(self):
+        import threading
+        from cas import provision as PV
+        from cas.adb import Adb, Fastboot
+        ev = threading.Event(); ev.set()
+        res = PV.root_all(lambda s: Adb(serial=s, runner=FakeRunner(), cancel=ev),
+                          lambda s: Fastboot(serial=s, runner=lambda *a, **k: (0, "", ""), cancel=ev),
+                          [("S", "device")], log=lambda *a: None)
+        self.assertEqual(res["S"][0], "cancelled")
+
+    def test_fastboot_flasher_brackets_the_critical_write(self):
+        from cas.adb import Adb, Fastboot
+        from cas import provision as PV
+        events = []
+
+        def fb_ok(args, input_text=None, timeout=900):
+            return (0, "SER\t fastboot\n", "") if args[-1] == "devices" else (0, "", "")
+        PV.fastboot_flasher(Fastboot(serial="SER", runner=fb_ok), on_critical=events.append)(
+            Adb(runner=FakeRunner()), "init_boot_a", "/tmp/p.img", lambda *a: None)
+        self.assertEqual(events, [True, False])          # marked entering + leaving the partition write
+
+
 if __name__ == "__main__":
     unittest.main()

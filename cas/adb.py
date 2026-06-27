@@ -14,24 +14,70 @@ SU = "/debug_ramdisk/su"   # MagiskSU path on these units (plain `su` isn't on t
 # evaluates the (Windows-only) attribute off-Windows, and creationflags=0 is a no-op on POSIX.
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform.startswith("win") else 0
 
+CANCELLED = 130    # rc for a child stopped by Cancel (128 + SIGINT) — distinguishes an abort from a real fail
 
-def subprocess_runner(args, input_text=None, timeout=900):
+
+def is_cancelled(rc):
+    """True if `rc` is the cancelled sentinel (so callers/report can show ⏹ cancelled, not ❌ failed)."""
+    return rc == CANCELLED
+
+
+def subprocess_runner(args, input_text=None, timeout=900, cancel=None):
     """Default runner: run a command, return (returncode, stdout, stderr).
     On timeout returns (124, "", "timeout…") instead of raising — so a hung device (e.g. a MagiskSU grant
-    prompt nobody tapped) fails FAST and never blocks a batch for the full timeout window."""
-    try:
-        p = subprocess.run(args, capture_output=True, text=True, input=input_text,
-                           timeout=timeout, creationflags=_NO_WINDOW)
-        return p.returncode, p.stdout, p.stderr
-    except subprocess.TimeoutExpired:
-        return 124, "", f"timeout after {timeout}s"
+    prompt nobody tapped) fails FAST and never blocks a batch for the full timeout window.
+    If `cancel` (a threading.Event) is given, poll it ~5x/s and, when set, terminate→kill the child and
+    return (CANCELLED, output-so-far, 'cancelled'). Output goes to a temp FILE (not a PIPE) so a verbose
+    child like fh_loader can't deadlock on a full pipe buffer while we poll."""
+    if cancel is None:
+        try:
+            p = subprocess.run(args, capture_output=True, text=True, input=input_text,
+                               timeout=timeout, creationflags=_NO_WINDOW)
+            return p.returncode, p.stdout, p.stderr
+        except subprocess.TimeoutExpired:
+            return 124, "", f"timeout after {timeout}s"
+    import tempfile
+    with tempfile.TemporaryFile(mode="w+") as outf:
+        try:
+            p = subprocess.Popen(args, stdout=outf, stderr=subprocess.STDOUT,
+                                 stdin=(subprocess.PIPE if input_text is not None else None),
+                                 text=True, creationflags=_NO_WINDOW)
+        except OSError as e:
+            return 1, "", str(e)
+        if input_text is not None:
+            try:
+                p.stdin.write(input_text)
+                p.stdin.close()
+            except (BrokenPipeError, ValueError):
+                pass
+        t0 = time.monotonic()
+        while True:
+            rc = p.poll()
+            if rc is not None:
+                outf.seek(0)
+                return rc, outf.read(), ""
+            if cancel.is_set():
+                p.terminate()
+                try:
+                    p.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+                outf.seek(0)
+                return CANCELLED, outf.read(), "cancelled"
+            if time.monotonic() - t0 > timeout:
+                p.kill()
+                outf.seek(0)
+                return 124, outf.read(), f"timeout after {timeout}s"
+            time.sleep(0.2)
 
 
-def subprocess_stream(args, on_line, input_text=None):
+def subprocess_stream(args, on_line, input_text=None, cancel=None):
     """Run a command, calling on_line(text) for EACH output line as it arrives (stdout+stderr merged).
     Splits on BOTH '\\n' and '\\r' so adb's carriage-return progress updates ('[ 42%] file') surface
-    live instead of only at the end. Returns the process exit code. Used for long jobs (restore/capture
-    scripts, multi-GB pulls) so the UI can show realtime activity + transfer percentages."""
+    live instead of only at the end. Returns the process exit code (CANCELLED if `cancel` was set). Used
+    for long jobs (restore/capture scripts, multi-GB pulls) so the UI can show realtime activity.
+    `cancel` (a threading.Event), when set, kills the child — checked each loop, which fires while output
+    flows (the streaming case); the bytes-polled pull_with_progress covers the long silent-copy phase."""
     p = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          stdin=(subprocess.PIPE if input_text is not None else None),
                          text=True, bufsize=1, creationflags=_NO_WINDOW)
@@ -43,6 +89,9 @@ def subprocess_stream(args, on_line, input_text=None):
             pass
     buf = ""
     while True:
+        if cancel is not None and cancel.is_set():
+            p.kill()
+            break
         ch = p.stdout.read(1)          # 1 char at a time: lets us break on '\r' (progress) too
         if not ch:
             break
@@ -56,7 +105,8 @@ def subprocess_stream(args, on_line, input_text=None):
     tail = buf.strip()
     if tail:
         on_line(tail)
-    return p.wait()
+    rc = p.wait()
+    return CANCELLED if (cancel is not None and cancel.is_set()) else rc
 
 
 def _dir_size_kb(path):
@@ -88,13 +138,19 @@ def list_devices(adb="adb", runner=subprocess_runner):
 class Adb:
     """adb scoped to one device serial (or the only device if serial is None)."""
 
-    def __init__(self, serial=None, adb="adb", runner=subprocess_runner):
+    def __init__(self, serial=None, adb="adb", runner=subprocess_runner, cancel=None):
         self.serial = serial
         self.adb = adb
         self.runner = runner
+        self.cancel = cancel        # threading.Event to abort long ops mid-flight; None = not cancelable
 
     def _base(self):
         return [self.adb] + (["-s", self.serial] if self.serial else [])
+
+    def _runner_kw(self):
+        """Pass cancel= only to the real subprocess_runner (injected test runners have a fixed signature)."""
+        return ({"cancel": self.cancel}
+                if (self.cancel is not None and self.runner is subprocess_runner) else {})
 
     def raw(self, *args):
         """Run `adb [-s serial] <args>` -> (rc, out, err)."""
@@ -114,7 +170,7 @@ class Adb:
         blocking call whose output lines are still emitted, so behavior/asserts are unchanged."""
         args = self._base() + ["shell", SU, "-c", cmd]
         if self.runner is subprocess_runner:
-            return subprocess_stream(args, on_line)
+            return subprocess_stream(args, on_line, cancel=self.cancel)
         rc, out, err = self.runner(args)
         for ln in (out or "").splitlines():
             on_line(ln)
@@ -126,7 +182,7 @@ class Adb:
         """adb pull, streaming progress lines ('[ NN%] ...') to on_line(); True on success."""
         args = self._base() + ["pull", str(src), str(dst)]
         if self.runner is subprocess_runner:
-            return subprocess_stream(args, on_line) == 0
+            return subprocess_stream(args, on_line, cancel=self.cancel) == 0
         return self.runner(args)[0] == 0
 
     def pull_with_progress(self, src, dst, total_kb, on_line, poll=3.0):
@@ -152,6 +208,10 @@ class Adb:
                 rc, finished = p.wait(timeout=poll), True
             except subprocess.TimeoutExpired:
                 rc, finished = None, False
+            if not finished and self.cancel is not None and self.cancel.is_set():
+                p.kill()
+                on_line("⏹ cancelled")
+                return False
             got_kb = _dir_size_kb(dst)
             now = time.monotonic()
             rate = (got_kb / 1024.0) / max(0.001, now - t0)          # MB/s
@@ -170,7 +230,7 @@ class Adb:
         """adb push, streaming progress lines to on_line(); True on success."""
         args = self._base() + ["push", str(src), str(dst)]
         if self.runner is subprocess_runner:
-            return subprocess_stream(args, on_line) == 0
+            return subprocess_stream(args, on_line, cancel=self.cancel) == 0
         return self.runner(args)[0] == 0
 
     def getprop(self, key):
@@ -251,6 +311,8 @@ class Adb:
         on_tick(seconds) is called ~every 10s so a UI can show 'still booting…' during the wait."""
         self.raw("wait-for-device")
         for i in range(max(1, timeout // 2)):
+            if self.cancel is not None and self.cancel.is_set():
+                return False
             if self.boot_completed():
                 return True
             if on_tick and i and i % 5 == 0:
@@ -267,14 +329,19 @@ class Fastboot:
     wait()/resolve(); ambiguous cases keep the requested serial so a wrong call fails loudly, never flashes
     the wrong unit. Runner is injectable."""
 
-    def __init__(self, serial=None, fastboot="fastboot", runner=subprocess_runner):
+    def __init__(self, serial=None, fastboot="fastboot", runner=subprocess_runner, cancel=None):
         self.serial = serial            # requested serial (usually the adb serial)
         self._eff = serial              # effective fastboot serial actually used (resolved on wait/resolve)
         self.fb = fastboot
         self.runner = runner
+        self.cancel = cancel            # threading.Event to abort a flash mid-write; None = not cancelable
 
     def _base(self):
         return [self.fb] + (["-s", self._eff] if self._eff else [])
+
+    def _runner_kw(self):
+        return ({"cancel": self.cancel}
+                if (self.cancel is not None and self.runner is subprocess_runner) else {})
 
     def _list(self):
         """Serials currently in fastboot, from `fastboot devices` (UNSCOPED — fastboot ignores -s here)."""
@@ -302,6 +369,8 @@ class Fastboot:
         """Wait until a device appears in fastboot, then RESOLVE the effective serial. Returns True if seen.
         on_tick(seconds) is called ~every 10s so a UI can show progress during the wait."""
         for i in range(max(1, timeout // 2)):
+            if self.cancel is not None and self.cancel.is_set():
+                return False
             if self._list():
                 self.resolve()             # remap onto the present device (serial may differ from adb)
                 return True
@@ -311,7 +380,7 @@ class Fastboot:
         return False
 
     def flash(self, partition, img):
-        return self.runner(self._base() + ["flash", partition, str(img)])[0] == 0
+        return self.runner(self._base() + ["flash", partition, str(img)], **self._runner_kw())[0] == 0
 
     def reboot(self):
         return self.runner(self._base() + ["reboot"])[0] == 0
@@ -328,16 +397,24 @@ class Edl:
     geometry (per init_boot_<slot>, parsed from the firmware's rawprogram) is a dict with:
       sector_size, num_sectors, partition (physical_partition_number), start_sector, start_byte_hex."""
 
-    def __init__(self, qsahara, fh_loader, programmer, memoryname="eMMC", runner=subprocess_runner):
+    def __init__(self, qsahara, fh_loader, programmer, memoryname="eMMC", runner=subprocess_runner,
+                 cancel=None):
         self.qsahara = str(qsahara)
         self.fh = str(fh_loader)
         self.programmer = str(programmer)
         self.memoryname = memoryname
         self.runner = runner
+        self.cancel = cancel
+
+    def _runner_kw(self):
+        return ({"cancel": self.cancel}
+                if (self.cancel is not None and self.runner is subprocess_runner) else {})
 
     def find_port(self, timeout=60, on_tick=None, pattern="/dev/ttyUSB*"):
         """Poll for the EDL serial port (created when the device enters EDL). Returns the path or None."""
         for i in range(max(1, timeout // 2)):
+            if self.cancel is not None and self.cancel.is_set():
+                return None
             ports = sorted(glob.glob(pattern))
             if ports:
                 return ports[0]
@@ -389,7 +466,8 @@ class Edl:
         xml.write_text(self.rawprogram_xml(label, img_name, geometry))
 
         log(f"EDL: loading Firehose programmer via Sahara on {port}...")
-        rc, out, err = self.runner([qsahara, "-p", port, "-s", "13:" + self.programmer])
+        rc, out, err = self.runner([qsahara, "-p", port, "-s", "13:" + self.programmer],
+                                   **self._runner_kw())
         blob = (out or "") + (err or "")
         if "Could not connect" in blob or "Sahara protocol completed" not in blob:
             log(f"EDL: Sahara failed (port permission? add user to 'dialout' or run as root). {err.strip()}")
@@ -398,7 +476,7 @@ class Edl:
         log(f"EDL: Firehose writing {label}...")
         rc, out, err = self.runner([fh, "--port=" + port, "--sendxml=" + xml.name,
                                     "--search_path=" + str(workdir), "--memoryname=" + self.memoryname,
-                                    "--noprompt", "--showpercentagecomplete"])
+                                    "--noprompt", "--showpercentagecomplete"], **self._runner_kw())
         blob = (out or "") + (err or "")
         if "All Finished Successfully" not in blob and "{SUCCESS}" not in blob:
             log(f"EDL: Firehose write of {label} FAILED. {err.strip()}")

@@ -695,6 +695,13 @@ class App:
             b.pack(side="left", padx=4, pady=4)
             _tip(b, tip)
             self.btns.append(b)
+        # Cancel: aborts the running op. NOT in self.btns (those get disabled while busy) — it's the one
+        # control that must stay live during an operation. Enabled only while busy.
+        self.cancel_btn = ttk.Button(row2, text="✗ Cancel", command=self._cancel_op, state="disabled")
+        self.cancel_btn.pack(side="right", padx=4, pady=4)
+        _tip(self.cancel_btn,
+             "Stop the running operation. Safe during the copy/boot phases; during the brief init_boot "
+             "WRITE it asks first, since interrupting a flash can brick the unit.")
 
         # Activity bar: an animated progress strip + live status/elapsed so long jobs (e.g. pulling a
         # multi-GB golden over USB) visibly show they're WORKING, not frozen.
@@ -768,9 +775,12 @@ class App:
         self.busy = True
         self._action = label
         self._t0 = time.monotonic()
+        self.cancel_event = threading.Event()       # this op's abort signal (set by the Cancel button)
+        self._flash_critical = False                # True only during the init_boot WRITE (brick-warning gate)
         self.log(f"⏱ starting: {label}")
         for b in self.btns:
             b.configure(state="disabled")
+        self.cancel_btn.configure(state="normal", text="✗ Cancel")
         self._last_line = ""
         self.progress.config(mode="indeterminate")     # default: marching bar until a real % arrives
         self.progress["value"] = 0
@@ -795,6 +805,9 @@ class App:
             self.status_var.set(f"Ready.  (last action took {el // 60}m {el % 60:02d}s)")
             self.log(f"⏱ {self._action} — finished in {el // 60}m {el % 60:02d}s")
             self._report(self._action, result_box.get("r"))
+            self.cancel_btn.configure(state="disabled", text="✗ Cancel")
+            self.cancel_event = None
+            self._flash_critical = False
             for b in self.btns:
                 b.configure(state="normal")
             try:
@@ -819,22 +832,48 @@ class App:
                 self.win.after(0, done)
         threading.Thread(target=wrap, daemon=True).start()
 
+    def _cancel_op(self):
+        """Abort the running operation. During the init_boot WRITE, confirm first (a mid-flash cancel can
+        brick). Otherwise signal immediately — the subprocess / stream / wait layers stop within ~1 s."""
+        ev = getattr(self, "cancel_event", None)
+        if ev is None or not self.busy:
+            return
+        if getattr(self, "_flash_critical", False):
+            if not messagebox.askyesno(
+                    "CAS — cancel during a flash?",
+                    "A device is being FLASHED right now. Interrupting a flash can BRICK the unit.\n\n"
+                    "Cancel anyway?"):
+                return
+        ev.set()
+        self.log("⏹ cancelling — stopping the current operation…")
+        self.cancel_btn.configure(state="disabled", text="cancelling…")
+
+    def _on_flash_critical(self, active):
+        """Called from a worker thread by the flash backends around the partition write; marshal the flag to
+        the UI thread so _cancel_op knows whether to show the brick-warning before aborting."""
+        self.win.after(0, lambda a=bool(active): setattr(self, "_flash_critical", a))
+
     def _report(self, label, result):
         """Post-action mini-report in the log — a clear pass / skip / fail summary for easy debugging.
         Accepts a batch dict {serial: (status, detail)}, a single bool, or None (nothing to summarize)."""
         DONE = ("ok",)
         SKIP = ("skip", "skip-golden", "no-profile", "no-init_boot")
+        CANCEL = ("cancelled",)
         if isinstance(result, dict):
             good = [s for s, (st, _) in result.items() if st in DONE]
             skipped = [s for s, (st, _) in result.items() if st in SKIP]
-            bad = [s for s, (st, _) in result.items() if st not in DONE and st not in SKIP]
+            cancelled = [s for s, (st, _) in result.items() if st in CANCEL]
+            bad = [s for s, (st, _) in result.items()
+                   if st not in DONE and st not in SKIP and st not in CANCEL]
             self.log(f"──────── REPORT: {label} ────────")
             for s, (st, d) in result.items():
-                mark = "✅" if st in DONE else ("⏭" if st in SKIP else "❌")
+                mark = ("✅" if st in DONE else "⏭" if st in SKIP else "⏹" if st in CANCEL else "❌")
                 self.log(f"   {mark} {s}: {st}" + (f" — {d}" if d else ""))
             summary = f"   → {len(good)} ok"
             if skipped:
                 summary += f", {len(skipped)} skipped"
+            if cancelled:
+                summary += f", {len(cancelled)} cancelled"
             summary += f", {len(bad)} failed"
             if bad:
                 summary += f"   ·   FAILED: {', '.join(bad)}"
@@ -1221,20 +1260,21 @@ class App:
         devs = devices if devices is not None else [(s, "device") for s in serials]
 
         def work():
+            cev = self.cancel_event                          # this op's cancel signal (set by the Cancel button)
             if kind == "download":
-                res = PV.provision_all(lambda s: Adb(serial=s, adb=self.adb_bin), devs,
+                res = PV.provision_all(lambda s: Adb(serial=s, adb=self.adb_bin, cancel=cev), devs,
                                        root=self.profiles_root, log=self.log, profile_map=pm,
                                        es_media_src=config.es_media_src())
             elif kind == "root":
-                res = PV.root_all(lambda s: Adb(serial=s, adb=self.adb_bin),
-                                  lambda s: Fastboot(serial=s, fastboot=self.fb_bin), devs,
+                res = PV.root_all(lambda s: Adb(serial=s, adb=self.adb_bin, cancel=cev),
+                                  lambda s: Fastboot(serial=s, fastboot=self.fb_bin, cancel=cev), devs,
                                   profiles_root=self.profiles_root, appdir=APPDIR, log=self.log,
-                                  profile_map=pm, force_serials=force)
+                                  profile_map=pm, force_serials=force, on_critical=self._on_flash_critical)
             else:  # lock
-                res = PV.seal_all(lambda s: Adb(serial=s, adb=self.adb_bin),
-                                  lambda s: Fastboot(serial=s, fastboot=self.fb_bin), devs,
+                res = PV.seal_all(lambda s: Adb(serial=s, adb=self.adb_bin, cancel=cev),
+                                  lambda s: Fastboot(serial=s, fastboot=self.fb_bin, cancel=cev), devs,
                                   profiles_root=self.profiles_root, appdir=APPDIR, log=self.log,
-                                  profile_map=pm, force_serials=force)
+                                  profile_map=pm, force_serials=force, on_critical=self._on_flash_critical)
             self.win.after(0, self.refresh_devices)
             failed = [s for s, v in res.items() if v[0] in ("fail", "error")]
             if failed:
@@ -1273,8 +1313,8 @@ class App:
                 f"Save device {serial} into profile '{name}'?\n(no golden saved there yet)"):
             return
         def work():
-            ok = PV.capture_to_pc(Adb(serial=serial, adb=self.adb_bin), name, _stamp(),
-                                  root=self.profiles_root, log=self.log)
+            ok = PV.capture_to_pc(Adb(serial=serial, adb=self.adb_bin, cancel=self.cancel_event),
+                                  name, _stamp(), root=self.profiles_root, log=self.log)
             self.win.after(0, self.refresh_profiles)
             return ok
         self._run_bg(work, label=f"Saving {serial} → {name}")
