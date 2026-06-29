@@ -398,8 +398,17 @@ def nas_connect(timeout=20):
                                capture_output=True, text=True, timeout=timeout, creationflags=no_window)
             if r.returncode != 0:
                 return False
+        elif sys.platform == "darwin":
+            from urllib.parse import quote
+            mp = pathlib.Path("/Volumes") / nas_share_name()
+            mp.mkdir(parents=True, exist_ok=True)
+            subprocess.run(
+                ["mount_smbfs",
+                 f"//{quote(user)}:{quote(pw)}@{nas_host()}/{quote(nas_share_name())}", str(mp)],
+                capture_output=True, text=True, timeout=timeout)
         else:
-            url = "smb://" + NAS_DEFAULT.lstrip("\\").replace("\\", "/")
+            from urllib.parse import quote
+            url = f"smb://{nas_host()}/{quote(nas_share_name())}"   # mount the SHARE; discovery appends subpath
             subprocess.run(["gio", "mount", url], input=f"{user}\n\n{pw}\n",
                            text=True, capture_output=True, timeout=timeout)
         return library_reachable()

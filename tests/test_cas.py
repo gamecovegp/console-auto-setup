@@ -557,6 +557,37 @@ class TestConfig(unittest.TestCase):
             os.environ["CAS_CONFIG"] = str(cfgp)
             self.assertEqual(C.firmware_dir(), real)
 
+    def _connect_cmd(self, platform):
+        # Run nas_connect on a faked OS with NAS 'reachable' but library not yet mounted, capturing the
+        # subprocess command it would run. Returns the argv (list) of the mount command.
+        from cas import config as C
+        from unittest import mock
+        captured = {}
+        def fake_run(args, *a, **k):
+            captured["argv"] = args
+            class R: returncode = 0; stdout = ""; stderr = ""
+            return R()
+        reach = iter([False, True])    # not reachable before, reachable after (so it returns True)
+        with mock.patch.object(C.sys, "platform", platform), \
+             mock.patch.object(C, "get_nas_credentials", lambda: ("u", "p w")), \
+             mock.patch.object(C, "nas_reachable", lambda timeout=1.5: True), \
+             mock.patch.object(C, "library_reachable", lambda: next(reach)), \
+             mock.patch.object(C.subprocess, "run", fake_run), \
+             mock.patch.object(C.pathlib.Path, "mkdir", lambda self, **kw: None):
+            C.nas_connect()
+        return captured.get("argv")
+
+    def test_nas_connect_macos_mounts_share(self):
+        argv = self._connect_cmd("darwin")
+        self.assertEqual(argv[0], "mount_smbfs")
+        self.assertTrue(any("01%20GAMECOVE" in str(x) for x in argv))   # share, URL-encoded
+        self.assertTrue(any(str(x).endswith("/Volumes/01 GAMECOVE") for x in argv))
+
+    def test_nas_connect_linux_mounts_share_not_subpath(self):
+        argv = self._connect_cmd("linux")
+        self.assertEqual(argv[:2], ["gio", "mount"])
+        self.assertEqual(argv[2], "smb://192.168.100.227/01%20GAMECOVE")  # share only, no subpath
+
 
 class TestReleaseToken(unittest.TestCase):
     def test_default_token_when_no_override(self):
