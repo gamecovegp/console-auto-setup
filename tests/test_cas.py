@@ -356,7 +356,7 @@ class TestProfiles(unittest.TestCase):
 
 class TestConfig(unittest.TestCase):
     def setUp(self):
-        self._saved = {k: os.environ.get(k) for k in ("CAS_CONFIG", "CAS_PROFILES")}
+        self._saved = {k: os.environ.get(k) for k in ("CAS_CONFIG", "CAS_PROFILES", "XDG_RUNTIME_DIR")}
 
     def tearDown(self):
         for k, v in self._saved.items():
@@ -497,6 +497,27 @@ class TestConfig(unittest.TestCase):
         from cas import config as C
         self.assertEqual(C.nas_share_name(), "01 GAMECOVE")
         self.assertEqual(C.nas_subpath(), "[03] SETUP/CAS Profiles")
+
+    def test_nas_mountpoint_linux_gvfs(self):
+        from cas import config as C
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as t:
+            os.environ["XDG_RUNTIME_DIR"] = t
+            try:
+                gv = pathlib.Path(t) / "gvfs" / "smb-share:server=192.168.100.227,share=01 gamecove"
+                with mock.patch.object(C.sys, "platform", "linux"):
+                    self.assertIsNone(C.nas_mountpoint())     # not mounted yet
+                    gv.mkdir(parents=True)
+                    self.assertEqual(C.nas_mountpoint(), str(gv))
+            finally:
+                os.environ.pop("XDG_RUNTIME_DIR", None)
+
+    def test_nas_mountpoint_macos_volumes(self):
+        from cas import config as C
+        from unittest import mock
+        with mock.patch.object(C.sys, "platform", "darwin"), \
+             mock.patch.object(C.pathlib.Path, "is_dir", lambda self: str(self) == "/Volumes/01 GAMECOVE"):
+            self.assertEqual(C.nas_mountpoint(), "/Volumes/01 GAMECOVE")
 
 
 class TestReleaseToken(unittest.TestCase):

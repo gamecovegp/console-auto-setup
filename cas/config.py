@@ -323,6 +323,27 @@ def nas_subpath():
     return "/".join(parts[2:]) if len(parts) > 2 else ""
 
 
+def nas_mountpoint():
+    """The local path of the NAS SHARE ROOT on THIS OS (to which nas_subpath() is appended), or None if the
+    share is not mounted. Discovered by existence, never hardcoded: Windows -> the UNC; macOS ->
+    /Volumes/<share>; Linux -> the conventional gvfs FUSE path gio mounts the share at."""
+    share = nas_share_name()
+    if not share:
+        return None
+    try:
+        if sys.platform == "win32":
+            unc = nas_share_root()
+            return unc if pathlib.Path(unc).is_dir() else None
+        if sys.platform == "darwin":
+            p = pathlib.Path("/Volumes") / share
+            return str(p) if p.is_dir() else None
+        runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+        p = pathlib.Path(runtime) / "gvfs" / f"smb-share:server={nas_host()},share={share.lower()}"
+        return str(p) if p.is_dir() else None
+    except OSError:
+        return None
+
+
 def nas_host():
     """The NAS hostname/IP from NAS_DEFAULT (e.g. '192.168.100.227')."""
     return NAS_DEFAULT.lstrip("\\").split("\\")[0]
