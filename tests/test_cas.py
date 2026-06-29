@@ -1693,6 +1693,42 @@ class TestRunChain(unittest.TestCase):
                          [("root", ["S1", "S2"]), ("download", ["S2"]), ("lock", ["S2"])])
         self.assertEqual(survivors, ["S2"])
 
+    def test_save_step_root_fails_no_indexerror(self):
+        """Bug-repro (fix #1): survivors==[] after root failure must NOT raise IndexError on survivors[0]."""
+        from unittest.mock import patch
+        import cas.provision as PV_mod
+        app = self._app()
+        # override _stage so root ALWAYS fails for S1 (our only device)
+        def fake_stage_all_fail(step, serials, pm, force, cev):
+            app._stage_calls.append((step, list(serials)))
+            return {s: ("fail",) for s in serials}
+        app._stage = fake_stage_all_fail
+        captured = []
+        with patch.object(PV_mod, "capture_to_pc", lambda *a, **kw: captured.append(True) or True):
+            # Before fix #1 this raises IndexError; after fix it must return []
+            survivors = app._run_chain_core(["root", "save"], ["S1"], "testprof")
+        self.assertEqual(survivors, [])
+        self.assertEqual(captured, [])  # capture_to_pc must never be invoked
+
+    def test_save_step_root_succeeds_invokes_capture(self):
+        """When root succeeds for the single device, capture_to_pc must be called on that device."""
+        from unittest.mock import patch
+        import cas.provision as PV_mod
+        app = self._app()
+        # override _stage so root SUCCEEDS for S1
+        def fake_stage_ok(step, serials, pm, force, cev):
+            app._stage_calls.append((step, list(serials)))
+            return {s: ("ok",) for s in serials}
+        app._stage = fake_stage_ok
+        captured_serials = []
+        def fake_capture(adb, name, stamp, root, log):
+            captured_serials.append(adb.serial)
+            return True
+        with patch.object(PV_mod, "capture_to_pc", fake_capture):
+            survivors = app._run_chain_core(["root", "save"], ["S1"], "testprof")
+        self.assertEqual(survivors, ["S1"])
+        self.assertEqual(captured_serials, ["S1"])
+
 
 class TestResolveChain(unittest.TestCase):
     def _r(self, **t):

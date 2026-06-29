@@ -1322,9 +1322,11 @@ class App:
             return PV.root_all(mk_adb, mk_fb, devs, profiles_root=self.profiles_root, appdir=APPDIR,
                                log=self.log, profile_map=pm, force_serials=force,
                                on_critical=self._on_flash_critical)
-        return PV.seal_all(mk_adb, mk_fb, devs, profiles_root=self.profiles_root, appdir=APPDIR,
-                           log=self.log, profile_map=pm, force_serials=force,
-                           on_critical=self._on_flash_critical)
+        if step == "lock":
+            return PV.seal_all(mk_adb, mk_fb, devs, profiles_root=self.profiles_root, appdir=APPDIR,
+                               log=self.log, profile_map=pm, force_serials=force,
+                               on_critical=self._on_flash_critical)
+        raise ValueError(f"unknown step {step!r}")
 
     def _run_chain_core(self, steps, serials, save_name):
         """Pure chain loop (no Tk/threads): fold survivors across stages, return the final survivor list."""
@@ -1335,6 +1337,8 @@ class App:
             if cev.is_set():
                 break
             if step == "save":
+                if not survivors:
+                    break
                 s = survivors[0]
                 ok = PV.capture_to_pc(Adb(serial=s, adb=self.adb_bin, cancel=cev), save_name, _stamp(),
                                       root=self.profiles_root, log=self.log)
