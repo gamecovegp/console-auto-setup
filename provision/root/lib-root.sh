@@ -143,7 +143,7 @@ gl_capture(){
   [ -d "$_gl_src" ] || { warn "gamelauncher: $_gl_pkg has no data dir — skip"; return 1; }
   mkdir -p "$_gl_out/gamelauncher"
   _gl_gld="$(cd "$_gl_out/gamelauncher" 2>/dev/null && pwd)" || { warn "gamelauncher: out dir $_gl_out invalid — skip"; return 1; }
-  { echo "pkg=$_gl_pkg"; echo "uid=$(stat -c %u "$_gl_src" 2>/dev/null)"; } > "$_gl_gld/meta"
+  echo "pkg=$_gl_pkg" > "$_gl_gld/meta"   # only pkg is portable + used by restore (target uid is per-device)
   ( cd "$_gl_src" 2>/dev/null && tar -cf "$_gl_gld/config.tar" \
       --exclude='files/datastore/*-shm' --exclude='files/datastore/*.tmp' \
       files/datastore shared_prefs 2>/dev/null )
@@ -165,7 +165,9 @@ gl_restore(){
   chown -R system:system "$_gl_tgt/files/datastore" 2>/dev/null
   [ -d "$_gl_tgt/shared_prefs" ] && chown -R system:system "$_gl_tgt/shared_prefs" 2>/dev/null
   restorecon -R "$_gl_tgt/files/datastore" 2>/dev/null || warn "gamelauncher: restorecon failed (verify on enforcing unit)"
-  [ -d "$_gl_tgt/shared_prefs" ] && restorecon -R "$_gl_tgt/shared_prefs" 2>/dev/null
+  if [ -d "$_gl_tgt/shared_prefs" ]; then
+    restorecon -R "$_gl_tgt/shared_prefs" 2>/dev/null || warn "gamelauncher: restorecon shared_prefs failed (verify on enforcing unit)"
+  fi
   if ls "$_gl_tgt"/files/datastore/*.preferences_pb >/dev/null 2>&1; then
     ok "game launcher config applied: $_gl_pkg"; return 0
   fi
