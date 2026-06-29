@@ -1502,6 +1502,43 @@ class TestCancel(unittest.TestCase):
         self.assertEqual(events, [True, False])          # marked entering + leaving the partition write
 
 
+class TestProvisionLockdown(unittest.TestCase):
+    def _profile(self, tmp, flags):
+        apps = ["org.es_de.frontend", PV.COMPANION_PKG]
+        d = pathlib.Path(tmp) / "p"
+        pay = d / "golden_root_payload"
+        pay.mkdir(parents=True)
+        (d / "profile.meta").write_text("model_match=Odin2 ?Mini\nfrontend=es-de\ncaptured=2026-06-16\n")
+        (pay / "pkglist.txt").write_text("\n".join(apps) + "\n")
+        (pay / "global.meta").write_text("golden_serial=9C33-6BBD\n")
+        for a in apps:
+            (pay / a / "apk").mkdir(parents=True)
+            (pay / a / "apk" / "base.apk").write_text("x")
+            (pay / a / "data.tar").write_text("x")
+        P.save_manifest(d / "manifest", apps, flags, header="# p")
+        return P.Profile(d)
+
+    def test_download_sets_device_owner_when_lockdown_on(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            prof = self._profile(tmp, {"settings": "on", "lockdown": "on"})
+            r = FakeRunner()
+            self.assertTrue(PV.provision(Adb(runner=r), prof, log=lambda *_: None))
+            self.assertTrue(any("dpm set-device-owner" in c for c in r.cmds()))
+
+    def test_download_skips_device_owner_when_lockdown_off(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            prof = self._profile(tmp, {"settings": "on", "lockdown": "off"})
+            r = FakeRunner()
+            self.assertTrue(PV.provision(Adb(runner=r), prof, log=lambda *_: None))
+            self.assertFalse(any("dpm set-device-owner" in c for c in r.cmds()))
+
+    def test_download_succeeds_even_if_lockdown_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            prof = self._profile(tmp, {"settings": "on", "lockdown": "on"})
+            r = FakeRunner(do_set_ok=False)          # device not fresh -> lockdown fails
+            self.assertTrue(PV.provision(Adb(runner=r), prof, log=lambda *_: None))  # still provisions
+
+
 class TestDeviceOwner(unittest.TestCase):
     def _adb(self, **kw):
         return Adb(runner=FakeRunner(**kw))

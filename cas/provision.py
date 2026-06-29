@@ -357,6 +357,13 @@ def provision(adb, profile, log=print, dry_push=False, es_media_src=None):
         push_es_media(adb, log=log, media_src=es_media_src)   # opt-in: push box art onto internal storage
     if not dry_push and COMPANION_PKG in pkgs:
         install_companion(adb, log=log)                # refresh the in-manifest Companion app to the PC build
+        # Lockdown rides ② Download: make the Companion the Device Owner so it's non-uninstallable and
+        # factory reset is blocked. Default ON when the Companion ships; `@lockdown off` opts a profile out.
+        # Best-effort, like install_companion above: a failure is a LOUD warning, not a provision abort.
+        if flags.get("lockdown", "on") != "off":
+            if not set_device_owner(adb, log=log):
+                log("WARNING: device-owner lockdown FAILED — unit shipped UN-LOCKED (uninstallable / "
+                    "factory-resettable). Ensure the unit is FRESH and re-Download to lock it.")
     if not dry_push:
         adb.su(f"rm -rf {DEV}")
     adb.reboot()
