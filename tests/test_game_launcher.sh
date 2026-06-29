@@ -62,4 +62,9 @@ DATA_ROOT="$dst" gl_restore "$out" "com.handheld.launcher" >/dev/null || { echo 
 [ -f "$dst/com.handheld.launcher/files/datastore/GameLauncher.preferences_pb" ] \
   || { echo "FAIL(res: preferences_pb not written)"; fail=1; }
 
+# gl_capture with a RELATIVE out_dir resolves correctly regardless of cwd (regression: Task 2 review Important)
+mkdir -p "$tmp/relout"
+( cd "$tmp" && DATA_ROOT="$tmp/data" gl_capture "relout" "com.handheld.launcher" >/dev/null )
+tar -tf "$tmp/relout/gamelauncher/config.tar" >/dev/null 2>&1 || { echo "FAIL(cap: relative out misdirected)"; fail=1; }
+
 [ "$fail" -eq 0 ] && { echo "PASS: game_launcher"; exit 0; } || exit 1

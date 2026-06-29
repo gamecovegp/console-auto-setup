@@ -142,15 +142,16 @@ gl_capture(){
   out="$1"; pkg="$2"; DR="${DATA_ROOT:-/data/data}"; src="$DR/$pkg"
   [ -d "$src" ] || { warn "gamelauncher: $pkg has no data dir — skip"; return 1; }
   mkdir -p "$out/gamelauncher"
-  { echo "pkg=$pkg"; echo "uid=$(stat -c %u "$src" 2>/dev/null)"; } > "$out/gamelauncher/meta"
-  ( cd "$src" 2>/dev/null && tar -cf "$out/gamelauncher/config.tar" \
+  gld="$(cd "$out/gamelauncher" 2>/dev/null && pwd)" || { warn "gamelauncher: out dir $out invalid — skip"; return 1; }
+  { echo "pkg=$pkg"; echo "uid=$(stat -c %u "$src" 2>/dev/null)"; } > "$gld/meta"
+  ( cd "$src" 2>/dev/null && tar -cf "$gld/config.tar" \
       --exclude='files/datastore/*-shm' --exclude='files/datastore/*.tmp' \
       files/datastore shared_prefs 2>/dev/null )
-  if tar -tf "$out/gamelauncher/config.tar" >/dev/null 2>&1; then
+  if tar -tf "$gld/config.tar" >/dev/null 2>&1; then
     ok "captured game launcher config: $pkg"; return 0
   fi
   warn "gamelauncher: no portable config for $pkg (no datastore/shared_prefs?) — skip"
-  rm -f "$out/gamelauncher/config.tar"; return 1
+  rm -rf "$out/gamelauncher"; return 1
 }
 # gl_restore <payload_dir> <pkg> — write the captured config back as a SYSTEM app: force-stop -> extract ->
 # chown system:system -> restorecon -> verify a preferences_pb exists. DATA_ROOT overridable for tests.
@@ -164,6 +165,7 @@ gl_restore(){
   chown -R system:system "$tgt/files/datastore" 2>/dev/null
   [ -d "$tgt/shared_prefs" ] && chown -R system:system "$tgt/shared_prefs" 2>/dev/null
   restorecon -R "$tgt/files/datastore" 2>/dev/null || warn "gamelauncher: restorecon failed (verify on enforcing unit)"
+  [ -d "$tgt/shared_prefs" ] && restorecon -R "$tgt/shared_prefs" 2>/dev/null
   if ls "$tgt"/files/datastore/*.preferences_pb >/dev/null 2>&1; then
     ok "game launcher config applied: $pkg"; return 0
   fi
