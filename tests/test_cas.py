@@ -1628,6 +1628,13 @@ class TestSaveManifestAxes(unittest.TestCase):
         self.assertEqual(P.manifest_axes(m), {"com.foo": (True, True)})
         self.assertIn("\ncom.foo\n", "\n" + m.read_text())
 
+    def test_gamelauncher_flag_roundtrips(self):
+        import tempfile, pathlib
+        d = pathlib.Path(tempfile.mkdtemp())
+        m = d / "manifest"
+        P.save_manifest(m, ["com.foo"], {"gamelauncher": "on", "homescreen": "on"})
+        self.assertEqual(P.manifest_flags(m).get("gamelauncher"), "on")
+
 
 class TestProfileLauncherAndAxes(unittest.TestCase):
     def test_all_pkgs_includes_launcher_meta(self):

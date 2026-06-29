@@ -333,6 +333,8 @@ def provision(adb, profile, log=print, dry_push=False, es_media_src=None):
             return False
         if (pay / "homescreen").exists() and not push(pay / "homescreen", f"{DEV}/payload/"):
             return False                                   # launcher layout + wallpaper + widget map (optional)
+        if (pay / "gamelauncher").exists() and not push(pay / "gamelauncher", f"{DEV}/payload/"):
+            return False                                   # game-frontend emulator picks (DataStore), optional
         for pkg in pkgs:                                   # internal dirs for included apps only
             d = P.internal_for(pkg)
             tar = pay / f"internal_{d}.tar" if d else None

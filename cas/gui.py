@@ -946,7 +946,8 @@ class App:
         self.flag_vars = {}
         flags = prof.flags()
         flag_labels = {"settings": "Display & system settings", "hardening": "Performance & update lock",
-                       "grants": "Folder permissions", "homescreen": "Homescreen layout"}
+                       "grants": "Folder permissions", "homescreen": "Homescreen layout",
+                       "gamelauncher": "Game launcher emulator picks"}
         flag_tips = {
             "settings": "Apply the saved display/brightness/animation/screen-timeout preferences.",
             "hardening": "Keep emulators awake (exempt from battery optimization so they're never killed) "
@@ -955,9 +956,11 @@ class App:
                       "ROM/BIOS folders without re-asking on first launch.",
             "homescreen": "Restore the homescreen layout — your app folders, icon/dock arrangement, "
                           "wallpaper (and widgets, best-effort).",
+            "gamelauncher": "Save the game frontend's per-system emulator choices (PSX→DuckStation, "
+                            "PSP→PPSSPP) and auto-apply them on Download — no manual setup per unit.",
         }
         ttk.Label(self.modf, text="— behavior —").pack(anchor="w", pady=(6, 0))
-        for fl in ("settings", "hardening", "grants", "homescreen"):
+        for fl in ("settings", "hardening", "grants", "homescreen", "gamelauncher"):
             fv = tk.BooleanVar(value=(flags.get(fl, "on") == "on"))
             self.flag_vars[fl] = fv
             cb = ttk.Checkbutton(self.modf, text=f"{flag_labels.get(fl, fl)}  (@{fl})", variable=fv)
