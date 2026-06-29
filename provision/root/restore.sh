@@ -73,6 +73,9 @@ for pkg in $RPKGS; do
   am force-stop "$pkg" 2>/dev/null
   rm -rf "/data/data/$pkg/"* "/data/data/$pkg/".[!.]* 2>/dev/null
   tar -xf "$P/$pkg/data.tar" -C /data/data 2>/dev/null || { warn "data extract failed: $pkg"; FAIL=$((FAIL+1)); }
+  # an OLD payload (captured before IDENTITY_EXCLUDES existed) may still carry per-install identity — strip
+  # it so THIS unit mints its own device-id + starts with empty analytics. New captures already exclude these.
+  for idf in $IDENTITY_EXCLUDES; do case "$idf" in "$pkg"/*) rm -f "/data/data/$idf" 2>/dev/null;; esac; done
   # external app data (firmware/BIOS/keys/nand) -> internal-storage BACKING store, then chown to THIS
   # unit's app uid:ext_data_rw(1078). FUSE reflects REAL ownership (proven: a shell-owned push locked the
   # app out -> black screen), so leaving the golden's uids/root here would break key/BIOS loading + saves.

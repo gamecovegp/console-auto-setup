@@ -25,6 +25,13 @@ EXCLUDE_PKGS="com.termux moe.shizuku.privileged.api com.topjohnwu.magisk"
 # golden. GameHub's Wine/Box64 container (files/usr, ~5 GB) is set up on-request per unit, so the golden
 # ships GameHub APP-ONLY. Format: "pkg/reldir pkg/reldir …" (member-relative — matches mk_tar's exclude form).
 HEAVY_EXCLUDES="gamehub.lite/files/usr gamehub.lite/files/xj_winemu"
+# Per-INSTALL identity/state files that must NEVER be cloned from the golden — each unit must mint its own,
+# else every device shares the golden's "unique" id and shows the golden's local analytics (recent searches).
+# The Companion app self-heals (it binds its device-id to ANDROID_ID and resets analytics on new hardware),
+# but ANDROID_ID can be empty on some builds — then the app can't tell it was cloned, so we ALSO strip these
+# at the provisioning layer. capture excludes them; restore deletes any an OLD payload still carries.
+# Same member-relative form as HEAVY_EXCLUDES ("pkg/reldir-or-file" — matches mk_tar's exclude + the restore rm).
+IDENTITY_EXCLUDES="com.gamecove.gamecove_companion/files/device_id.txt com.gamecove.gamecove_companion/files/analytics.json"
 # Every user-installed app on the golden, minus the host tools — this is the set capture clones.
 user_pkgs(){
   for p in $(pm list packages -3 2>/dev/null | sed 's/^package://'); do

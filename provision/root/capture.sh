@@ -45,7 +45,9 @@ for pkg in $(cat "$P/pkglist.txt"); do
   # set on restore, so shipping them twice just bloats the golden), app_flutter (Flutter re-extracts these
   # from the APK on first run — e.g. the Companion's 76 MB kernel_blob), plus any per-app HEAVY dirs (e.g.
   # GameHub's ~5 GB Wine container — app ships, runtime is set up on-request).
-  heavy=""; for h in $HEAVY_EXCLUDES; do case "$h" in "$pkg"/*) heavy="$heavy $h";; esac; done
+  # extra per-app excludes for THIS pkg: HEAVY regenerable bulk + per-INSTALL IDENTITY files (device-id /
+  # analytics) that must stay unique per unit and never ride the golden (see lib-root.sh).
+  heavy=""; for h in $HEAVY_EXCLUDES $IDENTITY_EXCLUDES; do case "$h" in "$pkg"/*) heavy="$heavy $h";; esac; done
   mk_tar "$P/$pkg/data.tar" /data/data "$pkg" "$pkg/cache" "$pkg/code_cache" "$pkg/cores" "$pkg/app_flutter" $heavy \
     || { warn "data.tar looks corrupt: $pkg"; CFAIL=$((CFAIL+1)); }
   # external app data — KEEP firmware/BIOS/keys/nand/driver. DROP regenerable GPU shader caches (rebuilt on
