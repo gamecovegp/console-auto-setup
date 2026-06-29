@@ -310,6 +310,20 @@ def default_capture_selection(device_apps, game_launcher=None, home_launcher=Non
     return sel
 
 
+def initial_capture_selection(device_apps, saved_axes, saved_flags, game_launcher=None, home_launcher=None):
+    """The Save-list initial check state: default_capture_selection, overlaid by a saved capture-manifest's
+    package axes, then the launcher rows seeded from the saved @gamelauncher/@homescreen flags (launcher
+    selection is persisted as flags, not package lines). Pure — no I/O."""
+    sel = default_capture_selection(device_apps, game_launcher, home_launcher)
+    for pkg, axes_pair in (saved_axes or {}).items():
+        sel[pkg] = axes_pair
+    if game_launcher and game_launcher in sel:
+        sel[game_launcher] = (False, (saved_flags or {}).get("gamelauncher", "on") == "on")
+    if home_launcher and home_launcher in sel:
+        sel[home_launcher] = (False, (saved_flags or {}).get("homescreen", "off") == "on")
+    return sel
+
+
 def archive_profile(profile, stamp, archive_root=None):
     """Soft-delete: MOVE the profile dir to profiles/_archive/<name>_<stamp>. Never rm. Returns dest."""
     src = pathlib.Path(profile.path)

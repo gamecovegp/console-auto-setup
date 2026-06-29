@@ -1801,6 +1801,19 @@ class TestSaveManifestAxes(unittest.TestCase):
         P.save_manifest(m, ["com.foo"], {"gamelauncher": "on", "homescreen": "on"})
         self.assertEqual(P.manifest_flags(m).get("gamelauncher"), "on")
 
+    def test_initial_capture_selection_round_trips_launcher_flags(self):
+        from cas import profiles as P
+        apps = ["com.retroarch.aarch64", "com.note.app"]
+        # saved: an unticked game launcher (config off), HOME on, a package axis override
+        sel = P.initial_capture_selection(
+            apps, {"com.note.app": (True, False)},
+            {"gamelauncher": "off", "homescreen": "on"},
+            game_launcher="com.handheld.launcher", home_launcher="com.android.launcher3")
+        self.assertEqual(sel["com.retroarch.aarch64"], (True, True))     # emulator default
+        self.assertEqual(sel["com.note.app"], (True, False))             # package axis override applied
+        self.assertEqual(sel["com.handheld.launcher"], (False, False))   # saved gamelauncher=off honored
+        self.assertEqual(sel["com.android.launcher3"], (False, True))    # saved homescreen=on honored
+
 
 class TestProfileLauncherAndAxes(unittest.TestCase):
     def test_all_pkgs_includes_launcher_meta(self):

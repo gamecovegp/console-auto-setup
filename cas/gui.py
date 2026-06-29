@@ -938,9 +938,8 @@ class App:
         self._cap_game_launcher = gl
         self._cap_home_launcher = hl
         # default-on: EMULATOR_PKGS ∩ device_apps + game launcher; overlaid by saved capture-manifest
-        cap_sel = P.default_capture_selection(device_apps, game_launcher=gl, home_launcher=hl)
-        for pkg, axes_pair in prof.capture_axes().items():
-            cap_sel[pkg] = axes_pair                       # saved capture-manifest overrides defaults
+        cap_sel = P.initial_capture_selection(device_apps, prof.capture_axes(), prof.capture_flags(),
+                                                  game_launcher=gl, home_launcher=hl)
         for pkg, (apk0, cfg0) in cap_sel.items():
             is_launcher = (pkg == gl or pkg == hl)
             if is_launcher:
@@ -1284,9 +1283,12 @@ class App:
         return (_one("game_launcher"), _one("home_launcher"))
 
     def _set_all(self, vars_dict, value):
-        """Set every (apk_var, cfg_var) pair in vars_dict to value."""
-        for apk_v, cfg_v in vars_dict.values():
-            apk_v.set(value)
+        """Set every (apk_var, cfg_var) pair in vars_dict to value.
+        Launcher rows have a disabled APK checkbox; skip apk_v for those so it never diverges."""
+        launchers = {p for p in (self._cap_game_launcher, self._cap_home_launcher) if p}
+        for pkg, (apk_v, cfg_v) in vars_dict.items():
+            if pkg not in launchers:
+                apk_v.set(value)
             cfg_v.set(value)
         self._sync_media_tab()
 
@@ -1800,17 +1802,9 @@ class App:
             self.win.after(0, lambda m=msg: self.sd_media_var.set(m))
         threading.Thread(target=work, daemon=True).start()
 
-    def _toggle_all_apps(self):
-        """'Select all apps' clicked — set every app checkbox to the master box's state."""
-        on = self.selall_var.get()
-        for a, c in self.pkg_vars.values():
-            a.set(on); c.set(on)
-        self._sync_media_tab()                             # ES-DE may have just been (un)ticked
-
     def _on_app_toggle(self):
-        """An app checkbox flipped: keep the 'Select all' master in sync, and show/hide the
-        'ES-DE box art' tab so it only appears when ES-DE is part of the selection."""
-        self._sync_selall()
+        """An app checkbox flipped: show/hide the 'ES-DE box art' tab so it only appears
+        when ES-DE is part of the selection."""
         self._sync_media_tab()
 
     def _sync_media_tab(self):
@@ -1827,11 +1821,6 @@ class App:
             nb.add(tab) if want else nb.hide(tab)
         except tk.TclError:
             pass
-
-    def _sync_selall(self):
-        """Keep the 'Select all apps' box in sync: ticked only when every app is ticked."""
-        if hasattr(self, "selall_var"):
-            self.selall_var.set(bool(self.pkg_vars) and all((a.get() or c.get()) for a, c in self.pkg_vars.values()))
 
     ICON_PX = 24                                          # uniform icon box for the app list
 
