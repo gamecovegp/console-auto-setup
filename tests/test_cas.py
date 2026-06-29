@@ -1667,6 +1667,33 @@ class TestSealScrub(unittest.TestCase):
         self.assertIn("flash init_boot", "\n".join(fb.cmds()))
 
 
+class TestRunChain(unittest.TestCase):
+    def _app(self):
+        from cas.gui import App
+        app = App.__new__(App)                            # bypass Tk __init__
+        app.adb_bin = app.fb_bin = None
+        app.profiles_root = "."
+        app.assigned = {"S1": "p", "S2": "p"}
+        app.assigned_manual = set()                       # required by _profile_map
+        app.log = lambda m: None                          # required by _run_chain_core logging
+        app.cancel_event = type("E", (), {"is_set": lambda self: False})()
+        app._stage_calls = []
+        def fake_stage(step, serials, pm, force, cev):
+            app._stage_calls.append((step, list(serials)))
+            # S1 fails 'root'; everything else ok
+            return {s: (("fail" if (step == "root" and s == "S1") else "ok"),) for s in serials}
+        app._stage = fake_stage
+        return app
+
+    def test_failed_root_drops_from_download(self):
+        app = self._app()
+        survivors = app._run_chain_core(["root", "download", "lock"], ["S1", "S2"], None)
+        # stages run in order; download/lock only see S2 (S1 dropped after failing root)
+        self.assertEqual(app._stage_calls,
+                         [("root", ["S1", "S2"]), ("download", ["S2"]), ("lock", ["S2"])])
+        self.assertEqual(survivors, ["S2"])
+
+
 class TestResolveChain(unittest.TestCase):
     def _r(self, **t):
         from cas.gui import App                          # the main window class

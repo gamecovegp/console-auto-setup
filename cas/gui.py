@@ -1310,6 +1310,57 @@ class App:
         self._run_bg(work, label=f"{label} {len(serials)} device(s)"
                                  f"{' (retry)' if devices is not None else ''}")
 
+    def _stage(self, step, serials, pm, force, cev):
+        """Run ONE unit stage across serials via the matching PV.*_all; return its {serial:(status,…)} dict."""
+        devs = [(s, "device") for s in serials]
+        mk_adb = lambda s: Adb(serial=s, adb=self.adb_bin, cancel=cev)
+        mk_fb = lambda s: Fastboot(serial=s, fastboot=self.fb_bin, cancel=cev)
+        if step == "download":
+            return PV.provision_all(mk_adb, devs, root=self.profiles_root, log=self.log,
+                                    profile_map=pm, es_media_src=config.es_media_src())
+        if step == "root":
+            return PV.root_all(mk_adb, mk_fb, devs, profiles_root=self.profiles_root, appdir=APPDIR,
+                               log=self.log, profile_map=pm, force_serials=force,
+                               on_critical=self._on_flash_critical)
+        return PV.seal_all(mk_adb, mk_fb, devs, profiles_root=self.profiles_root, appdir=APPDIR,
+                           log=self.log, profile_map=pm, force_serials=force,
+                           on_critical=self._on_flash_critical)
+
+    def _run_chain_core(self, steps, serials, save_name):
+        """Pure chain loop (no Tk/threads): fold survivors across stages, return the final survivor list."""
+        cev = self.cancel_event
+        pm, force = self._profile_map(serials)
+        survivors = list(serials)
+        for step in steps:
+            if cev.is_set():
+                break
+            if step == "save":
+                s = survivors[0]
+                ok = PV.capture_to_pc(Adb(serial=s, adb=self.adb_bin, cancel=cev), save_name, _stamp(),
+                                      root=self.profiles_root, log=self.log)
+                survivors = survivors if ok else []
+            else:
+                res = self._stage(step, survivors, pm, force, cev)
+                survivors = [s for s in survivors if res.get(s, ("error",))[0] not in ("fail", "error")]
+            self.log(f"chain: after {step} — {len(survivors)}/{len(serials)} still ok")
+        return survivors
+
+    def _run_chain(self, steps, serials, save_name=None):
+        """Run the resolved chain on serials (one confirm, then background, per-stage survivor folding)."""
+        if "save" in steps and len(serials) != 1:
+            messagebox.showinfo("CAS", "Save captures ONE golden device. Select a single device (or untick Save).")
+            return
+        names = {"root": "Root", "save": "Save", "download": "Download", "lock": "Lock"}
+        chain = " → ".join(names[s] for s in steps)
+        if not messagebox.askyesno("CAS — Run", f"Run {chain} on {len(serials)} device(s)?\nThey run IN PARALLEL per stage."):
+            return
+        def work():
+            survivors = self._run_chain_core(steps, serials, save_name)
+            self.win.after(0, self.refresh_devices)
+            self.win.after(0, self.refresh_profiles)
+            return {s: ("done",) if s in survivors else ("fail",) for s in serials}
+        self._run_bg(work, label=f"Running {chain} on {len(serials)} device(s)")
+
     def provision_selected(self):
         t = self._action_targets()
         if t:
