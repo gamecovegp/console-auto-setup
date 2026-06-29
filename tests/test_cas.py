@@ -872,6 +872,21 @@ class TestProvision(unittest.TestCase):
             self.assertIn("capture.sh", "\n".join(r.cmds()))
             self.assertIn("CAS_OUT=/data/local/tmp", "\n".join(r.cmds()))
 
+    def test_capture_to_pc_passes_capture_manifest_when_present(self):
+        r = FakeRunner()
+        with tempfile.TemporaryDirectory() as t:
+            pdir = pathlib.Path(t) / "newprof"; pdir.mkdir()
+            (pdir / "capture-manifest").write_text("# cap\ncom.foo\n")
+            PV.capture_to_pc(Adb(runner=r), "newprof", "20260616", root=t, log=lambda m: None, dry_pull=True)
+            joined = "\n".join(r.cmds())
+            self.assertIn("CAS_MANIFEST=/data/local/tmp/cas_scripts/capture-manifest", joined)
+
+    def test_capture_to_pc_no_manifest_captures_all(self):
+        r = FakeRunner()
+        with tempfile.TemporaryDirectory() as t:
+            PV.capture_to_pc(Adb(runner=r), "newprof", "20260616", root=t, log=lambda m: None, dry_pull=True)
+            self.assertNotIn("CAS_MANIFEST=", "\n".join(r.cmds()))   # back-compat: capture-all
+
     def test_seed_default_manifest_populates_empty_placeholder(self):
         # A 'New profile' leaves a placeholder manifest with NO app lines; after the first capture the
         # selection must be seeded from the captured app set (both axes on) so the Apps tab shows the

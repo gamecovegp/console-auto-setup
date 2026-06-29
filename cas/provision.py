@@ -534,6 +534,7 @@ def capture_to_pc(adb, name, stamp, root="profiles", log=print, dry_pull=False):
     """Capture the connected golden into profiles/<name>/. The existing (good) profile is touched
     ONLY after the new payload is pulled AND verified — a failed capture/pull never destroys it."""
     pdir = pathlib.Path(root) / name
+    cap_man = pdir / "capture-manifest"
     dest = pdir / "golden_root_payload"
     t0 = time.monotonic()
     if not dry_pull:
@@ -542,8 +543,12 @@ def capture_to_pc(adb, name, stamp, root="profiles", log=print, dry_pull=False):
            not adb.push(LIBROOT, "/data/local/tmp/cas_scripts/"):
             log("failed to push capture scripts — aborting (existing profile untouched).")
             return False
+        if cap_man.exists() and not adb.push(cap_man, "/data/local/tmp/cas_scripts/capture-manifest"):
+            log("failed to push capture-manifest — aborting (existing profile untouched).")
+            return False
     log("capturing golden to device temp (per-app data, BIOS, homescreen)...")
-    rc = adb.su_stream(f"CAS_OUT={TMPCAP} sh /data/local/tmp/cas_scripts/capture.sh", log)
+    man_env = "CAS_MANIFEST=/data/local/tmp/cas_scripts/capture-manifest " if cap_man.exists() else ""
+    rc = adb.su_stream(f"{man_env}CAS_OUT={TMPCAP} sh /data/local/tmp/cas_scripts/capture.sh", log)
     if rc != 0:
         log(f"capture.sh failed (rc={rc}) — existing profile untouched.")
         return False
