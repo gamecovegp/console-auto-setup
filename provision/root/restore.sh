@@ -26,7 +26,7 @@ if [ -n "${CAS_MANIFEST:-}" ] && [ -f "$CAS_MANIFEST" ]; then
   RPKGS="$(manifest_pkgs "$CAS_MANIFEST")"
   [ -n "$RPKGS" ] || { warn "manifest selects no apps — nothing to restore"; exit 1; }
 else
-  RPKGS="$(cat "$P/pkglist.txt" 2>/dev/null)"; [ -n "$RPKGS" ] || RPKGS="$PKGS"
+  RPKGS="$(payload_pkgs "$P")"
 fi
 # behavior flags from the manifest (@settings/@hardening/@grants) — default ON (full restore) if absent.
 FSETTINGS=on; FHARDENING=on; FGRANTS=on
