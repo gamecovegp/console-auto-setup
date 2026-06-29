@@ -118,12 +118,18 @@ def set_log_dir(path):
 
 
 def firmware_dir():
-    """The device-root-firmware library directory. The configured 'firmware_dir' (e.g. the NAS CAS Profiles
-    _firmware) if set — so the firmware catalog centralizes on the NAS for unified access while the heavy
-    goldens stay on a fast LOCAL library — else library_root()/_firmware. Deterministic (no local fallback):
-    it's a deliberate shared catalog, not resilient run logs."""
+    """The device-root-firmware library directory. An explicit 'firmware_dir' override is honored ONLY if its
+    path currently exists (so a stale NAS-pinned override on an offline bench is ignored and the catalog
+    follows the discovered library); otherwise library_root()/_firmware. Mirrors history_dir's log_dir rule."""
     d = load_config().get("firmware_dir")
-    return pathlib.Path(d) if d else (library_root() / "_firmware")
+    if d:
+        p = pathlib.Path(d)
+        try:
+            if p.is_dir():
+                return p
+        except OSError:
+            pass
+    return library_root() / "_firmware"
 
 
 def set_firmware_dir(path):

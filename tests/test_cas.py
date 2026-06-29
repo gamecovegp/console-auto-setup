@@ -536,6 +536,27 @@ class TestConfig(unittest.TestCase):
             with mock.patch.object(C, "nas_default_path", lambda: None):     # NEW: None case
                 self.assertEqual(C.library_root(), APPDIR / "data" / "profiles")
 
+    def test_firmware_dir_ignores_stale_override(self):
+        from cas import config as C
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as t:
+            cfgp = pathlib.Path(t) / "cas-config.json"
+            cfgp.write_text('{"firmware_dir": "/mnt/gamecove/does-not-exist/_firmware"}')
+            os.environ["CAS_CONFIG"] = str(cfgp)
+            os.environ.pop("CAS_PROFILES", None)
+            lib = pathlib.Path(t) / "lib"; lib.mkdir()
+            with mock.patch.object(C, "library_root", lambda: lib):
+                self.assertEqual(C.firmware_dir(), lib / "_firmware")     # stale override ignored
+
+    def test_firmware_dir_honors_existing_override(self):
+        from cas import config as C
+        with tempfile.TemporaryDirectory() as t:
+            cfgp = pathlib.Path(t) / "cas-config.json"
+            real = pathlib.Path(t) / "fw"; real.mkdir()
+            cfgp.write_text('{"firmware_dir": %s}' % __import__("json").dumps(str(real)))
+            os.environ["CAS_CONFIG"] = str(cfgp)
+            self.assertEqual(C.firmware_dir(), real)
+
 
 class TestReleaseToken(unittest.TestCase):
     def test_default_token_when_no_override(self):
