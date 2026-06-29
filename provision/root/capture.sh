@@ -135,6 +135,20 @@ done
 [ -f "$WPDIR/appwidgets.xml" ] && { cp "$WPDIR/appwidgets.xml" "$HS/appwidgets.xml" 2>/dev/null; ok "captured appwidget map (best-effort)"; }
 # drop the homescreen dir entirely if nothing usable was captured (keeps payloads clean).
 [ -n "$(ls -A "$HS" 2>/dev/null)" ] || rmdir "$HS" 2>/dev/null
+# GAME LAUNCHER emulator picks — capture ONLY the portable DataStore/prefs (NOT GAME_INFO; that is SD-bound +
+# scan-rebuilt). Auto-detected frontend, independent of the HOME launcher above. Additive (never bumps CFAIL).
+# Gated by @gamelauncher (default on); "@gamelauncher off" disables; "@gamelauncher <pkg>" pins the frontend.
+FGLC=on; OVLC=""
+if [ -n "${CAS_MANIFEST:-}" ] && [ -f "$CAS_MANIFEST" ]; then
+  v="$(manifest_flag "$CAS_MANIFEST" gamelauncher)"
+  case "$v" in "") : ;; off) FGLC=off ;; *.*) OVLC="$v" ;; esac
+fi
+if [ "$FGLC" = off ]; then
+  log "game launcher: capture skipped (@gamelauncher off)"
+else
+  GL="$(game_launcher "$OVLC")"
+  if [ -n "$GL" ]; then gl_capture "$P" "$GL"; else warn "game launcher: none detected — nothing to capture"; fi
+fi
 # NOTE: WiFi is intentionally NOT captured/restored — units ship offline (SD + local emulators), and the
 # OOBE WiFi prompt is dismissed by the device_provisioned flag in restore.sh step 7. Nothing to grab here.
 # Make the whole payload world-readable so a NON-root `adb pull` (runs as the shell uid) can retrieve EVERY
