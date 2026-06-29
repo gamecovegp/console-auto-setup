@@ -1607,5 +1607,27 @@ class TestDeviceOwner(unittest.TestCase):
         self.assertTrue(PV.release(a, log=lambda *_: None))
 
 
+class TestSaveManifestAxes(unittest.TestCase):
+    def test_axes_roundtrip(self):
+        d = pathlib.Path(tempfile.mkdtemp())
+        m = d / "manifest"
+        P.save_manifest(m, ["com.foo", "com.bar", "xyz.aethersx2.android"],
+                        {"settings": "on"},
+                        axes={"com.foo": (True, True), "com.bar": (True, False),
+                              "xyz.aethersx2.android": (False, True)})
+        self.assertEqual(P.manifest_axes(m),
+                         {"com.foo": (True, True), "com.bar": (True, False),
+                          "xyz.aethersx2.android": (False, True)})
+        self.assertEqual(P.manifest_pkgs(m),
+                         ["com.foo", "com.bar", "xyz.aethersx2.android"])
+
+    def test_no_axes_writes_bare_lines(self):
+        d = pathlib.Path(tempfile.mkdtemp())
+        m = d / "manifest"
+        P.save_manifest(m, ["com.foo"], {"settings": "on"})
+        self.assertEqual(P.manifest_axes(m), {"com.foo": (True, True)})
+        self.assertIn("\ncom.foo\n", "\n" + m.read_text())
+
+
 if __name__ == "__main__":
     unittest.main()

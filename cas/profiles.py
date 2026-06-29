@@ -137,9 +137,15 @@ def manifest_axes(manifest_path):
     return axes
 
 
-def save_manifest(manifest_path, pkgs, flags, header="# manifest"):
+def save_manifest(manifest_path, pkgs, flags, header="# manifest", axes=None):
+    def _line(pkg):
+        if not axes or pkg not in axes:
+            return pkg                       # bare = both axes (back-compat)
+        apk, cfg = axes[pkg]
+        toks = ([] if (apk and cfg) else (["apk"] if apk else []) + (["config"] if cfg else []))
+        return pkg if not toks else f"{pkg} {' '.join(toks)}"
     lines = [header]
-    lines += list(pkgs)
+    lines += [_line(p) for p in pkgs]
     lines += [f"@{k} {v}" for k, v in flags.items()]
     pathlib.Path(manifest_path).write_text("\n".join(lines) + "\n")
 
