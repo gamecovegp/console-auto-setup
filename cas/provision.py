@@ -31,6 +31,8 @@ DEVICE_ADMIN = f"{COMPANION_PKG}/.GcDeviceAdminReceiver"     # the Companion's D
 RELEASE_RECEIVER = f"{COMPANION_PKG}/.GcReleaseReceiver"
 RELEASE_ACTION = "com.gamecove.companion.action.RELEASE"
 _LOCK_RESTRICTIONS = ("no_factory_reset", "no_safe_boot")    # dumpsys keys for the applied restrictions
+_VERIFY_ATTEMPTS = 4      # poll up to 4 times before declaring lockdown failed
+_VERIFY_DELAY_S = 1.0     # seconds between verify attempts (restrictions apply asynchronously on-device)
 
 # DEFAULT ROOT images — used for ANY profile that doesn't override them, so ⓪ Root works fleet-wide with no
 # per-profile picking. One bundled kit serves every profile: the stock init_boot (patched on-device, then
@@ -226,8 +228,18 @@ def set_device_owner(adb, log=print):
             return False
         log("Companion set as Device Owner.")
     adb.shell(f"am start -n {COMPANION_PKG}/.MainActivity")   # nudge so onEnabled/launch re-assert ran
-    rc, dump, _ = adb.shell("dumpsys device_policy")
-    missing = [r for r in _LOCK_RESTRICTIONS if r not in dump]
+    # Poll: restrictions are applied asynchronously (via onEnabled / the launched activity), so an
+    # immediate readback can race and produce a false "not confirmed" even though the unit locks down
+    # moments later. Retry up to _VERIFY_ATTEMPTS times with _VERIFY_DELAY_S between each attempt;
+    # break early on success. Do NOT sleep after the final attempt.
+    missing = list(_LOCK_RESTRICTIONS)
+    for attempt in range(_VERIFY_ATTEMPTS):
+        rc, dump, _ = adb.shell("dumpsys device_policy")
+        missing = [r for r in _LOCK_RESTRICTIONS if r not in dump]
+        if not missing:
+            break
+        if attempt < _VERIFY_ATTEMPTS - 1:
+            time.sleep(_VERIFY_DELAY_S)
     if missing:
         log(f"Device Owner set but restrictions missing {missing} — lockdown NOT confirmed.")
         return False
@@ -245,7 +257,7 @@ def release(adb, log=print):
         log("Companion is not Device Owner on this unit — nothing to release.")
         return True
     log("sending un-provision (release) broadcast to the Companion...")
-    adb.shell(f"am broadcast -a {RELEASE_ACTION} -e token {_cfg.get_release_token()} -n {RELEASE_RECEIVER}")
+    adb.shell(f"am broadcast -a {RELEASE_ACTION} -e token '{_cfg.get_release_token()}' -n {RELEASE_RECEIVER}")
     if _is_device_owner(adb):
         log("release did NOT clear Device Owner (token mismatch or app missing?). Unit still locked — "
             "retry, or fall back to an EDL/recovery wipe.")

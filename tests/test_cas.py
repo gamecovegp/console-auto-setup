@@ -1536,7 +1536,9 @@ class TestProvisionLockdown(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             prof = self._profile(tmp, {"settings": "on", "lockdown": "on"})
             r = FakeRunner(do_set_ok=False)          # device not fresh -> lockdown fails
-            self.assertTrue(PV.provision(Adb(runner=r), prof, log=lambda *_: None))  # still provisions
+            logs = []
+            self.assertTrue(PV.provision(Adb(runner=r), prof, log=logs.append))  # still provisions
+            self.assertTrue(any("UN-LOCKED" in m for m in logs))                 # LOUD operator warning fired
 
 
 class TestDeviceOwner(unittest.TestCase):
@@ -1559,14 +1561,21 @@ class TestDeviceOwner(unittest.TestCase):
         self.assertFalse(PV.set_device_owner(a, log=lambda *_: None))
 
     def test_set_device_owner_fails_when_restrictions_missing(self):
-        a = self._adb(device_owner=False, do_set_ok=True, do_restrict=False)
-        self.assertFalse(PV.set_device_owner(a, log=lambda *_: None))
+        # Monkeypatch sleep to a no-op: the polling loop would otherwise sleep ~3s on the failure path.
+        orig_sleep = PV.time.sleep
+        PV.time.sleep = lambda *_a, **_k: None
+        try:
+            a = Adb(runner=FakeRunner(do_set_ok=True, do_restrict=False))
+            self.assertFalse(PV.set_device_owner(a, log=lambda *_: None))
+        finally:
+            PV.time.sleep = orig_sleep
 
     def test_release_sends_token_broadcast_and_confirms_cleared(self):
         r = FakeRunner(device_owner=True, release_clears=True)
         a = Adb(runner=r)
         self.assertTrue(PV.release(a, log=lambda *_: None))
         self.assertTrue(any("am broadcast" in c and "action.RELEASE" in c for c in r.cmds()))
+        self.assertTrue(any("gc-release-7f3a9c2e" in c for c in r.cmds()))  # token on the wire
 
     def test_release_fails_when_owner_not_cleared(self):
         a = Adb(runner=FakeRunner(device_owner=True, release_clears=False))
