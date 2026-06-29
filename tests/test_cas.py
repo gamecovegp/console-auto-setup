@@ -558,8 +558,10 @@ class TestConfig(unittest.TestCase):
             self.assertEqual(C.firmware_dir(), real)
 
     def _connect_cmd(self, platform):
-        # Run nas_connect on a faked OS with NAS 'reachable' but library not yet mounted, capturing the
-        # subprocess command it would run. Returns the argv (list) of the mount command.
+        # Run nas_connect on a faked OS with NAS 'reachable' but share not yet mounted, capturing the
+        # subprocess command it would run. nas_mountpoint() returns None (share not mounted) while
+        # library_reachable() returns True (local library exists) — proving the new guard no longer
+        # short-circuits on local-library presence. Returns the argv (list) of the mount command.
         from cas import config as C
         from unittest import mock
         captured = {}
@@ -567,15 +569,21 @@ class TestConfig(unittest.TestCase):
             captured["argv"] = args
             class R: returncode = 0; stdout = ""; stderr = ""
             return R()
-        reach = iter([False, True])    # not reachable before, reachable after (so it returns True)
         with mock.patch.object(C.sys, "platform", platform), \
              mock.patch.object(C, "get_nas_credentials", lambda: ("u", "p w")), \
              mock.patch.object(C, "nas_reachable", lambda timeout=1.5: True), \
-             mock.patch.object(C, "library_reachable", lambda: next(reach)), \
+             mock.patch.object(C, "nas_mountpoint", lambda: None), \
+             mock.patch.object(C, "library_reachable", lambda: True), \
              mock.patch.object(C.subprocess, "run", fake_run), \
              mock.patch.object(C.pathlib.Path, "mkdir", lambda self, **kw: None):
             C.nas_connect()
         return captured.get("argv")
+
+    def test_nas_connect_attempts_mount_despite_local_library(self):
+        # Regression: a local library makes library_reachable() True, but nas_connect must still try the NAS.
+        argv = self._connect_cmd("linux")
+        self.assertIsNotNone(argv)                      # a mount command WAS issued
+        self.assertEqual(argv[:2], ["gio", "mount"])
 
     def test_nas_connect_macos_mounts_share(self):
         argv = self._connect_cmd("darwin")

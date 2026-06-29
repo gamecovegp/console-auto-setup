@@ -19,10 +19,6 @@ from . import APPDIR
 # with no drive-letter mapping; on a machine where the share isn't mounted (this dev box, offline) it
 # simply isn't a directory, so library_root() falls back to the local profiles dir.
 NAS_DEFAULT = r"\\192.168.100.227\01 GAMECOVE\[03] SETUP\CAS Profiles"
-# On Linux/macOS that Windows UNC can't resolve; if the SMB share is mounted (cifs) at this conventional
-# point, CAS auto-uses it. Mount once with:
-#   sudo mount -t cifs '//192.168.100.227/01 GAMECOVE' /mnt/gamecove -o username=<app>,uid=$(id -u),...
-NAS_DEFAULT_POSIX = "/mnt/gamecove/[03] SETUP/CAS Profiles"
 
 
 def nas_default_path():
@@ -377,7 +373,7 @@ def nas_connect(timeout=20):
     Windows uses `net use`; other OSes fall back to `gio mount`. Returns True if the library is reachable
     afterwards. Safe no-op when already connected (True), no creds (False), or the NAS isn't on this
     network (False, fast — via nas_reachable)."""
-    if library_reachable():
+    if nas_mountpoint():
         return True
     creds = get_nas_credentials()
     if not creds:
@@ -411,6 +407,6 @@ def nas_connect(timeout=20):
             url = f"smb://{nas_host()}/{quote(nas_share_name())}"   # mount the SHARE; discovery appends subpath
             subprocess.run(["gio", "mount", url], input=f"{user}\n\n{pw}\n",
                            text=True, capture_output=True, timeout=timeout)
-        return library_reachable()
+        return nas_mountpoint() is not None
     except Exception:
         return False
