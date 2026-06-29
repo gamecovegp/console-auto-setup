@@ -129,7 +129,10 @@ class App:
         self._t0 = 0.0
         self._last_line = ""        # most recent log line — shown live in the status bar
         self._retry_ctx = None      # (message, retry_callable) armed by an op that had failures
-        self.pkg_vars = {}          # pkg -> tk.BooleanVar (manifest checkboxes)
+        self.pkg_vars = {}          # pkg -> (apk_var, cfg_var) — Download (restore) list
+        self.cap_vars = {}          # pkg -> (apk_var, cfg_var) — Save (capture) list
+        self._cap_game_launcher = None   # game-launcher pkg detected on the current device (stashed for writer)
+        self._cap_home_launcher = None   # HOME-launcher pkg detected on the current device
         self.flag_vars = {}         # @flag -> tk.BooleanVar (settings/hardening/grants)
         self.assigned = {}          # serial -> profile name (per-device; remembered across launches)
         self.assigned_manual = set()  # serials whose profile was set by hand (deliberate; allows force)
@@ -573,9 +576,14 @@ class App:
         # ── Tab 1: Apps & options (the manifest) — the primary tab ──
         apps_tab = ttk.Frame(nb, padding=6)
         nb.add(apps_tab, text="Apps & options")
-        _tip(ttk.Button(apps_tab, text="Save selection", command=self.save_manifest),
+        _btns_row = ttk.Frame(apps_tab)
+        _btns_row.pack(side="bottom", anchor="w", pady=(6, 0))     # pinned below the scroll
+        _tip(ttk.Button(_btns_row, text="Save selection", command=self.save_manifest),
              "Save which apps and behavior options are ticked. This is exactly what 'Download' installs.") \
-            .pack(side="bottom", anchor="w", pady=(6, 0))          # pinned below the scroll
+            .pack(side="left")
+        _tip(ttk.Button(_btns_row, text="Save capture selection", command=self._save_capture_manifest),
+             "Save which apps to capture FROM this device into the golden (the Save list above).") \
+            .pack(side="left", padx=(8, 0))
         scrollwrap = ttk.Frame(apps_tab)
         scrollwrap.pack(side="top", fill="both", expand=True)
         _cv = tk.Canvas(scrollwrap, highlightthickness=0, borderwidth=0)
@@ -905,6 +913,9 @@ class App:
         for w in self.modf.winfo_children():
             w.destroy()
         self.pkg_vars = {}
+        self.cap_vars = {}
+        self._cap_game_launcher = None
+        self._cap_home_launcher = None
         self._icon_refs = []                 # keep PhotoImage refs alive (Tk GCs unreferenced images)
         self._update_golden_status()         # golden: none / size + download ETA
         name = self.prof_var.get()
@@ -913,15 +924,49 @@ class App:
             return
         prof = P.Profile(P.pathlib.Path(self.profiles_root) / name)
         self.stock_var.set(prof.meta.get("stock_init_boot", ""))     # blank = the bundled default kit image
-        included = set(prof.pkgs())
-        # "Select all" — toggles every app checkbox below at once; reflects all-on/all-off live.
-        self.selall_var = tk.BooleanVar(value=False)
-        _tip(ttk.Checkbutton(self.modf, text="  Select all apps", variable=self.selall_var,
-                             command=self._toggle_all_apps),
-             "Tick or untick every app in this list at once. (Behaviour options below are unaffected.)") \
-            .pack(anchor="w")
-        ttk.Separator(self.modf, orient="horizontal").pack(fill="x", pady=(2, 4))
+
+        # ── Save list (capture FROM this device into the golden) ──────────────────────────────────────────
+        ttk.Label(self.modf, text="— Save (capture from device) —").pack(anchor="w", pady=(2, 0))
+        _cap_btn_row = ttk.Frame(self.modf); _cap_btn_row.pack(anchor="w")
+        ttk.Button(_cap_btn_row, text="Select all",
+                   command=lambda: self._set_all(self.cap_vars, True)).pack(side="left")
+        ttk.Button(_cap_btn_row, text="Deselect all",
+                   command=lambda: self._set_all(self.cap_vars, False)).pack(side="left", padx=(4, 0))
+        serial = self._selected_serial()
+        device_apps = self._scan_device_apps(serial)
+        gl, hl = self._detect_device_launchers(serial)
+        self._cap_game_launcher = gl
+        self._cap_home_launcher = hl
+        # default-on: EMULATOR_PKGS ∩ device_apps + game launcher; overlaid by saved capture-manifest
+        cap_sel = P.default_capture_selection(device_apps, game_launcher=gl, home_launcher=hl)
+        for pkg, axes_pair in prof.capture_axes().items():
+            cap_sel[pkg] = axes_pair                       # saved capture-manifest overrides defaults
+        for pkg, (apk0, cfg0) in cap_sel.items():
+            is_launcher = (pkg == gl or pkg == hl)
+            if is_launcher:
+                apk0 = False                               # system firmware — never reinstalled
+            apk_v, cfg_v = tk.BooleanVar(value=apk0), tk.BooleanVar(value=cfg0)
+            self.cap_vars[pkg] = (apk_v, cfg_v)
+            row = ttk.Frame(self.modf); row.pack(anchor="w", fill="x")
+            ttk.Label(row, text=f" {_app_label(pkg)}", width=28).pack(side="left")
+            apk_cb = ttk.Checkbutton(row, text="APK", variable=apk_v, command=self._on_app_toggle)
+            if is_launcher:
+                apk_cb.configure(state="disabled")
+            _tip(apk_cb, f"Bundle {pkg}'s installer (off = clean install / system launcher)").pack(side="left")
+            _tip(ttk.Checkbutton(row, text="Config", variable=cfg_v, command=self._on_app_toggle),
+                 f"Bundle {pkg}'s data/settings/BIOS (whole data dir for the launcher)").pack(side="left")
+
+        ttk.Separator(self.modf, orient="horizontal").pack(fill="x", pady=(4, 4))
+
+        # ── Download list (restore FROM golden TO a fresh device) ─────────────────────────────────────────
+        ttk.Label(self.modf, text="— Download (restore to device) —").pack(anchor="w", pady=(2, 0))
+        _dl_btn_row = ttk.Frame(self.modf); _dl_btn_row.pack(anchor="w")
+        ttk.Button(_dl_btn_row, text="Select all",
+                   command=lambda: self._set_all(self.pkg_vars, True)).pack(side="left")
+        ttk.Button(_dl_btn_row, text="Deselect all",
+                   command=lambda: self._set_all(self.pkg_vars, False)).pack(side="left", padx=(4, 0))
         axes = prof.axes()                                 # {pkg: (apk, cfg)} from the saved manifest
+        included = set(prof.pkgs())
         launcher_pkg = prof.meta.get("launcher_pkg")
         for pkg in prof.all_pkgs():
             # two independent axes per app: APK (bundle the installer) | Config (bundle data/settings/BIOS).
@@ -939,7 +984,7 @@ class App:
             _tip(apk_cb, f"Bundle {pkg}'s installer (off = clean install / system launcher)").pack(side="left")
             _tip(ttk.Checkbutton(row, text="Config", variable=cfg_v, command=self._on_app_toggle),
                  f"Bundle {pkg}'s data/settings/BIOS (whole data dir for the launcher)").pack(side="left")
-        self._sync_selall()                                # set the master box from the initial selection
+
         self._sync_media_tab()                             # ES-DE box-art tab follows the ES-DE checkbox
         # behavior flags: @settings/@hardening/@grants/@homescreen honored by restore.sh on the device.
         # The GameCove Companion is a normal golden app (ticked in the list above), not a behavior flag.
@@ -1216,6 +1261,56 @@ class App:
         flags = {fl: ("on" if v.get() else "off") for fl, v in self.flag_vars.items()}
         P.save_manifest(prof.manifest_path, pkgs, flags, header=f"# {name}", axes=axes)
         self.log(f"saved manifest for {name}: {len(pkgs)} app(s), flags={flags}")
+
+    def _scan_device_apps(self, serial):
+        """Third-party packages on the connected device (pm list -3), sorted. [] if no device/scan fails."""
+        if not serial:
+            return []
+        rc, out, _ = Adb(serial=serial, adb=self.adb_bin).shell("pm list packages -3")
+        if rc != 0:
+            return []
+        return sorted(l.split("package:", 1)[1].strip()
+                      for l in out.splitlines() if l.startswith("package:"))
+
+    def _detect_device_launchers(self, serial):
+        """(game_launcher, home_launcher) on the device, or (None, None). Best-effort via su."""
+        if not serial:
+            return (None, None)
+        a = Adb(serial=serial, adb=self.adb_bin)
+        def _one(cmd):
+            rc, out, _ = a.su(f". /data/local/tmp/cas_scripts/lib-root.sh 2>/dev/null; {cmd}")
+            line = (out or "").strip().splitlines()
+            return line[-1].strip() if rc == 0 and line else None
+        return (_one("game_launcher"), _one("home_launcher"))
+
+    def _set_all(self, vars_dict, value):
+        """Set every (apk_var, cfg_var) pair in vars_dict to value."""
+        for apk_v, cfg_v in vars_dict.values():
+            apk_v.set(value)
+            cfg_v.set(value)
+        self._sync_media_tab()
+
+    def _save_capture_manifest(self):
+        """Write the capture-manifest from the Save list (self.cap_vars). Launcher rows become
+        @gamelauncher / @homescreen flags rather than package lines."""
+        name = self.prof_var.get()
+        if not name:
+            return
+        prof = P.Profile(P.pathlib.Path(self.profiles_root) / name)
+        axes = {p: (a.get(), c.get()) for p, (a, c) in self.cap_vars.items()}
+        flags = dict(prof.capture_flags())
+        gl, hl = self._cap_game_launcher, self._cap_home_launcher
+        pkgs = []
+        for p, (a, c) in axes.items():
+            if p == gl:
+                flags["gamelauncher"] = "on" if c else "off"; continue
+            if p == hl:
+                flags["homescreen"] = "on" if c else "off"; continue
+            if a or c:
+                pkgs.append(p)
+        P.save_manifest(prof.capture_manifest_path, pkgs, flags,
+                        header=f"# {prof.name} capture", axes={p: axes[p] for p in pkgs})
+        self.log(f"saved capture selection for {prof.name}: {len(pkgs)} app(s) + flags={flags}")
 
     def _on_batch_toggle(self):
         if self.batch_var.get():
