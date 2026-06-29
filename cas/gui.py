@@ -673,30 +673,24 @@ class App:
             .pack(anchor="w", pady=(2, 2))
         row2 = ttk.Frame(act)
         row2.pack(fill="x")
-        self.btns = []
-        for text, cmd, tip in (
-            ("⓪ Root", self.root_device,
-             "Root the selected device(s) — or ALL connected if the toggle is on — with Magisk, sourced "
-             "entirely from the PC: flashes each device's ASSIGNED profile's Magisk-patched init_boot, then "
-             "installs the Magisk app FROM THE PC (not the SD). Bootloaders must be UNLOCKED; units reboot a "
-             "couple of times. Runs IN PARALLEL. (Inverse of 'Lock'.)"),
-            ("① Save device → profile", self.capture_update,
-             "SAVE what's on the selected device INTO a profile on this PC (the master 'golden'). Always "
-             "ONE device. The previous version is kept as .prev for rollback. Direction: device → PC."),
-            ("② Download", self.provision_selected,
-             "DOWNLOAD each device's ASSIGNED profile onto it — installs every ticked app plus its "
-             "saves/BIOS/keys, settings, folder permissions, and homescreen layout (replaces current app "
-             "data). Direction: PC → device. Runs on the selected device(s), or ALL connected if the toggle "
-             "is on, IN PARALLEL. (Formerly 'Provision'.)"),
-            ("③ Lock for shipping", self.seal_device,
-             "Final step on VERIFIED unit(s): HIDES Developer options, removes root (Magisk), and disables "
-             "USB debugging so it's retail-ready (adb disconnects). Runs on the selected device(s), or ALL "
-             "connected if the toggle is on, IN PARALLEL — the golden is skipped. (Inverse of 'Root'.)"),
+        self.chain_vars = {}                              # action key -> BooleanVar
+        self.chain_cbs = {}                               # action key -> the Checkbutton (for enable/disable)
+        for key, label, tip in (
+            ("root", "⓪ Root", "Root the target(s): flash the profile's Magisk-patched init_boot + install Magisk from the PC."),
+            ("save", "① Save → profile", "Capture ONE selected device into a profile (golden). Mutually exclusive with Download/Lock."),
+            ("download", "② Download", "Install each device's assigned profile (apps + saves/BIOS/settings/grants/homescreen)."),
+            ("lock", "③ Lock", "Retail-seal verified unit(s): hide Dev options, un-root, disable USB debugging."),
         ):
-            b = ttk.Button(row2, text=text, command=cmd)
-            b.pack(side="left", padx=4, pady=4)
-            _tip(b, tip)
-            self.btns.append(b)
+            v = tk.BooleanVar(value=False)
+            self.chain_vars[key] = v
+            cb = ttk.Checkbutton(row2, text=label, variable=v, command=self._on_chain_tick)
+            cb.pack(side="left", padx=4, pady=4)
+            _tip(cb, tip)
+            self.chain_cbs[key] = cb
+        self.run_btn = ttk.Button(row2, text="▶ Run", command=self.run_chain)
+        self.run_btn.pack(side="left", padx=8, pady=4)
+        _tip(self.run_btn, "Run the ticked actions in order (Root → Download → Lock, or Root → Save), per device, in parallel.")
+        self.btns = list(self.chain_cbs.values()) + [self.run_btn]   # disabled together while busy
         # Cancel: aborts the running op. NOT in self.btns (those get disabled while busy) — it's the one
         # control that must stay live during an operation. Enabled only while busy.
         self.cancel_btn = ttk.Button(row2, text="✗ Cancel", command=self._cancel_op, state="disabled")
@@ -1071,6 +1065,39 @@ class App:
             self.status_var.set("Selection mode — actions run on the device row(s) you select "
                                 "(Ctrl/Shift-click for several).")
 
+    def _on_chain_tick(self):
+        """Save ⟂ Download/Lock: when Save is on, disable+clear Download/Lock; when either of those is on,
+        disable+clear Save. Root stays available in both chains."""
+        save_on = self.chain_vars["save"].get()
+        unit_on = self.chain_vars["download"].get() or self.chain_vars["lock"].get()
+        for k in ("download", "lock"):
+            self.chain_cbs[k].configure(state="disabled" if save_on else "normal")
+            if save_on:
+                self.chain_vars[k].set(False)
+        self.chain_cbs["save"].configure(state="disabled" if unit_on else "normal")
+        if unit_on:
+            self.chain_vars["save"].set(False)
+
+    def run_chain(self):
+        steps, err = self._resolve_chain({k: v.get() for k, v in self.chain_vars.items()})
+        if err:
+            messagebox.showinfo("CAS", err)
+            return
+        if "save" in steps:
+            serial = self._selected_serial()
+            if not serial:
+                messagebox.showinfo("CAS", "Select ONE golden device for Save.")
+                return
+            name = simpledialog.askstring("Save → profile", "Profile name to capture into:",
+                                          initialvalue=self.prof_var.get())
+            if not name:
+                return
+            self._run_chain(steps, [serial], save_name=name)
+        else:
+            t = self._action_targets()
+            if t:
+                self._run_chain(steps, t)
+
     def _selected_profile(self):
         name = self.prof_var.get()
         return P.Profile(P.pathlib.Path(self.profiles_root) / name) if name else None
@@ -1365,39 +1392,6 @@ class App:
             return {s: ("done",) if s in survivors else ("fail",) for s in serials}
         self._run_bg(work, label=f"Running {chain} on {len(serials)} device(s)")
 
-    def provision_selected(self):
-        t = self._action_targets()
-        if t:
-            self._run_batch("download", t)
-
-    def capture_update(self):
-        serial = self._selected_serial()
-        if not serial:
-            messagebox.showinfo("CAS", "Select the GOLDEN device in the list first.")
-            return
-        name = simpledialog.askstring("Capture / Update", "Profile name to capture into:",
-                                      initialvalue=self.prof_var.get())
-        if not name:
-            return
-        # if the target profile already holds a golden, this OVERWRITES it -> confirm; else just save.
-        prof = P.Profile(P.pathlib.Path(self.profiles_root) / name)
-        if prof.has_golden():
-            if not messagebox.askyesno(
-                    "CAS — overwrite saved golden?",
-                    f"Profile '{name}' already has a saved golden ({_human_size(prof.golden_size())}).\n\n"
-                    f"Overwrite it with device {serial}?\n(the current payload is kept as .prev for rollback)"):
-                return
-        elif not messagebox.askyesno(
-                "CAS — save golden",
-                f"Save device {serial} into profile '{name}'?\n(no golden saved there yet)"):
-            return
-        def work():
-            ok = PV.capture_to_pc(Adb(serial=serial, adb=self.adb_bin, cancel=self.cancel_event),
-                                  name, _stamp(), root=self.profiles_root, log=self.log)
-            self.win.after(0, self.refresh_profiles)
-            return ok
-        self._run_bg(work, label=f"Saving {serial} → {name}")
-
     def release_selected(self):
         """Operator-only: un-provision the selected unit (clear the Companion's Device-Owner lockdown so it
         can be factory-reset / uninstalled). Exceptional RMA action — single device, behind a confirm."""
@@ -1414,16 +1408,6 @@ class App:
         def work():
             return PV.release(Adb(serial=serial, adb=self.adb_bin, cancel=self.cancel_event), log=self.log)
         self._run_bg(work, label=f"Releasing {serial}")
-
-    def root_device(self):
-        t = self._action_targets()
-        if t:
-            self._run_batch("root", t)
-
-    def seal_device(self):
-        t = self._action_targets()
-        if t:
-            self._run_batch("lock", t)
 
     def _lib_reachable(self):
         """Is the CURRENTLY-SELECTED library path (self.profiles_root) a reachable directory?
