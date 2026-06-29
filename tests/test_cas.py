@@ -365,6 +365,16 @@ class TestProfiles(unittest.TestCase):
         self.assertEqual(prof.capture_flags().get("gamelauncher"), "on")
         self.assertIn("com.retroarch.aarch64", P.EMULATOR_PKGS)        # the known emulator set exists
 
+    def test_default_capture_checks_emulators_and_game_launcher(self):
+        from cas import profiles as P
+        device_apps = ["com.retroarch.aarch64", "org.ppsspp.ppsspp", "com.random.note", "com.foo.bar"]
+        checked = P.default_capture_selection(device_apps, game_launcher="com.handheld.launcher")
+        # emulators + game launcher on; unrelated apps off
+        self.assertEqual(checked["com.retroarch.aarch64"], (True, True))
+        self.assertEqual(checked["org.ppsspp.ppsspp"], (True, True))
+        self.assertEqual(checked["com.random.note"], (False, False))
+        self.assertEqual(checked["com.handheld.launcher"], (False, True))   # launcher = config-only
+
 
 class TestConfig(unittest.TestCase):
     def setUp(self):

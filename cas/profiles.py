@@ -297,6 +297,19 @@ def match_profile(model, root="profiles", sd_gb=None):
     return None                          # ambiguous -> operator assigns (double-click / Assign button)
 
 
+def default_capture_selection(device_apps, game_launcher=None, home_launcher=None):
+    """The default Save-list check state: {pkg: (apk_on, config_on)}. Emulators (EMULATOR_PKGS) -> both axes;
+    the game/HOME launcher -> config-only (APK is system firmware); every other device app -> off."""
+    sel = {}
+    for pkg in device_apps:
+        on = pkg in EMULATOR_PKGS
+        sel[pkg] = (on, on)
+    for lp in (game_launcher, home_launcher):
+        if lp:
+            sel[lp] = (False, lp == game_launcher)   # game launcher config-on by default; HOME off
+    return sel
+
+
 def archive_profile(profile, stamp, archive_root=None):
     """Soft-delete: MOVE the profile dir to profiles/_archive/<name>_<stamp>. Never rm. Returns dest."""
     src = pathlib.Path(profile.path)
