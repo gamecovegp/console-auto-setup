@@ -353,6 +353,18 @@ class TestProfiles(unittest.TestCase):
             self.assertTrue(dst.exists())                              # recoverable in _archive
             self.assertIn("_archive", str(dst))
 
+    def test_capture_manifest_accessors_and_emulator_set(self):
+        import tempfile, pathlib
+        from cas import profiles as P
+        d = pathlib.Path(tempfile.mkdtemp())
+        (d / "profile.meta").write_text("frontend=es-de\n")
+        (d / "capture-manifest").write_text("# cap\ncom.foo\nbar.app config\n@gamelauncher on\n")
+        prof = P.Profile(d)
+        self.assertEqual(prof.capture_pkgs(), ["com.foo", "bar.app"])
+        self.assertEqual(prof.capture_axes(), {"com.foo": (True, True), "bar.app": (False, True)})
+        self.assertEqual(prof.capture_flags().get("gamelauncher"), "on")
+        self.assertIn("com.retroarch.aarch64", P.EMULATOR_PKGS)        # the known emulator set exists
+
 
 class TestConfig(unittest.TestCase):
     def setUp(self):

@@ -9,6 +9,15 @@ import re
 import pathlib
 import shutil
 
+# Emulator/frontend packages = the GAMING payload, auto-checked in the Save (capture) list.
+# Keep in sync with provision/root/lib-root.sh PKGS.
+EMULATOR_PKGS = {
+    "dev.eden.eden_emulator", "com.retroarch.aarch64", "org.dolphinemu.dolphinemu",
+    "com.flycast.emulator", "com.github.stenzek.duckstation", "xyz.aethersx2.android",
+    "me.magnum.melonds.nightly", "org.citra.emu", "org.ppsspp.ppsspp",
+    "org.mupen64plusae.v3.fzurita", "org.es_de.frontend", "gamehub.lite",
+}
+
 # pkg -> shared internal-storage dir it owns (mirror of lib-root.sh:internal_for). Restored only if the
 # app is in the manifest.
 INTERNAL_FOR = {
@@ -167,6 +176,19 @@ class Profile:
     def axes(self):
         """{pkg: (apk_bool, config_bool)} per-app capture selection from the manifest (bare line = both)."""
         return manifest_axes(self.manifest_path)
+
+    @property
+    def capture_manifest_path(self):
+        return self.path / "capture-manifest"
+
+    def capture_pkgs(self):
+        return manifest_pkgs(self.capture_manifest_path)
+
+    def capture_axes(self):
+        return manifest_axes(self.capture_manifest_path)
+
+    def capture_flags(self):
+        return manifest_flags(self.capture_manifest_path)
 
     def all_pkgs(self):
         """Every selectable app: the captured set (pkglist.txt) plus the default launcher (a system app
