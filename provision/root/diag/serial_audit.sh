@@ -3,7 +3,7 @@
 # ones the text-only rewrite (grep -rIl) would MISS (binary files). Read-only.
 . "$(dirname "$0")/../lib-root.sh"; is_root || { echo need root; exit 1; }
 SER="${1:-9C33-6BBD}"
-for pkg in $PKGS; do
+for pkg in $(user_pkgs); do
   [ -d "/data/data/$pkg" ] || continue
   all="$(grep -rl  "$SER" "/data/data/$pkg" 2>/dev/null)"      # any file (incl binary)
   txt="$(grep -rIl "$SER" "/data/data/$pkg" 2>/dev/null)"      # text only (what restore rewrites today)

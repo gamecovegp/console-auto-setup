@@ -16,7 +16,8 @@ for p in $(cat "$P/pkglist.txt" 2>/dev/null); do
 done
 
 echo; echo "===== 3) CONFIRM those are actually inside the captured payload tars ====="
-for p in dev.eden.eden_emulator com.github.stenzek.duckstation xyz.aethersx2.tturnip com.flycast.emulator me.magnum.melonds.nightly; do
+for p in $(payload_pkgs "$P"); do
+  [ -f "$P/$p/adata.tar" ] || continue
   echo "-- $p adata.tar --"
   tar -tf "$P/$p/adata.tar" 2>/dev/null | grep -iE 'bios|/keys/|prod.keys|title.keys|firmware|registered|\.nca$|\.bin$' | head -6
 done

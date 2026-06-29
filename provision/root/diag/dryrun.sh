@@ -13,7 +13,7 @@ log "SD=$SD  this(real)=$SERIAL  golden=$GSERIAL  simulated-target=$FAKE"
 SMALL="org.dolphinemu.dolphinemu com.github.stenzek.duckstation org.citra.emu me.magnum.melonds.nightly com.flycast.emulator dev.eden.eden_emulator"
 
 echo; echo "== 1. payload integrity: tar -tf every app (lists without extracting) =="
-for pkg in $PKGS; do
+for pkg in $(payload_pkgs "$P"); do
   t="$P/$pkg/data.tar"; [ -f "$t" ] || { warn "$pkg: NO data.tar"; continue; }
   n=$(tar -tf "$t" 2>/dev/null | grep -c .)
   a=""; [ -f "$P/$pkg/adata.tar" ] && a=" + adata $(tar -tf "$P/$pkg/adata.tar" 2>/dev/null | grep -c .)"
