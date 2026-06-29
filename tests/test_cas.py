@@ -222,6 +222,27 @@ class TestFastboot(unittest.TestCase):
         self.assertEqual(fb.resolve(), "MQ66")
 
 
+class TestManifestAxes(unittest.TestCase):
+    def _write(self, text):
+        d = pathlib.Path(tempfile.mkdtemp())
+        (d / "manifest").write_text(text)
+        return d / "manifest"
+
+    def test_bare_line_is_both_axes(self):
+        m = self._write("# h\ncom.foo\n")
+        self.assertEqual(P.manifest_axes(m), {"com.foo": (True, True)})
+
+    def test_apk_only_and_config_only(self):
+        m = self._write("com.bar apk\nxyz.aethersx2.android config\n")
+        ax = P.manifest_axes(m)
+        self.assertEqual(ax["com.bar"], (True, False))
+        self.assertEqual(ax["xyz.aethersx2.android"], (False, True))
+
+    def test_both_tokens_order_insensitive_and_flags_ignored(self):
+        m = self._write("com.baz config apk\n@settings on\n")
+        self.assertEqual(P.manifest_axes(m), {"com.baz": (True, True)})
+
+
 class TestProfiles(unittest.TestCase):
     def test_manifest_parse(self):
         with tempfile.TemporaryDirectory() as t:

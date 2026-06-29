@@ -117,6 +117,26 @@ def manifest_flags(manifest_path):
     return flags
 
 
+def manifest_axes(manifest_path):
+    """{pkg: (apk_bool, config_bool)} from manifest app lines. A bare line (no tokens)
+    means BOTH axes (back-compat). Tokens 'apk' and/or 'config' narrow it."""
+    p = pathlib.Path(manifest_path)
+    axes = {}
+    if not p.exists():
+        return axes
+    for line in _read_text(p).splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line or line.startswith("@"):
+            continue
+        parts = line.split()
+        pkg, toks = parts[0], set(parts[1:])
+        if toks:
+            axes[pkg] = ("apk" in toks, "config" in toks)
+        else:
+            axes[pkg] = (True, True)
+    return axes
+
+
 def save_manifest(manifest_path, pkgs, flags, header="# manifest"):
     lines = [header]
     lines += list(pkgs)
