@@ -1629,5 +1629,43 @@ class TestSaveManifestAxes(unittest.TestCase):
         self.assertIn("\ncom.foo\n", "\n" + m.read_text())
 
 
+class TestProfileLauncherAndAxes(unittest.TestCase):
+    def test_all_pkgs_includes_launcher_meta(self):
+        d = pathlib.Path(tempfile.mkdtemp())
+        (d / "golden_root_payload").mkdir(parents=True)
+        (d / "golden_root_payload" / "pkglist.txt").write_text("com.foo\n")
+        (d / "profile.meta").write_text("launcher_pkg=com.handheld.launcher\n")
+        prof = P.Profile(d)
+        self.assertIn("com.handheld.launcher", prof.all_pkgs())
+        self.assertIn("com.foo", prof.all_pkgs())
+
+    def test_axes_reads_manifest_tokens(self):
+        d = pathlib.Path(tempfile.mkdtemp())
+        (d / "manifest").write_text("com.foo\nxyz.aethersx2.android config\n")
+        prof = P.Profile(d)
+        self.assertEqual(prof.axes(), {"com.foo": (True, True),
+                                       "xyz.aethersx2.android": (False, True)})
+
+
+class TestSealScrub(unittest.TestCase):
+    def test_seal_runs_scrub_before_unroot(self):
+        ra, fb = FakeRunner(), FbRunner()
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            stock = f.name
+        try:
+            ok = PV.seal(Adb(runner=ra), Fastboot(runner=fb), stock, log=lambda m: None, wait=False)
+        finally:
+            os.unlink(stock)
+        self.assertTrue(ok)
+        cmds = ra.cmds()
+        scrub_i = next((i for i, c in enumerate(cmds) if "scrub.sh" in c), None)
+        magisk_i = next((i for i, c in enumerate(cmds) if "uninstall com.topjohnwu.magisk" in c), None)
+        self.assertIsNotNone(scrub_i, "scrub.sh was never run during seal")
+        self.assertIsNotNone(magisk_i)
+        # scrub runs BEFORE the Magisk uninstall, which itself precedes the un-root flash
+        self.assertLess(scrub_i, magisk_i, "scrub must run before the un-root steps")
+        self.assertIn("flash init_boot", "\n".join(fb.cmds()))
+
+
 if __name__ == "__main__":
     unittest.main()

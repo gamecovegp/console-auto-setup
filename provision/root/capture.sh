@@ -30,35 +30,53 @@ mk_tar(){ out="$1"; cdir="$2"; member="$3"; shift 3
   echo "golden_tz=$(getprop persist.sys.timezone 2>/dev/null)"
   echo "golden_locale=$(getprop persist.sys.locale 2>/dev/null)"
 } > "$P/global.meta"
-user_pkgs > "$P/pkglist.txt"                      # exact app set we clone: ALL 3rd-party minus host tools
+# the app set we clone: the manifest's pkgs when a selection was passed (SELECTIVE capture), else ALL
+# 3rd-party minus host tools. The default launcher (a system app) rides @homescreen below, NOT this loop,
+# so it is filtered out of the per-app set even when the manifest lists it.
+if [ -n "${CAS_MANIFEST:-}" ] && [ -f "$CAS_MANIFEST" ]; then
+  manifest_pkgs "$CAS_MANIFEST" | grep -vxF "$(home_launcher 2>/dev/null || echo __no_launcher__)" > "$P/pkglist.txt" 2>/dev/null \
+    || manifest_pkgs "$CAS_MANIFEST" > "$P/pkglist.txt"
+else
+  user_pkgs > "$P/pkglist.txt"
+fi
 [ -n "$HEAVY_EXCLUDES" ] && log "app-only capture (heavy runtime dirs excluded): $HEAVY_EXCLUDES"
 ok "cloning $(grep -c . "$P/pkglist.txt") apps: $(tr '\n' ' ' < "$P/pkglist.txt")"
 for pkg in $(cat "$P/pkglist.txt"); do
   [ -d "/data/data/$pkg" ] || { warn "$pkg not installed — skip"; continue; }
   log "capturing $pkg…"   # announce BEFORE the tar so a big app (save states/mods) isn't a silent gap
-  mkdir -p "$P/$pkg/apk"
-  # bundle the app's EXACT installed APK into the payload (self-contained root clone — version-exact,
-  # portable, no dependency on the SD's /apps folder). pm path = base + any splits.
-  for ap in $(pm path "$pkg" 2>/dev/null | sed 's/^package://'); do cp "$ap" "$P/$pkg/apk/" 2>/dev/null; done
-  # internal app data — KEEP settings/key binds/mappings/saves/states/grants-references. DROP regenerable or
-  # PC-/APK-sourced bulk: cache+code_cache (regenerate), cores (RetroArch — the PC repushes the full curated
-  # set on restore, so shipping them twice just bloats the golden), app_flutter (Flutter re-extracts these
-  # from the APK on first run — e.g. the Companion's 76 MB kernel_blob), plus any per-app HEAVY dirs (e.g.
-  # GameHub's ~5 GB Wine container — app ships, runtime is set up on-request).
-  # extra per-app excludes for THIS pkg: HEAVY regenerable bulk + per-INSTALL IDENTITY files (device-id /
-  # analytics) that must stay unique per unit and never ride the golden (see lib-root.sh).
-  heavy=""; for h in $HEAVY_EXCLUDES $IDENTITY_EXCLUDES; do case "$h" in "$pkg"/*) heavy="$heavy $h";; esac; done
-  mk_tar "$P/$pkg/data.tar" /data/data "$pkg" "$pkg/cache" "$pkg/code_cache" "$pkg/cores" "$pkg/app_flutter" $heavy \
-    || { warn "data.tar looks corrupt: $pkg"; CFAIL=$((CFAIL+1)); }
-  # external app data — KEEP firmware/BIOS/keys/nand/driver. DROP regenerable GPU shader caches (rebuilt on
-  # first run — e.g. Eden's ~400 MB files/shader) plus caches/logs.
-  if [ -d "/sdcard/Android/data/$pkg" ]; then
-    mk_tar "$P/$pkg/adata.tar" /sdcard/Android/data "$pkg" "$pkg/cache" "$pkg/files/shader" "$pkg/files/log" "$pkg/files/logs" \
-      || { warn "adata.tar looks corrupt: $pkg"; CFAIL=$((CFAIL+1)); }
+  # capture axes for THIS pkg from the manifest (else BOTH — back-compat). apk -> bundle the installer;
+  # config -> bundle its data/settings/BIOS. config-only (no apk) = the app is installed elsewhere (e.g. the
+  # OEM launcher) and we only carry its config; apk-only = a clean install with no golden saves.
+  AX="apk config"; [ -n "${CAS_MANIFEST:-}" ] && [ -f "$CAS_MANIFEST" ] && AX="$(manifest_axes "$CAS_MANIFEST" "$pkg")"
+  case " $AX " in *" apk "*) CAP_APK=1;; *) CAP_APK=0;; esac
+  case " $AX " in *" config "*) CAP_CFG=1;; *) CAP_CFG=0;; esac
+  if [ "$CAP_APK" = 1 ]; then
+    mkdir -p "$P/$pkg/apk"
+    # bundle the app's EXACT installed APK into the payload (self-contained root clone — version-exact,
+    # portable, no dependency on the SD's /apps folder). pm path = base + any splits.
+    for ap in $(pm path "$pkg" 2>/dev/null | sed 's/^package://'); do cp "$ap" "$P/$pkg/apk/" 2>/dev/null; done
   fi
-  # large native-game expansion files (OBB) — some GameHub PC-game ports need them
-  [ -d "/sdcard/Android/obb/$pkg" ] && tar -cf "$P/$pkg/obb.tar" -C /sdcard/Android/obb "$pkg" 2>/dev/null
-  echo "golden_uid=$(app_uid "$pkg")" > "$P/$pkg/meta"
+  if [ "$CAP_CFG" = 1 ]; then
+    # internal app data — KEEP settings/key binds/mappings/saves/states/grants-references. DROP regenerable or
+    # PC-/APK-sourced bulk: cache+code_cache (regenerate), cores (RetroArch — the PC repushes the full curated
+    # set on restore, so shipping them twice just bloats the golden), app_flutter (Flutter re-extracts these
+    # from the APK on first run — e.g. the Companion's 76 MB kernel_blob), plus any per-app HEAVY dirs (e.g.
+    # GameHub's ~5 GB Wine container — app ships, runtime is set up on-request).
+    # extra per-app excludes for THIS pkg: HEAVY regenerable bulk + per-INSTALL IDENTITY files (device-id /
+    # analytics) that must stay unique per unit and never ride the golden (see lib-root.sh).
+    heavy=""; for h in $HEAVY_EXCLUDES $IDENTITY_EXCLUDES; do case "$h" in "$pkg"/*) heavy="$heavy $h";; esac; done
+    mk_tar "$P/$pkg/data.tar" /data/data "$pkg" "$pkg/cache" "$pkg/code_cache" "$pkg/cores" "$pkg/app_flutter" $heavy \
+      || { warn "data.tar looks corrupt: $pkg"; CFAIL=$((CFAIL+1)); }
+    # external app data — KEEP firmware/BIOS/keys/nand/driver. DROP regenerable GPU shader caches (rebuilt on
+    # first run — e.g. Eden's ~400 MB files/shader) plus caches/logs.
+    if [ -d "/sdcard/Android/data/$pkg" ]; then
+      mk_tar "$P/$pkg/adata.tar" /sdcard/Android/data "$pkg" "$pkg/cache" "$pkg/files/shader" "$pkg/files/log" "$pkg/files/logs" \
+        || { warn "adata.tar looks corrupt: $pkg"; CFAIL=$((CFAIL+1)); }
+    fi
+    # large native-game expansion files (OBB) — some GameHub PC-game ports need them
+    [ -d "/sdcard/Android/obb/$pkg" ] && tar -cf "$P/$pkg/obb.tar" -C /sdcard/Android/obb "$pkg" 2>/dev/null
+  fi
+  { echo "golden_uid=$(app_uid "$pkg")"; echo "axes=$AX"; } > "$P/$pkg/meta"
   ok "captured $pkg ($(du -sh "$P/$pkg" 2>/dev/null | cut -f1))"   # size so the operator can see what's big
 done
 # shared internal-storage dirs (Citra/RetroArch keep state here, OUTSIDE app-private dirs; a factory

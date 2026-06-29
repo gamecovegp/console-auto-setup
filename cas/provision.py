@@ -62,6 +62,7 @@ TMPCAP = "/data/local/tmp/cas_cap"   # capture output on the device, pulled to t
 RESTORE = BUNDLE / "provision" / "root" / "restore.sh"
 CAPTURE = BUNDLE / "provision" / "root" / "capture.sh"
 LIBROOT = BUNDLE / "provision" / "root" / "lib-root.sh"
+SCRUB = BUNDLE / "provision" / "root" / "scrub.sh"          # Lock-time ship-clean scrub (usage + saves)
 
 
 def _validate_payload(pay, pkgs, log):
@@ -797,6 +798,14 @@ def seal(adb, fastboot, stock_init_boot, log=print, wait=True, model_match=None,
     target = adb.boot_flash_target()
 
     if adb.is_root():
+        # ship-clean scrub FIRST, while still rooted — clears usage traces + saved game states before
+        # un-root so the unit ships factory-fresh. Additive: scrub.sh always exits 0, never blocks the seal.
+        log("scrub: clearing usage traces + saved game states before un-root…")
+        adb.shell("mkdir -p /data/local/tmp/cas_scripts")
+        if adb.push(SCRUB, "/data/local/tmp/cas_scripts/") and adb.push(LIBROOT, "/data/local/tmp/cas_scripts/"):
+            adb.su_stream("sh /data/local/tmp/cas_scripts/scrub.sh", log)
+        else:
+            log("warning: could not stage scrub.sh — skipping scrub (seal proceeds).")
         rc, _, err = adb.su("pm uninstall com.topjohnwu.magisk")
         if rc != 0:
             log(f"warning: Magisk app uninstall returned {rc}: {err.strip()}")

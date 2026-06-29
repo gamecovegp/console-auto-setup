@@ -46,7 +46,22 @@ log "restore: this serial=$SERIAL  golden serial=$GSERIAL  apps=$(echo $RPKGS | 
 #    Fix: stage the APK(s) to /data/local/tmp (clean read), then `pm install`. Splits -> install session.
 for pkg in $RPKGS; do
   set -- "$P/$pkg/apk/"*.apk
-  [ -f "$1" ] || { warn "no APK in payload for $pkg"; FAIL=$((FAIL+1)); continue; }
+  if [ ! -f "$1" ]; then
+    # no APK in the payload: config-only (axes=config) is BY DESIGN — the app is provided elsewhere (e.g.
+    # the OEM launcher self-installs it). Skip install, don't FAIL; only WARN if the app isn't here yet so
+    # its config can't land. Any other missing-APK is a genuine error (today's fail-closed contract).
+    AX="$(sed -n 's/^axes=//p' "$P/$pkg/meta" 2>/dev/null)"
+    case " $AX " in
+      *" config "*)
+        if pm path "$pkg" >/dev/null 2>&1; then
+          log "config-only: $pkg already installed — applying config, no APK in payload"
+        else
+          warn "config-only: $pkg NOT installed on this unit — its config can't apply yet (install it, then re-run Update)"
+        fi
+        continue ;;
+      *) warn "no APK in payload for $pkg"; FAIL=$((FAIL+1)); continue ;;
+    esac
+  fi
   rm -rf /data/local/tmp/_inst; mkdir -p /data/local/tmp/_inst
   cp "$@" /data/local/tmp/_inst/ 2>/dev/null; set -- /data/local/tmp/_inst/*.apk
   if [ "$#" -eq 1 ]; then

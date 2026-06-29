@@ -918,16 +918,24 @@ class App:
              "Tick or untick every app in this list at once. (Behaviour options below are unaffected.)") \
             .pack(anchor="w")
         ttk.Separator(self.modf, orient="horizontal").pack(fill="x", pady=(2, 4))
+        axes = prof.axes()                                 # {pkg: (apk, cfg)} from the saved manifest
+        launcher_pkg = prof.meta.get("launcher_pkg")
         for pkg in prof.all_pkgs():
-            var = tk.BooleanVar(value=(pkg in included))
-            self.pkg_vars[pkg] = var
-            cb = ttk.Checkbutton(self.modf, text=f" {_app_label(pkg)}", variable=var,
-                                 command=self._on_app_toggle)
-            # real launcher icon from the app's bundled APK, else a uniform placeholder so rows align
-            icon = self._app_icon(prof, pkg) or self._placeholder_icon(_app_label(pkg))
-            if icon is not None:
-                cb.configure(image=icon, compound="left")
-            _tip(cb, f"Package: {pkg}").pack(anchor="w")   # exact package id on hover (name is friendly)
+            # two independent axes per app: APK (bundle the installer) | Config (bundle data/settings/BIOS).
+            apk0, cfg0 = axes.get(pkg, (pkg in included, pkg in included))
+            is_launcher = (pkg == launcher_pkg)
+            if is_launcher:
+                apk0 = False                               # system firmware — never reinstalled
+            apk_v, cfg_v = tk.BooleanVar(value=apk0), tk.BooleanVar(value=cfg0)
+            self.pkg_vars[pkg] = (apk_v, cfg_v)
+            row = ttk.Frame(self.modf); row.pack(anchor="w", fill="x")
+            ttk.Label(row, text=f" {_app_label(pkg)}", width=28).pack(side="left")
+            apk_cb = ttk.Checkbutton(row, text="APK", variable=apk_v, command=self._on_app_toggle)
+            if is_launcher:
+                apk_cb.configure(state="disabled")
+            _tip(apk_cb, f"Bundle {pkg}'s installer (off = clean install / system launcher)").pack(side="left")
+            _tip(ttk.Checkbutton(row, text="Config", variable=cfg_v, command=self._on_app_toggle),
+                 f"Bundle {pkg}'s data/settings/BIOS (whole data dir for the launcher)").pack(side="left")
         self._sync_selall()                                # set the master box from the initial selection
         self._sync_media_tab()                             # ES-DE box-art tab follows the ES-DE checkbox
         # behavior flags: @settings/@hardening/@grants/@homescreen honored by restore.sh on the device.
@@ -1048,10 +1056,12 @@ class App:
         if not name:
             return
         prof = P.Profile(P.pathlib.Path(self.profiles_root) / name)
-        pkgs = [p for p, v in self.pkg_vars.items() if v.get()]
+        axes = {p: (a.get(), c.get()) for p, (a, c) in self.pkg_vars.items()}
+        pkgs = [p for p, (a, c) in axes.items() if a or c]          # included if EITHER axis is ticked
+        axes = {p: axes[p] for p in pkgs}
         flags = {fl: ("on" if v.get() else "off") for fl, v in self.flag_vars.items()}
-        P.save_manifest(prof.manifest_path, pkgs, flags, header=f"# {name}")
-        self.log(f"saved manifest for {name}: {len(pkgs)} module(s), flags={flags}")
+        P.save_manifest(prof.manifest_path, pkgs, flags, header=f"# {name}", axes=axes)
+        self.log(f"saved manifest for {name}: {len(pkgs)} app(s), flags={flags}")
 
     def _on_batch_toggle(self):
         if self.batch_var.get():
@@ -1481,8 +1491,8 @@ class App:
     def _toggle_all_apps(self):
         """'Select all apps' clicked — set every app checkbox to the master box's state."""
         on = self.selall_var.get()
-        for v in self.pkg_vars.values():
-            v.set(on)
+        for a, c in self.pkg_vars.values():
+            a.set(on); c.set(on)
         self._sync_media_tab()                             # ES-DE may have just been (un)ticked
 
     def _on_app_toggle(self):
@@ -1500,7 +1510,7 @@ class App:
         if nb is None or tab is None:
             return
         v = self.pkg_vars.get(_ESDE_PKG)
-        want = bool(v and v.get())
+        want = bool(v and (v[0].get() or v[1].get()))
         try:
             nb.add(tab) if want else nb.hide(tab)
         except tk.TclError:
@@ -1509,7 +1519,7 @@ class App:
     def _sync_selall(self):
         """Keep the 'Select all apps' box in sync: ticked only when every app is ticked."""
         if hasattr(self, "selall_var"):
-            self.selall_var.set(bool(self.pkg_vars) and all(v.get() for v in self.pkg_vars.values()))
+            self.selall_var.set(bool(self.pkg_vars) and all((a.get() or c.get()) for a, c in self.pkg_vars.values()))
 
     ICON_PX = 24                                          # uniform icon box for the app list
 

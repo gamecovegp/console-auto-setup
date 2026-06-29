@@ -58,6 +58,25 @@ HEAVY_EXCLUDES="gamehub.lite/files/usr gamehub.lite/files/xj_winemu"
 # at the provisioning layer. capture excludes them; restore deletes any an OLD payload still carries.
 # Same member-relative form as HEAVY_EXCLUDES ("pkg/reldir-or-file" — matches mk_tar's exclude + the restore rm).
 IDENTITY_EXCLUDES="com.gamecove.gamecove_companion/files/device_id.txt com.gamecove.gamecove_companion/files/analytics.json"
+# Ship-clean scrub (run at Lock, while rooted, BEFORE un-root). Member-relative "pkg/reldir-or-file",
+# same form as IDENTITY_EXCLUDES. USAGE_TRACES = recent-ROM/MRU/search history; SAVE_STATES = savestates +
+# in-game saves so a unit ships with zero progress. [VERIFY on device] — exact paths confirmed on the AIR X
+# during rollout; this seeds the known emulator set.
+USAGE_TRACES="com.retroarch.aarch64/content_history.lpl com.retroarch.aarch64/content_image_history.lpl com.retroarch.aarch64/content_music_history.lpl"
+SAVE_STATES="com.github.stenzek.duckstation/savestates xyz.aethersx2.android/files/sstates"
+# scrub_members <data_root> <member…> — rm -rf each member under data_root (WARN on failure, never abort).
+scrub_members(){ dr="$1"; shift; for m in "$@"; do [ -e "$dr/$m" ] && { rm -rf "$dr/$m" 2>/dev/null || warn "scrub: could not remove $m"; }; done; }
+# scrub_traces — the Lock-time entry point. Clears usage traces + saved game states for INSTALLED pkgs, plus
+# the Android recent-tasks list. DATA_ROOT/ADATA_ROOT are overridable for local testing.
+scrub_traces(){
+  DR="${DATA_ROOT:-/data/data}"; AR="${ADATA_ROOT:-/sdcard/Android/data}"
+  for m in $USAGE_TRACES $SAVE_STATES; do
+    p="${m%%/*}"; pm path "$p" >/dev/null 2>&1 || continue          # only installed pkgs
+    scrub_members "$DR" "$m"; scrub_members "$AR" "$m"              # member may live in either root
+  done
+  rm -rf /data/system_ce/0/recent_tasks/* /data/system/recent_tasks/* 2>/dev/null || warn "scrub: recents"
+  ok "scrub_traces: usage traces + saved game states cleared"
+}
 # Every user-installed app on the golden, minus the host tools — this is the set capture clones.
 user_pkgs(){
   for p in $(pm list packages -3 2>/dev/null | sed 's/^package://'); do

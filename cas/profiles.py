@@ -164,12 +164,20 @@ class Profile:
     def flags(self):
         return manifest_flags(self.manifest_path)
 
+    def axes(self):
+        """{pkg: (apk_bool, config_bool)} per-app capture selection from the manifest (bare line = both)."""
+        return manifest_axes(self.manifest_path)
+
     def all_pkgs(self):
-        """Every app the payload contains (from pkglist.txt) — the full toggle set for the UI."""
+        """Every selectable app: the captured set (pkglist.txt) plus the default launcher (a system app
+        excluded by user_pkgs) when known, so it can be ticked for config. The full toggle set for the UI."""
         pl = self.payload / "pkglist.txt"
-        if pl.exists():
-            return [l.strip() for l in _read_text(pl).splitlines() if l.strip()]
-        return self.pkgs()
+        pkgs = ([l.strip() for l in _read_text(pl).splitlines() if l.strip()]
+                if pl.exists() else self.pkgs())
+        lp = self.meta.get("launcher_pkg") or _read_meta(self.payload / "homescreen" / "meta").get("launcher_pkg")
+        if lp and lp not in pkgs:
+            pkgs.append(lp)
+        return pkgs
 
     def has_golden(self):
         """True if a golden has been captured into this profile (payload + its global.meta both exist)."""
