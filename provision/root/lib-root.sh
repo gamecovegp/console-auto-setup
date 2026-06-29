@@ -116,3 +116,23 @@ home_launcher(){
   cmd package resolve-activity -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null \
     | sed -n 's/.*packageName=\([^ }]*\).*/\1/p' | head -1
 }
+# The GAME FRONTEND (holds per-system emulator picks) — DISTINCT from the Android HOME app (home_launcher).
+# Curated fallback list; the probe below handles OEM rebrands that keep the ES-DE-fork data shape.
+GAME_LAUNCHERS="com.handheld.launcher"
+_gl_installed(){ pm path "$1" >/dev/null 2>&1; }
+# game_launcher [override_pkg] — resolve the frontend. Order: override (if installed) -> data-dir signature
+# probe (databases/GAME_INFO or files/datastore/GameLauncher.preferences_pb) -> curated list. Echoes the
+# package or nothing. DATA_ROOT overrides the probe root (default /data/data) so this is testable off-device.
+game_launcher(){
+  ov="$1"
+  if [ -n "$ov" ] && _gl_installed "$ov"; then echo "$ov"; return 0; fi
+  DR="${DATA_ROOT:-/data/data}"
+  for d in "$DR"/*; do
+    [ -d "$d" ] || continue
+    if [ -f "$d/databases/GAME_INFO" ] || [ -f "$d/files/datastore/GameLauncher.preferences_pb" ]; then
+      echo "${d##*/}"; return 0
+    fi
+  done
+  for p in $GAME_LAUNCHERS; do _gl_installed "$p" && { echo "$p"; return 0; }; done
+  return 0
+}
