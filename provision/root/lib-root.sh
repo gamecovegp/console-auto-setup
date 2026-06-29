@@ -29,6 +29,20 @@ esac; }
 # Manifest = app names (one per line) + "@flag value" lines + "#" comments. Both parsers are pure.
 manifest_pkgs(){ sed -e 's/#.*//' "$1" 2>/dev/null | grep -vE '^[[:space:]]*@' | awk 'NF{print $1}'; }
 manifest_flag(){ f="$1"; n="$2"; sed -n "s/^@${n}[[:space:]]\{1,\}//p" "$f" 2>/dev/null | awk 'NF{print $1; exit}'; }
+# manifest_axes <manifest> <pkg> — echoes the capture axes for a pkg: "apk config" (bare/default),
+# "apk", "config", or empty if the pkg isn't listed. Tokens after the pkg name narrow it.
+manifest_axes(){
+  line="$(sed -e 's/#.*//' "$1" 2>/dev/null | grep -vE '^[[:space:]]*@' | awk -v p="$2" 'NF && $1==p {print; exit}')"
+  [ -n "$line" ] || return 0
+  rest="$(echo "$line" | cut -s -d' ' -f2-)"
+  case "$rest" in
+    "") echo "apk config" ;;                                  # bare = both
+    *apk*config*|*config*apk*) echo "apk config" ;;
+    *apk*) echo "apk" ;;
+    *config*) echo "config" ;;
+    *) echo "apk config" ;;                                   # unknown token -> both (back-compat)
+  esac
+}
 # Host/provisioning tools that must NOT be cloned onto shipped units (seal removes them anyway), plus
 # Magisk (root provides it per-unit via init_boot). Everything else third-party gets cloned.
 EXCLUDE_PKGS="com.termux moe.shizuku.privileged.api com.topjohnwu.magisk"
@@ -61,6 +75,20 @@ warn(){ printf ' [warn] %s\n' "$*"; }
 is_root(){ id 2>/dev/null | grep -q 'uid=0'; }
 detect_sd(){ for d in /storage/*-*; do [ -d "$d" ] && { echo "$d"; return; }; done; }
 app_uid(){ stat -c %u "/data/data/$1" 2>/dev/null; }   # the app's uid on THIS device (differs per unit)
+# Special appops that `pm install -g` does NOT grant — they are "special access" (Settings → Special app
+# access), not runtime permissions. We grant each one the app DECLARES, then VERIFY it stuck, so a silent
+# grant failure surfaces. Declaration-driven (keyed off the manifest), so no package is hardcoded:
+#   MANAGE_EXTERNAL_STORAGE  = "All files access" — ES-DE/Eden/GameHub read the ES-DE & ROM dirs.
+#   REQUEST_INSTALL_PACKAGES = "Install unknown apps" — the Companion self-installs emulators / app updates
+#                              without the end user hitting the unknown-sources prompt.
+SPECIAL_APPOPS="MANAGE_EXTERNAL_STORAGE REQUEST_INSTALL_PACKAGES"
+grant_special_appops(){ _p="$1"; _rc=0; _d="$(dumpsys package "$_p" 2>/dev/null)"
+  for _op in $SPECIAL_APPOPS; do
+    printf '%s' "$_d" | grep -q "$_op" || continue          # only grant what the app actually declares
+    appops set "$_p" "$_op" allow 2>/dev/null
+    appops get "$_p" "$_op" 2>/dev/null | grep -q allow || { warn "$_op NOT granted: $_p"; _rc=1; }
+  done
+  return $_rc; }
 # The package that owns the HOME screen (the launcher). Its private data holds the icon/folder/dock
 # layout we clone. Try the brief component form first (pkg/cls), fall back to the packageName= field.
 home_launcher(){
