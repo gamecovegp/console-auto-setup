@@ -133,6 +133,7 @@ class App:
         self.cap_vars = {}          # pkg -> (apk_var, cfg_var) — Save (capture) list
         self._cap_game_launcher = None   # game-launcher pkg detected on the current device (stashed for writer)
         self._cap_home_launcher = None   # HOME-launcher pkg detected on the current device
+        self._dl_launcher_pkg = None     # profile's launcher_pkg — APK disabled in the Download list
         self.flag_vars = {}         # @flag -> tk.BooleanVar (settings/hardening/grants)
         self.assigned = {}          # serial -> profile name (per-device; remembered across launches)
         self.assigned_manual = set()  # serials whose profile was set by hand (deliberate; allows force)
@@ -916,6 +917,7 @@ class App:
         self.cap_vars = {}
         self._cap_game_launcher = None
         self._cap_home_launcher = None
+        self._dl_launcher_pkg = None
         self._icon_refs = []                 # keep PhotoImage refs alive (Tk GCs unreferenced images)
         self._update_golden_status()         # golden: none / size + download ETA
         name = self.prof_var.get()
@@ -965,11 +967,12 @@ class App:
         ttk.Button(_dl_btn_row, text="Deselect all",
                    command=lambda: self._set_all(self.pkg_vars, False)).pack(side="left", padx=(4, 0))
         axes = prof.axes()                                 # {pkg: (apk, cfg)} from the saved manifest
-        included = set(prof.pkgs())
         launcher_pkg = prof.meta.get("launcher_pkg")
+        self._dl_launcher_pkg = launcher_pkg
         for pkg in prof.all_pkgs():
             # two independent axes per app: APK (bundle the installer) | Config (bundle data/settings/BIOS).
-            apk0, cfg0 = axes.get(pkg, (pkg in included, pkg in included))
+            # Default (True, True) so every app is on when no saved manifest exists yet.
+            apk0, cfg0 = axes.get(pkg, (True, True))
             is_launcher = (pkg == launcher_pkg)
             if is_launcher:
                 apk0 = False                               # system firmware — never reinstalled
@@ -1284,8 +1287,10 @@ class App:
 
     def _set_all(self, vars_dict, value):
         """Set every (apk_var, cfg_var) pair in vars_dict to value.
-        Launcher rows have a disabled APK checkbox; skip apk_v for those so it never diverges."""
-        launchers = {p for p in (self._cap_game_launcher, self._cap_home_launcher) if p}
+        Launcher rows have a disabled APK checkbox; skip apk_v for those so it never diverges.
+        Covers both Save-list launchers (_cap_game/_cap_home) and the Download-list launcher_pkg."""
+        launchers = {p for p in (self._cap_game_launcher, self._cap_home_launcher,
+                                 self._dl_launcher_pkg) if p}
         for pkg, (apk_v, cfg_v) in vars_dict.items():
             if pkg not in launchers:
                 apk_v.set(value)
