@@ -111,13 +111,12 @@ for pkg in $RPKGS; do
   fi
   chown -R "$TUID:$TUID" "/data/data/$pkg" 2>/dev/null
   relabel -R "/data/data/$pkg"
-  # "All files access" (MANAGE_EXTERNAL_STORAGE) is a SPECIAL appop that `pm install -g` does NOT grant,
-  # but ES-DE / Eden / GameHub need it to read the ES-DE & ROMs dirs (else ES-DE re-prompts for mapping).
-  # Grant it to any app that declares it, then VERIFY it stuck (so a silent grant failure surfaces).
-  if dumpsys package "$pkg" 2>/dev/null | grep -q MANAGE_EXTERNAL_STORAGE; then
-    appops set "$pkg" MANAGE_EXTERNAL_STORAGE allow 2>/dev/null
-    appops get "$pkg" MANAGE_EXTERNAL_STORAGE 2>/dev/null | grep -q allow || { warn "All-files-access NOT granted: $pkg"; FAIL=$((FAIL+1)); }
-  fi
+  # Special appops `pm install -g` does NOT grant (it only covers runtime perms) — "All files access"
+  # (MANAGE_EXTERNAL_STORAGE: ES-DE/Eden/GameHub read the ES-DE & ROMs dirs, else ES-DE re-prompts) and
+  # "Install unknown apps" (REQUEST_INSTALL_PACKAGES: the Companion self-installs emulators / app updates
+  # without the unknown-sources prompt). Granted declaration-driven + verified by grant_special_appops;
+  # a declared-but-unconfirmed grant bumps FAIL so a silent grant failure surfaces. See lib-root.sh.
+  grant_special_appops "$pkg" || FAIL=$((FAIL+1))
   ok "restored $pkg (uid $TUID, $( [ -f "$P/$pkg/adata.tar" ] && echo 'incl Android/data keys/BIOS' || echo 'internal only'))"
 done
 # a binary non-cache serial config was found -> the different-serial clone is broken; count it once.

@@ -61,6 +61,8 @@ The lockdown rides the existing **② Download** action (`provision()` in `cas/p
 
 **Ordering:** root/flash → `restore.sh` (installs Companion + clones config) → `install_companion` (PC-build refresh) → **set-device-owner + apply policy + verify** → reboot. (Independent of ③ Lock/seal.)
 
+**App permission grants (separate from DO, in the `restore.sh` rights layer):** the Companion's special-access appops — **"All files access"** (`MANAGE_EXTERNAL_STORAGE`) and **"Install unknown apps"** (`REQUEST_INSTALL_PACKAGES`, so it can self-install emulators / app updates without the unknown-sources prompt) — are granted **declaration-driven** by `restore.sh` (`grant_special_appops`, `$SPECIAL_APPOPS` in `lib-root.sh`), verified + `FAIL`-counted, alongside the runtime perms `pm install -g` already grants. These ride the golden restore for **every** unit carrying the Companion (independent of `@lockdown`), not the Device-Owner step.
+
 ## 6. Release / un-provision flow (shop-only)
 
 A **single-device GUI action** (a menu item — "Release selected unit…", behind a confirm — since this is an exceptional RMA action, not part of the routine ①②③ flow):
