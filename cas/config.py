@@ -311,6 +311,18 @@ def nas_share_root():
     return ("\\\\" + parts[0] + "\\" + parts[1]) if len(parts) >= 2 else NAS_DEFAULT
 
 
+def nas_share_name():
+    r"""The SMB share name from NAS_DEFAULT — the segment after the host (e.g. '01 GAMECOVE')."""
+    parts = NAS_DEFAULT.lstrip("\\").split("\\")
+    return parts[1] if len(parts) >= 2 else ""
+
+
+def nas_subpath():
+    r"""The path UNDER the share from NAS_DEFAULT, POSIX-separated (e.g. '[03] SETUP/CAS Profiles')."""
+    parts = NAS_DEFAULT.lstrip("\\").split("\\")
+    return "/".join(parts[2:]) if len(parts) > 2 else ""
+
+
 def nas_host():
     """The NAS hostname/IP from NAS_DEFAULT (e.g. '192.168.100.227')."""
     return NAS_DEFAULT.lstrip("\\").split("\\")[0]

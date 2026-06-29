@@ -493,6 +493,11 @@ class TestConfig(unittest.TestCase):
             self.assertEqual(C.es_media_src(), "/env/wins")
             os.environ.pop("CAS_MEDIA", None)
 
+    def test_nas_share_name_and_subpath(self):
+        from cas import config as C
+        self.assertEqual(C.nas_share_name(), "01 GAMECOVE")
+        self.assertEqual(C.nas_subpath(), "[03] SETUP/CAS Profiles")
+
 
 class TestReleaseToken(unittest.TestCase):
     def test_default_token_when_no_override(self):
