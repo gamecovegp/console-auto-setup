@@ -1089,6 +1089,18 @@ class App:
             return None
         return serials
 
+    _CHAIN_ORDER = ("root", "save", "download", "lock")
+
+    def _resolve_chain(self, ticked):
+        """Turn the ticked action checkboxes into an ordered, validated step list.
+        Returns (steps_in_fixed_order, error_or_None). Save is mutually exclusive with Download/Lock."""
+        on = [k for k in App._CHAIN_ORDER if ticked.get(k)]
+        if not on:
+            return [], "Tick at least one action to run."
+        if "save" in on and ("download" in on or "lock" in on):
+            return [], "Save (golden capture) can't run with Download/Lock — they're opposite directions."
+        return on, None
+
     def _profile_map(self, serials):
         """({serial: Profile or None}, force_serials) from each device's ASSIGNED profile. A hand-assigned
         device joins force_serials so Root/Lock may flash past a model mismatch (already confirmed at assign)."""

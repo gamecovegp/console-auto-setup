@@ -1667,5 +1667,27 @@ class TestSealScrub(unittest.TestCase):
         self.assertIn("flash init_boot", "\n".join(fb.cmds()))
 
 
+class TestResolveChain(unittest.TestCase):
+    def _r(self, **t):
+        from cas.gui import App                          # the main window class
+        return App._resolve_chain(None, t)               # pure: no self state used
+
+    def test_orders_unit_chain(self):
+        self.assertEqual(self._r(lock=True, root=True, download=True), (["root", "download", "lock"], None))
+
+    def test_golden_chain(self):
+        self.assertEqual(self._r(root=True, save=True), (["root", "save"], None))
+
+    def test_save_excludes_download_lock(self):
+        steps, err = self._r(save=True, download=True)
+        self.assertEqual(steps, [])
+        self.assertIn("Save", err)
+
+    def test_nothing_ticked_is_error(self):
+        steps, err = self._r()
+        self.assertEqual(steps, [])
+        self.assertTrue(err)
+
+
 if __name__ == "__main__":
     unittest.main()
