@@ -42,4 +42,24 @@ INSTALLED=""
 got="$(DATA_ROOT="$empty" game_launcher)"
 [ -z "$got" ] || { echo "FAIL(4 none): [$got]"; fail=1; }
 
+# === gl_capture: portable subtrees only, GAME_INFO excluded =====================================
+src="$tmp/data/com.handheld.launcher"
+mkdir -p "$src/files/datastore" "$src/databases" "$src/cache"
+printf 'psx_select_emulator' > "$src/files/datastore/GameLauncher.preferences_pb"
+: > "$src/databases/GAME_INFO"
+: > "$src/cache/junk"
+out="$tmp/out"; mkdir -p "$out"
+DATA_ROOT="$tmp/data" gl_capture "$out" "com.handheld.launcher" >/dev/null || { echo "FAIL(cap rc)"; fail=1; }
+tar -tf "$out/gamelauncher/config.tar" 2>/dev/null | grep -q 'files/datastore/GameLauncher.preferences_pb' \
+  || { echo "FAIL(cap: datastore missing)"; fail=1; }
+tar -tf "$out/gamelauncher/config.tar" 2>/dev/null | grep -q 'GAME_INFO' \
+  && { echo "FAIL(cap: GAME_INFO leaked)"; fail=1; }
+grep -q '^pkg=com.handheld.launcher$' "$out/gamelauncher/meta" || { echo "FAIL(cap: meta pkg)"; fail=1; }
+
+# === gl_restore: extracts + verifies a preferences_pb under the target data dir ==================
+dst="$tmp/restore"; mkdir -p "$dst/com.handheld.launcher"     # target app data dir exists (installed)
+DATA_ROOT="$dst" gl_restore "$out" "com.handheld.launcher" >/dev/null || { echo "FAIL(res rc)"; fail=1; }
+[ -f "$dst/com.handheld.launcher/files/datastore/GameLauncher.preferences_pb" ] \
+  || { echo "FAIL(res: preferences_pb not written)"; fail=1; }
+
 [ "$fail" -eq 0 ] && { echo "PASS: game_launcher"; exit 0; } || exit 1

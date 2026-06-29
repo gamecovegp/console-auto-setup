@@ -136,3 +136,36 @@ game_launcher(){
   for p in $GAME_LAUNCHERS; do _gl_installed "$p" && { echo "$p"; return 0; }; done
   return 0
 }
+# gl_capture <out_dir> <pkg> — capture ONLY the launcher's portable config (DataStore + shared_prefs);
+# NEVER GAME_INFO (SD-bound + scan-rebuilt) or caches. DATA_ROOT overridable for tests.
+gl_capture(){
+  out="$1"; pkg="$2"; DR="${DATA_ROOT:-/data/data}"; src="$DR/$pkg"
+  [ -d "$src" ] || { warn "gamelauncher: $pkg has no data dir — skip"; return 1; }
+  mkdir -p "$out/gamelauncher"
+  { echo "pkg=$pkg"; echo "uid=$(stat -c %u "$src" 2>/dev/null)"; } > "$out/gamelauncher/meta"
+  ( cd "$src" 2>/dev/null && tar -cf "$out/gamelauncher/config.tar" \
+      --exclude='files/datastore/*-shm' --exclude='files/datastore/*.tmp' \
+      files/datastore shared_prefs 2>/dev/null )
+  if tar -tf "$out/gamelauncher/config.tar" >/dev/null 2>&1; then
+    ok "captured game launcher config: $pkg"; return 0
+  fi
+  warn "gamelauncher: no portable config for $pkg (no datastore/shared_prefs?) — skip"
+  rm -f "$out/gamelauncher/config.tar"; return 1
+}
+# gl_restore <payload_dir> <pkg> — write the captured config back as a SYSTEM app: force-stop -> extract ->
+# chown system:system -> restorecon -> verify a preferences_pb exists. DATA_ROOT overridable for tests.
+gl_restore(){
+  Pd="$1"; pkg="$2"; DR="${DATA_ROOT:-/data/data}"; tgt="$DR/$pkg"
+  tar -tf "$Pd/gamelauncher/config.tar" >/dev/null 2>&1 || { warn "gamelauncher: config.tar missing/corrupt — skip"; return 1; }
+  [ -d "$tgt" ] || { warn "gamelauncher: $pkg not installed here — skip"; return 1; }
+  am force-stop "$pkg" 2>/dev/null
+  mkdir -p "$tgt/files/datastore"
+  tar -xf "$Pd/gamelauncher/config.tar" -C "$tgt" 2>/dev/null || { warn "gamelauncher: extract failed: $pkg"; return 1; }
+  chown -R system:system "$tgt/files/datastore" 2>/dev/null
+  [ -d "$tgt/shared_prefs" ] && chown -R system:system "$tgt/shared_prefs" 2>/dev/null
+  restorecon -R "$tgt/files/datastore" 2>/dev/null || warn "gamelauncher: restorecon failed (verify on enforcing unit)"
+  if ls "$tgt"/files/datastore/*.preferences_pb >/dev/null 2>&1; then
+    ok "game launcher config applied: $pkg"; return 0
+  fi
+  warn "gamelauncher: write-back unverified (no preferences_pb) for $pkg"; return 1
+}
