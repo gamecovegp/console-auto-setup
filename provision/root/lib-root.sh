@@ -124,50 +124,50 @@ _gl_installed(){ pm path "$1" >/dev/null 2>&1; }
 # probe (databases/GAME_INFO or files/datastore/GameLauncher.preferences_pb) -> curated list. Echoes the
 # package or nothing. DATA_ROOT overrides the probe root (default /data/data) so this is testable off-device.
 game_launcher(){
-  ov="$1"
-  if [ -n "$ov" ] && _gl_installed "$ov"; then echo "$ov"; return 0; fi
-  DR="${DATA_ROOT:-/data/data}"
-  for d in "$DR"/*; do
-    [ -d "$d" ] || continue
-    if [ -f "$d/databases/GAME_INFO" ] || [ -f "$d/files/datastore/GameLauncher.preferences_pb" ]; then
-      echo "${d##*/}"; return 0
+  _gl_ov="$1"
+  if [ -n "$_gl_ov" ] && _gl_installed "$_gl_ov"; then echo "$_gl_ov"; return 0; fi
+  _gl_dr="${DATA_ROOT:-/data/data}"
+  for _gl_d in "$_gl_dr"/*; do
+    [ -d "$_gl_d" ] || continue
+    if [ -f "$_gl_d/databases/GAME_INFO" ] || [ -f "$_gl_d/files/datastore/GameLauncher.preferences_pb" ]; then
+      echo "${_gl_d##*/}"; return 0
     fi
   done
-  for p in $GAME_LAUNCHERS; do _gl_installed "$p" && { echo "$p"; return 0; }; done
+  for _gl_p in $GAME_LAUNCHERS; do _gl_installed "$_gl_p" && { echo "$_gl_p"; return 0; }; done
   return 0
 }
 # gl_capture <out_dir> <pkg> — capture ONLY the launcher's portable config (DataStore + shared_prefs);
 # NEVER GAME_INFO (SD-bound + scan-rebuilt) or caches. DATA_ROOT overridable for tests.
 gl_capture(){
-  out="$1"; pkg="$2"; DR="${DATA_ROOT:-/data/data}"; src="$DR/$pkg"
-  [ -d "$src" ] || { warn "gamelauncher: $pkg has no data dir — skip"; return 1; }
-  mkdir -p "$out/gamelauncher"
-  gld="$(cd "$out/gamelauncher" 2>/dev/null && pwd)" || { warn "gamelauncher: out dir $out invalid — skip"; return 1; }
-  { echo "pkg=$pkg"; echo "uid=$(stat -c %u "$src" 2>/dev/null)"; } > "$gld/meta"
-  ( cd "$src" 2>/dev/null && tar -cf "$gld/config.tar" \
+  _gl_out="$1"; _gl_pkg="$2"; _gl_dr="${DATA_ROOT:-/data/data}"; _gl_src="$_gl_dr/$_gl_pkg"
+  [ -d "$_gl_src" ] || { warn "gamelauncher: $_gl_pkg has no data dir — skip"; return 1; }
+  mkdir -p "$_gl_out/gamelauncher"
+  _gl_gld="$(cd "$_gl_out/gamelauncher" 2>/dev/null && pwd)" || { warn "gamelauncher: out dir $_gl_out invalid — skip"; return 1; }
+  { echo "pkg=$_gl_pkg"; echo "uid=$(stat -c %u "$_gl_src" 2>/dev/null)"; } > "$_gl_gld/meta"
+  ( cd "$_gl_src" 2>/dev/null && tar -cf "$_gl_gld/config.tar" \
       --exclude='files/datastore/*-shm' --exclude='files/datastore/*.tmp' \
       files/datastore shared_prefs 2>/dev/null )
-  if tar -tf "$gld/config.tar" >/dev/null 2>&1; then
-    ok "captured game launcher config: $pkg"; return 0
+  if tar -tf "$_gl_gld/config.tar" 2>/dev/null | grep -q .; then
+    ok "captured game launcher config: $_gl_pkg"; return 0
   fi
-  warn "gamelauncher: no portable config for $pkg (no datastore/shared_prefs?) — skip"
-  rm -rf "$out/gamelauncher"; return 1
+  warn "gamelauncher: no portable config for $_gl_pkg (no datastore/shared_prefs?) — skip"
+  rm -rf "$_gl_out/gamelauncher"; return 1
 }
 # gl_restore <payload_dir> <pkg> — write the captured config back as a SYSTEM app: force-stop -> extract ->
 # chown system:system -> restorecon -> verify a preferences_pb exists. DATA_ROOT overridable for tests.
 gl_restore(){
-  Pd="$1"; pkg="$2"; DR="${DATA_ROOT:-/data/data}"; tgt="$DR/$pkg"
-  tar -tf "$Pd/gamelauncher/config.tar" >/dev/null 2>&1 || { warn "gamelauncher: config.tar missing/corrupt — skip"; return 1; }
-  [ -d "$tgt" ] || { warn "gamelauncher: $pkg not installed here — skip"; return 1; }
-  am force-stop "$pkg" 2>/dev/null
-  mkdir -p "$tgt/files/datastore"
-  tar -xf "$Pd/gamelauncher/config.tar" -C "$tgt" 2>/dev/null || { warn "gamelauncher: extract failed: $pkg"; return 1; }
-  chown -R system:system "$tgt/files/datastore" 2>/dev/null
-  [ -d "$tgt/shared_prefs" ] && chown -R system:system "$tgt/shared_prefs" 2>/dev/null
-  restorecon -R "$tgt/files/datastore" 2>/dev/null || warn "gamelauncher: restorecon failed (verify on enforcing unit)"
-  [ -d "$tgt/shared_prefs" ] && restorecon -R "$tgt/shared_prefs" 2>/dev/null
-  if ls "$tgt"/files/datastore/*.preferences_pb >/dev/null 2>&1; then
-    ok "game launcher config applied: $pkg"; return 0
+  _gl_pd="$1"; _gl_pkg="$2"; _gl_dr="${DATA_ROOT:-/data/data}"; _gl_tgt="$_gl_dr/$_gl_pkg"
+  tar -tf "$_gl_pd/gamelauncher/config.tar" >/dev/null 2>&1 || { warn "gamelauncher: config.tar missing/corrupt — skip"; return 1; }
+  [ -d "$_gl_tgt" ] || { warn "gamelauncher: $_gl_pkg not installed here — skip"; return 1; }
+  am force-stop "$_gl_pkg" 2>/dev/null
+  mkdir -p "$_gl_tgt/files/datastore"
+  tar -xf "$_gl_pd/gamelauncher/config.tar" -C "$_gl_tgt" 2>/dev/null || { warn "gamelauncher: extract failed: $_gl_pkg"; return 1; }
+  chown -R system:system "$_gl_tgt/files/datastore" 2>/dev/null
+  [ -d "$_gl_tgt/shared_prefs" ] && chown -R system:system "$_gl_tgt/shared_prefs" 2>/dev/null
+  restorecon -R "$_gl_tgt/files/datastore" 2>/dev/null || warn "gamelauncher: restorecon failed (verify on enforcing unit)"
+  [ -d "$_gl_tgt/shared_prefs" ] && restorecon -R "$_gl_tgt/shared_prefs" 2>/dev/null
+  if ls "$_gl_tgt"/files/datastore/*.preferences_pb >/dev/null 2>&1; then
+    ok "game launcher config applied: $_gl_pkg"; return 0
   fi
-  warn "gamelauncher: write-back unverified (no preferences_pb) for $pkg"; return 1
+  warn "gamelauncher: write-back unverified (no preferences_pb) for $_gl_pkg"; return 1
 }

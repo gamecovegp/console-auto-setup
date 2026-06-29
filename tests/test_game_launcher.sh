@@ -77,4 +77,12 @@ TGL_TEST="$(DATA_ROOT="$dst2" game_launcher)"
 [ ! -f "$dst2/com.other.launcher/files/datastore/GameLauncher.preferences_pb" ] \
   || { echo "FAIL(guard: wrote to mismatched frontend)"; fail=1; }
 
+# gl_capture on a frontend with NO datastore/shared_prefs -> rc 1, no config.tar left, no false "captured"
+mkdir -p "$tmp/data_empty/com.empty.fe"
+out_e="$tmp/out_empty"; mkdir -p "$out_e"
+if DATA_ROOT="$tmp/data_empty" gl_capture "$out_e" "com.empty.fe" >/dev/null 2>&1; then
+  echo "FAIL(cap empty: returned success on empty config)"; fail=1
+fi
+[ ! -f "$out_e/gamelauncher/config.tar" ] || { echo "FAIL(cap empty: left a config.tar)"; fail=1; }
+
 [ "$fail" -eq 0 ] && { echo "PASS: game_launcher"; exit 0; } || exit 1
