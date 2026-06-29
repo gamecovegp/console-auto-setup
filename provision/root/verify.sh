@@ -10,16 +10,17 @@ abx2xml /data/system/urigrants.xml - 2>/dev/null | grep -oE 'targetPkg="[^"]+"' 
 echo "grant count: $(abx2xml /data/system/urigrants.xml - 2>/dev/null | grep -c uri-grant)   serial in grants: $(abx2xml /data/system/urigrants.xml - 2>/dev/null | grep -oE '[0-9A-F]{4}-[0-9A-F]{4}' | head -1)  (this SD: $SERIAL)"
 
 echo; echo "===== Android/data ownership (THE fix) — should be <appuid>:1078 ====="
-for p in dev.eden.eden_emulator com.github.stenzek.duckstation xyz.aethersx2.tturnip; do
+for p in $(payload_pkgs "$SD/golden_root_payload"); do
   u=$(stat -c %u /data/data/$p 2>/dev/null)
   own=$(stat -c '%u:%g' /data/media/0/Android/data/$p 2>/dev/null)
   echo "  $p  app_uid=$u   Android/data=$own"
 done
 
 echo; echo "===== key/BIOS files present + readable ====="
+PS2="$(payload_pkgs "$SD/golden_root_payload" | grep -m1 aethersx2)"   # .android or .tturnip — follow the golden
 ls -l /data/media/0/Android/data/dev.eden.eden_emulator/files/keys/prod.keys 2>/dev/null | awk '{print "  eden prod.keys:", $1, $3":"$4, $5"b"}'
 ls /data/media/0/Android/data/com.github.stenzek.duckstation/files/bios/ 2>/dev/null | sed 's/^/   duckstation bios: /'
-ls /data/media/0/Android/data/xyz.aethersx2.tturnip/files/bios/ 2>/dev/null | sed 's/^/  nethersx2 bios: /'
+[ -n "$PS2" ] && ls /data/media/0/Android/data/$PS2/files/bios/ 2>/dev/null | sed "s|^|  ps2 ($PS2) bios: |"
 
 echo; echo "===== cores / citra-internal / settings applied ====="
 echo "  retroarch cores: $(ls /data/data/com.retroarch.aarch64/cores/*.so 2>/dev/null | grep -c .)"
