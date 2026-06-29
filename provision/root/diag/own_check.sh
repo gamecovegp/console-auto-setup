@@ -10,6 +10,6 @@ echo "=== one level deeper: eden/files backing ownership ==="
 ls -lan /data/media/0/Android/data/dev.eden.eden_emulator 2>/dev/null
 echo
 echo "=== app internal uids ==="
-for p in dev.eden.eden_emulator com.github.stenzek.duckstation xyz.aethersx2.tturnip; do
+for p in dev.eden.eden_emulator com.github.stenzek.duckstation xyz.aethersx2.android; do
   echo "$p internal_uid=$(stat -c %u /data/data/$p 2>/dev/null)"
 done

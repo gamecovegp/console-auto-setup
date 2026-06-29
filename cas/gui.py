@@ -70,7 +70,7 @@ _APP_LABELS = {
     "org.dolphinemu.dolphinemu": "Dolphin  ·  GameCube / Wii",
     "com.flycast.emulator": "Flycast  ·  Dreamcast",
     "com.github.stenzek.duckstation": "DuckStation  ·  PS1",
-    "xyz.aethersx2.tturnip": "AetherSX2  ·  PS2",
+    "xyz.aethersx2.android": "NetherSX2  ·  PS2",
     "me.magnum.melonds.nightly": "melonDS  ·  DS",
     "org.citra.emu": "Citra  ·  3DS",
     "org.ppsspp.ppsspp": "PPSSPP  ·  PSP",

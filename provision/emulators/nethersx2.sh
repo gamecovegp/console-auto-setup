@@ -1,5 +1,8 @@
 # NetherSX2 (PS2) — CLASS C: SAF library + external BIOS. uiauto grants the folder.
-PKG=xyz.aethersx2.tturnip
+# PKG = our NetherSX2-Turnip APK repackaged under the stock AetherSX2 application id, so OEM game
+# launchers (which hardwire PS2 -> xyz.aethersx2.android and ignore /sdcard/ES-DE config) launch it.
+# Turnip is still bundled in that repackaged APK. The .tturnip rename is no longer used.
+PKG=xyz.aethersx2.android
 F=/sdcard/Android/data/$PKG/files
 [ "${RESET:-0}" = 1 ] && { log "pm clear (fresh)"; SH "pm clear $PKG"; }
 launch_first "$PKG"

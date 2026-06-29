@@ -5,7 +5,7 @@ flycast;com.flycast.emulator com.reicast.emulator;ADATA;files/emu.cfg;ContentPat
 citra;org.citra.emu io.github.lime3ds.android org.citra.citra_emu;ADATA;files/config/config.ini files/config/qt-config.ini;gamedirs|game_dirs|roms
 eden;dev.eden.eden_emulator org.yuzu.yuzu_emu org.suyu.suyu;ADATA;files/config/qt-config.ini files/config/config.ini;gamedirs|game_dirs
 melonds;me.magnum.melonds.nightly;ADATA;files/config/melonDS.ini;ROMPath|GBAROMPath
-aethersx2;xyz.aethersx2.tturnip xyz.aethersx2.android xyz.aethersx2.android.noads;ADATA;files/inis/PCSX2.ini;Folders|RecursivePaths|GameList
+aethersx2;xyz.aethersx2.android xyz.aethersx2.android.noads;ADATA;files/inis/PCSX2.ini;Folders|RecursivePaths|GameList
 ppsspp;org.ppsspp.ppsspp org.ppsspp.ppssppgold;SD;PSP/SYSTEM/ppsspp.ini;CurrentDirectory|PinnedPath
 m64plusfz;org.mupen64plusae.v3.fzurita org.mupen64plusae.v3.fzurita.pro;DATADATA;-;-
 esde;org.es_de.frontend com.es_de.frontend;SD;ES-DE/settings/es_settings.xml;ROMDirectory
