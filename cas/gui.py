@@ -162,6 +162,8 @@ class App:
         setm.add_command(label="Firmware folder…", command=self.choose_firmware_dir)
         setm.add_separator()
         setm.add_command(label="NAS login…", command=self.nas_login_dialog)
+        setm.add_separator()
+        setm.add_command(label="Release selected unit (un-provision)…", command=self.release_selected)
         bar.add_cascade(label="Settings", menu=setm)
 
         helpm = tk.Menu(bar, tearoff=0)
@@ -1318,6 +1320,23 @@ class App:
             self.win.after(0, self.refresh_profiles)
             return ok
         self._run_bg(work, label=f"Saving {serial} → {name}")
+
+    def release_selected(self):
+        """Operator-only: un-provision the selected unit (clear the Companion's Device-Owner lockdown so it
+        can be factory-reset / uninstalled). Exceptional RMA action — single device, behind a confirm."""
+        serial = self._selected_serial()
+        if not serial:
+            messagebox.showinfo("CAS", "Select ONE device in the list first.")
+            return
+        if not messagebox.askyesno(
+                "CAS — release (un-provision) unit?",
+                f"Clear the GameCove Companion lockdown on {serial}?\n\n"
+                "After this, the app can be uninstalled and the unit can be factory-reset. "
+                "Use this for RMA / repair / resale."):
+            return
+        def work():
+            return PV.release(Adb(serial=serial, adb=self.adb_bin, cancel=self.cancel_event), log=self.log)
+        self._run_bg(work, label=f"Releasing {serial}")
 
     def root_device(self):
         t = self._action_targets()
