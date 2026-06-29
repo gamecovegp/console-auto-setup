@@ -45,6 +45,9 @@ log "restore: this serial=$SERIAL  golden serial=$GSERIAL  apps=$(echo $RPKGS | 
 #    fuse read (avc denied — only "works" on this permissive build; would FAIL on an enforcing unit).
 #    Fix: stage the APK(s) to /data/local/tmp (clean read), then `pm install`. Splits -> install session.
 for pkg in $RPKGS; do
+  if [ -n "${CAS_MANIFEST:-}" ] && [ -f "$CAS_MANIFEST" ] && ! manifest_wants "$CAS_MANIFEST" "$pkg" apk; then
+    log "deploy: $pkg APK-axis off — skipping install"; continue
+  fi
   set -- "$P/$pkg/apk/"*.apk
   if [ ! -f "$1" ]; then
     # no APK in the payload: config-only (axes=config) is BY DESIGN — the app is provided elsewhere (e.g.
@@ -79,6 +82,9 @@ done
 
 # 2) per-app: restore data -> rewrite serial -> chown to THIS unit's uid -> restorecon
 for pkg in $RPKGS; do
+  if [ -n "${CAS_MANIFEST:-}" ] && [ -f "$CAS_MANIFEST" ] && ! manifest_wants "$CAS_MANIFEST" "$pkg" config; then
+    log "deploy: $pkg Config-axis off — skipping data restore"; continue
+  fi
   [ -f "$P/$pkg/data.tar" ] || continue
   pm path "$pkg" >/dev/null 2>&1 || { warn "$pkg not installed — skip data restore"; FAIL=$((FAIL+1)); continue; }
   TUID="$(app_uid "$pkg")"                                  # this unit's uid for the app

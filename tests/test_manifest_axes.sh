@@ -12,4 +12,11 @@ check com.bar "apk"
 check xyz.aethersx2.android "config"
 check com.baz "apk config"
 check com.absent ""
+wants(){ manifest_wants "$tmp/m" "$1" "$2" && echo yes || echo no; }
+[ "$(wants com.foo apk)" = yes ]    || { echo "FAIL wants(foo,apk)"; fail=1; }     # bare = both
+[ "$(wants com.foo config)" = yes ] || { echo "FAIL wants(foo,config)"; fail=1; }
+[ "$(wants com.bar apk)" = yes ]    || { echo "FAIL wants(bar,apk)"; fail=1; }     # 'com.bar apk'
+[ "$(wants com.bar config)" = no ]  || { echo "FAIL wants(bar,config)"; fail=1; }
+[ "$(wants xyz.aethersx2.android config)" = yes ] || { echo "FAIL wants(aeth,config)"; fail=1; }
+[ "$(wants xyz.aethersx2.android apk)" = no ]     || { echo "FAIL wants(aeth,apk)"; fail=1; }
 [ "$fail" -eq 0 ] && { echo "PASS: manifest_axes"; exit 0; } || exit 1

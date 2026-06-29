@@ -43,6 +43,12 @@ manifest_axes(){
     *) echo "apk config" ;;                                   # unknown token -> both (back-compat)
   esac
 }
+# manifest_wants <manifest> <pkg> <apk|config> — rc 0 if that capture/deploy axis is ON for the pkg
+# (bare line = both axes on; pkg absent = off). Pure text; used by restore.sh to gate install/data.
+manifest_wants(){
+  _mw="$(manifest_axes "$1" "$2")"          # "apk config" | "apk" | "config" | ""
+  case " $_mw " in *" $3 "*) return 0 ;; *) return 1 ;; esac
+}
 # Host/provisioning tools that must NOT be cloned onto shipped units (seal removes them anyway), plus
 # Magisk (root provides it per-unit via init_boot). Everything else third-party gets cloned.
 EXCLUDE_PKGS="com.termux moe.shizuku.privileged.api com.topjohnwu.magisk"
