@@ -21,6 +21,7 @@ from . import APPDIR, BUNDLE, __version__, updater
 from . import profiles as P
 from . import provision as PV
 from . import firmware as FW
+from . import warnings as WARN
 from .adb import Adb, Fastboot, list_devices
 from . import config
 from .config import library_root
@@ -134,6 +135,7 @@ class App:
         self.assigned_manual = set()  # serials whose profile was set by hand (deliberate; allows force)
         self._last_auto = {}        # serial -> last auto-match shown (to detect + announce auto-changes)
         self.fw_resolved = {}       # serial -> firmware.resolve() result dict (for the column + status line)
+        self.warnings = []          # warnings.evaluate() result — drives the ⚠ Warnings menu + pre-flight
         self._load_device_profiles()  # restore remembered per-device assignments from cas-config.json
         win.title("CAS — Console Auto Setup")
         win.geometry("1000x720")
@@ -165,6 +167,13 @@ class App:
         setm.add_separator()
         setm.add_command(label="Release selected unit (un-provision)…", command=self.release_selected)
         bar.add_cascade(label="Settings", menu=setm)
+
+        # Live "⚠ Warnings (N)" cascade — its label + submenu are rebuilt on every refresh via
+        # _rebuild_warnings_menu(). We keep the bar + submenu handles and the cascade's index to relabel it.
+        self._menubar = bar
+        self._warn_menu = tk.Menu(bar, tearoff=0)
+        bar.add_cascade(label="✓ Warnings", menu=self._warn_menu)
+        self._warn_index = bar.index("end")
 
         helpm = tk.Menu(bar, tearoff=0)
         helpm.add_command(label="Check for updates…", command=lambda: self._check_updates(manual=True))
@@ -965,12 +974,15 @@ class App:
                 return
             rows = []
             fwmap = {}                                   # serial -> firmware.resolve() result
+            snaps = {}                                   # serial -> device-side snapshot for warnings.evaluate
             try:
                 fw_root = FW.firmware_root()
             except Exception:
                 fw_root = None
             for serial, state in devs:
                 model, sd, auto = "", "", ""
+                snap = {"serial": serial, "state": state, "model": "", "identity": {},
+                        "fw": {}, "bootloader": "unknown"}
                 if state == "device":
                     a = Adb(serial=serial, adb=self.adb_bin)
                     model = a.getprop("ro.product.model")
@@ -983,14 +995,24 @@ class App:
                     auto = m.name if m else "(no match)"
                     # device-root-firmware: suggest by serial-prefix/props (sticky manual override wins),
                     # then logic-check vs the live partition scheme. Library-only — never flashes.
+                    try:
+                        idn = FW.identity(a)
+                    except Exception:
+                        idn = {}
                     if fw_root is not None:
                         try:
-                            fwmap[serial] = FW.resolve(serial, FW.identity(a), fw_root)
+                            fwmap[serial] = FW.resolve(serial, idn, fw_root)
                         except Exception as e:
                             fwmap[serial] = {"firmware_id": None, "version": None, "manual": False,
                                              "ok": False, "warnings": [f"error: {e}"], "firmware": None}
+                    try:
+                        boot = a.bootloader_state()
+                    except Exception:
+                        boot = "unknown"
+                    snap.update(model=model, identity=idn, fw=fwmap.get(serial, {}), bootloader=boot)
+                snaps[serial] = snap
                 rows.append((serial, model, sd, auto, state))
-            self.win.after(0, lambda r=rows, fm=fwmap: self._populate_devices(r, fm))
+            self.win.after(0, lambda r=rows, fm=fwmap, sn=snaps: self._populate_devices(r, fm, sn))
         threading.Thread(target=work, daemon=True).start()
 
     def _load_device_profiles(self):
@@ -1006,7 +1028,7 @@ class App:
                 if rec["manual"]:
                     self.assigned_manual.add(serial)
 
-    def _populate_devices(self, rows, fwmap=None):
+    def _populate_devices(self, rows, fwmap=None, snaps=None):
         """(UI thread) fill the device tree (keyed by adb serial):
           * MANUAL assignment  -> sticky + remembered across launches; the operator's choice always wins.
           * AUTO assignment    -> FOLLOWS the live match every refresh, so if something CHANGES (SD card
@@ -1014,6 +1036,7 @@ class App:
                                   re-auto-assigns itself.
         Hand-assigned rows are tinted green."""
         self.fw_resolved = fwmap or {}
+        snaps = snaps or {}
         self.dev_tree.delete(*self.dev_tree.get_children())
         changes = []                                       # auto-matches that CHANGED for a known device
         for serial, model, sd, auto, state in rows:
@@ -1029,7 +1052,13 @@ class App:
             tags = ("manual",) if serial in self.assigned_manual else ()
             self.dev_tree.insert("", "end", iid=serial, text=serial,
                                  values=(model, sd, shown, self._fw_cell(serial), state), tags=tags)
+            # complete the snapshot with the EFFECTIVE assigned profile's facts (known only here)
+            sn = snaps.get(serial)
+            if sn is not None and state == "device":
+                gold, mm_ok = self._profile_facts(shown, model)
+                sn.update(profile_name=shown, profile_has_golden=gold, profile_model_match_ok=mm_ok)
         self.dev_tree.tag_configure("manual", foreground="#1a6f1a")
+        self._evaluate_warnings(snaps)
         self.log("refreshed: " + ", ".join(f"{r[0]} → {self.assigned.get(r[0], '?')}" for r in rows)
                  if rows else "refreshed: 0 device(s)")
         self._probe_sd_media()                             # auto-detect ES-DE/box art on the connected SD
@@ -1039,6 +1068,134 @@ class App:
                 "CAS — auto-match updated",
                 f"A device's auto-matched profile changed (SD card or library change):\n\n{body}\n\n"
                 "Kept automatically. Use 'Assign profile → selected' (or double-click a row) to override.")
+
+    # ---------- warnings (⚠ Warnings menu + pre-flight gating) ----------
+    def _profile_facts(self, name, model):
+        """(has_golden, model_match_ok) for the EFFECTIVE assigned profile, used to derive warnings.
+        Returns (None, None) when no profile is assigned; model_match_ok is None when the profile sets no
+        model_match (or the model is unknown) — only False (a real mismatch) raises a warning."""
+        if not name or name == "(no match)":
+            return None, None
+        try:
+            prof = P.Profile(P.pathlib.Path(self.profiles_root) / name)
+            gold = prof.has_golden()
+            mm = prof.meta.get("model_match")
+            mm_ok = None if not (mm and model) else bool(re.search(mm, model))
+        except Exception:
+            return None, None
+        return gold, mm_ok
+
+    def _evaluate_warnings(self, snaps):
+        """Recompute self.warnings from the device snapshots + global state, then rebuild the menu."""
+        gstate = {"library_reachable": self._lib_reachable()}
+        try:
+            gstate["firmware_library_empty"] = not FW.list_firmware(FW.firmware_root())
+        except Exception:
+            gstate["firmware_library_empty"] = False
+        try:
+            self.warnings = WARN.evaluate(list(snaps.values()), gstate)
+        except Exception as e:
+            self.warnings = []
+            self.log(f"warning-eval error: {e}")
+        self._rebuild_warnings_menu()
+
+    _SEV_ICON = {"block": "✗", "confirm": "⚠", "info": "ℹ"}
+
+    def _rebuild_warnings_menu(self):
+        """Relabel the top-level cascade ('✓ Warnings' / '⚠ Warnings (N)') and repopulate its submenu —
+        one click-to-select entry per warning, info grouped below, then 'Open warnings report…'."""
+        m = self._warn_menu
+        m.delete(0, "end")
+        actionable = [w for w in self.warnings if w["severity"] in ("block", "confirm")]
+        info = [w for w in self.warnings if w["severity"] == "info"]
+        label = f"⚠ Warnings ({len(actionable)})" if actionable else (
+                "ℹ Warnings" if info else "✓ Warnings")
+        try:
+            self._menubar.entryconfig(self._warn_index, label=label)
+        except tk.TclError:
+            pass
+        if not self.warnings:
+            m.add_command(label="No warnings — all clear", state="disabled")
+            return
+        for w in actionable + info:
+            who = w["serial"] or "ALL"
+            m.add_command(label=f"{self._SEV_ICON[w['severity']]}  {who} — {w['title']}",
+                          command=lambda ww=w: self._warning_clicked(ww))
+        m.add_separator()
+        m.add_command(label="Open warnings report…", command=self._open_warnings_report)
+
+    def _warning_clicked(self, w):
+        """Select the offending device row (if any) and show the warning's detail + suggested fix."""
+        s = w.get("serial")
+        if s and self.dev_tree.exists(s):
+            self.dev_tree.selection_set(s)
+            self.dev_tree.see(s)
+            self.dev_tree.focus(s)
+        scope = "All devices" if w["scope"] == "global" else (s or "device")
+        messagebox.showinfo(f"CAS — {self._SEV_ICON[w['severity']]} {w['title']}",
+                            f"{scope}\n\n{w['detail']}\n\nWhat to do:\n{w['fix']}")
+
+    def _open_warnings_report(self):
+        """A grouped, color-coded report of every current warning, with a Copy-to-clipboard button."""
+        dlg = tk.Toplevel(self.win)
+        dlg.title("CAS — warnings report")
+        dlg.geometry("680x420")
+        tree = ttk.Treeview(dlg, columns=("sev", "what", "fix"), show="tree headings")
+        tree.heading("#0", text="device"); tree.column("#0", width=130, anchor="w")
+        tree.heading("sev", text=""); tree.column("sev", width=34, anchor="center")
+        tree.heading("what", text="warning"); tree.column("what", width=260, anchor="w")
+        tree.heading("fix", text="what to do"); tree.column("fix", width=240, anchor="w")
+        for sev, color in (("block", "#b00020"), ("confirm", "#a06000"), ("info", "#666666")):
+            tree.tag_configure(sev, foreground=color)
+        groups, lines = {}, []
+        for w in self.warnings:
+            who = "All devices" if w["scope"] == "global" else (w["serial"] or "device")
+            if who not in groups:
+                groups[who] = tree.insert("", "end", text=who, open=True)
+            tree.insert(groups[who], "end", text="",
+                        values=(self._SEV_ICON[w["severity"]], w["title"], w["fix"]), tags=(w["severity"],))
+            lines.append(f"[{w['severity']}] {who}: {w['title']} — {w['fix']}")
+        if not self.warnings:
+            tree.insert("", "end", text="✓ all clear", values=("", "no warnings", ""))
+        tree.pack(fill="both", expand=True, padx=8, pady=8)
+        bar = ttk.Frame(dlg); bar.pack(fill="x", padx=8, pady=(0, 8))
+
+        def copy():
+            self.win.clipboard_clear()
+            self.win.clipboard_append("\n".join(lines) or "no warnings")
+            self.log("warnings report copied to clipboard.")
+        ttk.Button(bar, text="Copy", command=copy).pack(side="right")
+        ttk.Button(bar, text="Close", command=dlg.destroy).pack(side="right", padx=(0, 6))
+
+    def _preflight(self, actions, serials):
+        """Gate `serials` against the current warnings for `actions` (UI thread, before launching work).
+        Global blockers abort the whole op; per-device hard blocks are skipped (logged); soft warnings ask
+        'proceed anyway?'. Returns the surviving serials, or None to abort entirely."""
+        gb = WARN.gate(self.warnings, None, actions)["block"]
+        if gb:
+            messagebox.showerror("CAS — can't run",
+                                 "Resolve these first:\n\n" + "\n".join(f"• {w['title']}\n   {w['fix']}"
+                                                                        for w in gb))
+            return None
+        cleared = []
+        for s in serials:
+            g = WARN.gate(self.warnings, s, actions)
+            if g["block"]:
+                self.log(f"⏭ skipped {s}: " + "; ".join(w["title"] for w in g["block"]))
+                continue
+            if g["confirm"]:
+                if not messagebox.askyesno(
+                        f"CAS — proceed on {s}?",
+                        f"{s} has warnings:\n\n" + "\n".join(f"⚠ {w['title']}\n   {w['fix']}"
+                                                             for w in g["confirm"])
+                        + "\n\nProceed on this device anyway?"):
+                    self.log(f"⏭ skipped {s}: operator declined the warning(s).")
+                    continue
+            cleared.append(s)
+        if not cleared:
+            messagebox.showinfo("CAS", "Nothing to run — every targeted device was skipped or blocked.")
+            return None
+        return cleared
 
     # ---------- actions ----------
     def _selected_serial(self):
@@ -1088,15 +1245,21 @@ class App:
             if not serial:
                 messagebox.showinfo("CAS", "Select ONE golden device for Save.")
                 return
+            cleared = self._preflight(steps, [serial])    # gate before prompting for the profile name
+            if not cleared:
+                return
             name = simpledialog.askstring("Save → profile", "Profile name to capture into:",
                                           initialvalue=self.prof_var.get())
             if not name:
                 return
-            self._run_chain(steps, [serial], save_name=name)
+            self._run_chain(steps, cleared, save_name=name)
         else:
             t = self._action_targets()
-            if t:
-                self._run_chain(steps, t)
+            if not t:
+                return
+            cleared = self._preflight(steps, t)           # skip hard-blocked, confirm risky, then run survivors
+            if cleared:
+                self._run_chain(steps, cleared)
 
     def _selected_profile(self):
         name = self.prof_var.get()

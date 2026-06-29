@@ -135,6 +135,21 @@ def list_devices(adb="adb", runner=subprocess_runner):
     return devs
 
 
+def _parse_bootloader_state(props):
+    """Map a {prop: value} dict to 'locked' | 'unlocked' | 'unknown' (pure, best-effort).
+    Prefer the explicit vbmeta device_state; fall back to verified-boot color (orange = unlocked,
+    green/yellow = locked). 'unknown' when neither is readable — callers must NOT hard-block on unknown."""
+    ds = (props.get("ro.boot.vbmeta.device_state") or "").strip().lower()
+    if ds in ("locked", "unlocked"):
+        return ds
+    vbs = (props.get("ro.boot.verifiedbootstate") or "").strip().lower()
+    if vbs == "orange":
+        return "unlocked"
+    if vbs in ("green", "yellow"):
+        return "locked"
+    return "unknown"
+
+
 class Adb:
     """adb scoped to one device serial (or the only device if serial is None)."""
 
@@ -276,6 +291,18 @@ class Adb:
         unsealed) or the wrong partition on a pre-init_boot unit. Read it while adb is still up — it's lost
         once the unit drops to fastboot."""
         return self.boot_partition() + self.slot_suffix()
+
+    def bootloader_state(self):
+        """Best-effort 'locked' | 'unlocked' | 'unknown' from getprop (no root). Used only to WARN before
+        a flash — never raises, and 'unknown' (the common case on units that don't expose it) never blocks."""
+        try:
+            props = {
+                "ro.boot.vbmeta.device_state": self.getprop("ro.boot.vbmeta.device_state"),
+                "ro.boot.verifiedbootstate": self.getprop("ro.boot.verifiedbootstate"),
+            }
+        except Exception:
+            return "unknown"
+        return _parse_bootloader_state(props)
 
     def is_golden(self):
         """True if the device carries the golden lock. FAIL-CLOSED: ambiguous/empty/errored su output
