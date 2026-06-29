@@ -269,6 +269,8 @@ git commit -m "feat(companion): token-guarded device-owner release receiver"
 
 **Files:**
 - Modify: `android/app/src/main/kotlin/com/gamecove/gamecove_companion/MainActivity.kt` (add a `deviceOwnerStatus` method case + a reassert call in `configureFlutterEngine`)
+- Create: `android/app/src/main/kotlin/com/gamecove/gamecove_companion/GcBootReceiver.kt` (BOOT_COMPLETED reassert — Step 6)
+- Modify: `android/app/src/main/AndroidManifest.xml` (RECEIVE_BOOT_COMPLETED permission + GcBootReceiver — Step 6)
 - Modify: `lib/platform/native_bridge.dart` (add `isDeviceOwner()`)
 - Test: `test/platform/native_bridge_device_owner_test.dart` (new)
 
@@ -348,18 +350,54 @@ And add this case to the `when (call.method)` block (e.g. after the `"deviceInfo
                     )
 ```
 
-- [ ] **Step 6: Build to verify it compiles**
+- [ ] **Step 6: Add a BOOT_COMPLETED reassert receiver**
+
+Spec §4.2 requires the lockdown to re-assert on `onEnabled`, app launch, AND boot. `onEnabled` (A1) and launch (Step 5) are wired; this adds boot. Because CAS reboots the unit immediately after locking, the boot reassert re-applies the restrictions on first boot without waiting for the user to open the app.
+
+Create `android/app/src/main/kotlin/com/gamecove/gamecove_companion/GcBootReceiver.kt`:
+```kotlin
+package com.gamecove.gamecove_companion
+
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+
+/** Re-asserts the device-owner lockdown on boot (no-op unless this app is Device Owner). */
+class GcBootReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action == Intent.ACTION_BOOT_COMPLETED) DevicePolicyController.apply(context)
+    }
+}
+```
+Add the permission at the top of `AndroidManifest.xml` (with the other `<uses-permission>` lines):
+```xml
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+```
+And register the receiver inside `<application>`, after the `GcReleaseReceiver`:
+```xml
+        <receiver
+            android:name=".GcBootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED"/>
+            </intent-filter>
+        </receiver>
+```
+
+- [ ] **Step 7: Build to verify it compiles**
 
 Run: `flutter build apk --debug`
 Expected: BUILD SUCCESSFUL.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add lib/platform/native_bridge.dart \
         android/app/src/main/kotlin/com/gamecove/gamecove_companion/MainActivity.kt \
+        android/app/src/main/kotlin/com/gamecove/gamecove_companion/GcBootReceiver.kt \
+        android/app/src/main/AndroidManifest.xml \
         test/platform/native_bridge_device_owner_test.dart
-git commit -m "feat(companion): deviceOwnerStatus bridge + reassert lockdown on launch"
+git commit -m "feat(companion): deviceOwnerStatus bridge + reassert lockdown on launch/boot"
 ```
 
 ---
