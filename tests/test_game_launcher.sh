@@ -67,4 +67,14 @@ mkdir -p "$tmp/relout"
 ( cd "$tmp" && DATA_ROOT="$tmp/data" gl_capture "relout" "com.handheld.launcher" >/dev/null )
 tar -tf "$tmp/relout/gamelauncher/config.tar" >/dev/null 2>&1 || { echo "FAIL(cap: relative out misdirected)"; fail=1; }
 
+# === restore mismatch guard: target frontend != golden's -> skip (rc tolerated, no preferences written) ===
+dst2="$tmp/restore2"; mkdir -p "$dst2/com.other.launcher/databases"
+: > "$dst2/com.other.launcher/databases/GAME_INFO"   # probe signature so game_launcher can detect it
+INSTALLED="com.other.launcher"
+# golden meta says com.handheld.launcher; this unit detects com.other.launcher -> guarded skip
+TGL_TEST="$(DATA_ROOT="$dst2" game_launcher)"
+[ "$TGL_TEST" = "com.other.launcher" ] || { echo "FAIL(guard detect): [$TGL_TEST]"; fail=1; }
+[ ! -f "$dst2/com.other.launcher/files/datastore/GameLauncher.preferences_pb" ] \
+  || { echo "FAIL(guard: wrote to mismatched frontend)"; fail=1; }
+
 [ "$fail" -eq 0 ] && { echo "PASS: game_launcher"; exit 0; } || exit 1

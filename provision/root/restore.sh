@@ -316,6 +316,31 @@ else
     fi
   fi
 fi
+
+# GAME LAUNCHER emulator picks (DataStore) — ADDITIVE (WARN, never FAIL), like @homescreen. Auto-detect THIS
+# unit's frontend and write back the captured portable config. Default ON when the payload carries it;
+# "@gamelauncher off" disables; "@gamelauncher <pkg>" pins/overrides the target frontend.
+FGL=on; OVL=""
+if [ -n "${CAS_MANIFEST:-}" ] && [ -f "$CAS_MANIFEST" ]; then
+  v="$(manifest_flag "$CAS_MANIFEST" gamelauncher)"
+  case "$v" in "") : ;; off) FGL=off ;; *.*) OVL="$v" ;; *) FGL="$v" ;; esac
+fi
+if [ ! -d "$P/gamelauncher" ]; then
+  : # back-compat: golden carried no game-launcher config — nothing to do
+elif [ "$FGL" = off ]; then
+  log "game launcher: skipped (@gamelauncher off)"
+else
+  GLPKG="$(sed -n 's/^pkg=//p' "$P/gamelauncher/meta" 2>/dev/null)"
+  TGL="$(game_launcher "$OVL")"
+  if [ -z "$TGL" ]; then
+    warn "game launcher: none detected on this unit — skip"
+  elif [ -n "$GLPKG" ] && [ "$TGL" != "$GLPKG" ]; then
+    warn "game launcher: this unit ($TGL) != golden's ($GLPKG) — skip (different family?)"
+  else
+    gl_restore "$P" "$TGL" || true        # additive: a write-back miss must not fail the restore
+  fi
+fi
+
 fi   # ---- end GLOBAL steps ----
 
 if [ "$FAIL" -gt 0 ]; then
