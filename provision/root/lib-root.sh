@@ -1,8 +1,20 @@
 # lib-root.sh — shared bits for the ROOT capture/restore toolkit. Everything here runs AS ROOT (su).
-# The 11 emulator/frontend packages whose state we clone (settings, key binds, cores, grants, BIOS, keys):
+# FALLBACK default only — the golden's captured pkglist.txt is authoritative (see payload_pkgs below); this
+# static list is used solely when no payload is on hand. The emulator/frontend packages whose state we clone:
 PKGS="dev.eden.eden_emulator com.retroarch.aarch64 org.dolphinemu.dolphinemu com.flycast.emulator \
 com.github.stenzek.duckstation xyz.aethersx2.tturnip me.magnum.melonds.nightly org.citra.emu \
 org.ppsspp.ppsspp org.mupen64plusae.v3.fzurita org.es_de.frontend gamehub.lite"
+# payload_pkgs [payload_dir] — the authoritative cloned package set: the golden's captured pkglist.txt
+# (one pkg per line) when present and non-empty, else the static $PKGS fallback. Pure file IO (no adb/root),
+# so it is locally testable. payload_dir defaults to the capture/restore payload location.
+payload_pkgs(){
+  pdir="${1:-${CAS_OUT:-$(detect_sd)/golden_root_payload}}"
+  if [ -s "$pdir/pkglist.txt" ]; then
+    cat "$pdir/pkglist.txt"
+  else
+    printf '%s\n' $PKGS
+  fi
+}
 # Shared dirs on INTERNAL storage (/storage/emulated/0) that hold emulator state OUTSIDE any app-private
 # dir — wiped by a factory reset, so the payload MUST carry them. Citra MMJ keeps its whole state here
 # (nand/saves/sysdata/config); RetroArch keeps system/saves/playlists/config here. These are shared media
