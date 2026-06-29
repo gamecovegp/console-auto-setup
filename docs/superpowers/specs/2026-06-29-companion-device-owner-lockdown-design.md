@@ -50,34 +50,34 @@ This also directly unlocks the **silent "Update all"** install path the Companio
 
 ## 5. CAS provisioning hook (`console-auto-setup`)
 
-A distinct provisioning step in the **harden/seal phase, after `restore.sh` has installed Companion**:
+The lockdown rides the existing **② Download** action (`provision()` in `cas/provision.py`), **right after the Companion APK is installed** (`install_companion`) and before the reboot — exactly where the operator already "downloads the app to a new device." It is **not** a separate button. Gated on `COMPANION_PKG in pkgs` and a manifest flag `@lockdown` that **defaults on** when the Companion is present (`@lockdown off` opts a profile out, e.g. dev/test units).
 
-1. **Preconditions** (fail fast, surface the real reason): Companion package present; device fresh (no accounts/secondary users).
+1. **Preconditions** (surface the real reason): Companion package present; device fresh (no accounts/secondary users). Re-provisioning a unit that is *already* Companion-owned is treated as success (idempotent re-assert).
 2. **Set Device Owner:** `adb shell dpm set-device-owner com.gamecove.gamecove_companion/.GcDeviceAdminReceiver`.
-3. **Verify** (don't trust exit code alone): `dpm list-owners` shows Companion **and** the app reports `isDeviceOwnerApp == true` with all three restrictions active (read back via the status channel or `dumpsys device_policy`).
-4. **Failure contract:** any precondition/set/verify failure → unit marked **NOT sealed**, exact `dpm` stderr surfaced. Consistent with the `restore.sh` FAIL contract — never silently ship an un-locked unit.
+3. **Verify** (don't trust exit code alone): `dpm list-owners` shows Companion **and** `dumpsys device_policy` shows the restriction keys (`no_factory_reset`, `no_safe_boot`) active. (The app applies them on `onEnabled`; CAS nudges it with one `am start` then reads back.)
+4. **Failure contract (Download path):** lockdown is **best-effort within Download** — a failure is a **LOUD warning** (consistent with how `install_companion` already treats a failed app install), *not* a hard provision abort; the apps/config still ship. The operator sees the unit went out **un-locked** and can fix it (ensure fresh) + re-Download. (A hard "must be locked to ship" gate could later be added at ③ Lock — out of scope this round.)
 
 **Interaction with the golden clone:** Device Owner state lives in `/data/system/…`, **not** in the per-app `/data/data` trees that `capture.sh`/`restore.sh` handle — so it is *naturally excluded* from the golden payload, which is correct. Device Owner is set **fresh per unit via `dpm`**, never cloned (cloning DO assignment across units is unsupported and fragile).
 
-**Ordering:** root/flash → `restore.sh` (installs Companion + clones config) → **set-device-owner + apply policy** → verify → seal.
+**Ordering:** root/flash → `restore.sh` (installs Companion + clones config) → `install_companion` (PC-build refresh) → **set-device-owner + apply policy + verify** → reboot. (Independent of ③ Lock/seal.)
 
 ## 6. Release / un-provision flow (shop-only)
 
-A new `cas release <serial>` command for RMA/repair/resale:
+A **single-device GUI action** (a menu item — "Release selected unit…", behind a confirm — since this is an exceptional RMA action, not part of the routine ①②③ flow):
 
 1. Operator connects the unit (USB; debugging is still enabled — we never blocked it).
 2. CAS sends the guarded broadcast:
-   `adb shell am broadcast -a com.gamecove.companion.action.RELEASE -e token <secret> -n com.gamecove.gamecove_companion/.ReleaseReceiver`
+   `adb shell am broadcast -a com.gamecove.companion.action.RELEASE -e token <secret> -n com.gamecove.gamecove_companion/.GcReleaseReceiver`
 3. Companion validates the token → drops restrictions, `setUninstallBlocked(false)`, `clearDeviceOwnerApp()` → emits a result line.
-4. CAS confirms `dpm list-owners` is now empty and `isDeviceOwnerApp == false`. Only then is the unit "released" (factory reset / uninstall permitted again).
+4. CAS confirms `dpm list-owners` is now empty. Only then is the unit "released" (factory reset / uninstall permitted again).
 5. **Idempotent:** if DO is already cleared, it is a no-op success.
 
 **The token** is a secret baked into the **release build** of Companion and mirrored in CAS config (sourced like other CAS secrets, not committed in plaintext). It exists to stop a *rogue app* from triggering release; physical + USB access is the real gate. If the token is ever lost/mismatched, the **recovery/EDL wipe is the hard fallback** — the operator is never truly locked out.
 
 ## 7. Failure handling
 
-- `set-device-owner` rejected (accounts present / already provisioned / not fresh) → surface exact `dpm` stderr, mark unit not sealed.
-- Policy verify mismatch (a restriction didn't stick) → fail the seal; don't ship a half-locked unit.
+- `set-device-owner` rejected (accounts present / not fresh) → surface exact `dpm` stderr, **LOUD warning**, Download still succeeds un-locked (best-effort, like `install_companion`). Operator fixes + re-Downloads. (Already-Companion-owned is success, not a failure.)
+- Policy verify mismatch (a restriction didn't stick) → same LOUD warning; report the unit as un-locked rather than aborting the whole Download.
 - Release token mismatch → app ignores + logs; CAS times out and tells the operator to retry or fall back to EDL.
 - Boot-time re-assert is idempotent, so a partially-applied state self-heals on next launch.
 
