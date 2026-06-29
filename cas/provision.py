@@ -27,6 +27,10 @@ COMPANION_PKG = "com.gamecove.gamecove_companion"   # the GameCove Companion app
 COMPANION_SRC = DATA / "Apps" / "gamecove-companion.apk"   # the current GameCove Companion build, sourced
 #   from the PC (override CAS_COMPANION_APK). Installed after restore — when the app is in the manifest —
 #   so every unit ships the current build even if the captured golden module is older.
+DEVICE_ADMIN = f"{COMPANION_PKG}/.GcDeviceAdminReceiver"     # the Companion's DeviceAdminReceiver
+RELEASE_RECEIVER = f"{COMPANION_PKG}/.GcReleaseReceiver"
+RELEASE_ACTION = "com.gamecove.companion.action.RELEASE"
+_LOCK_RESTRICTIONS = ("no_factory_reset", "no_safe_boot")    # dumpsys keys for the applied restrictions
 
 # DEFAULT ROOT images — used for ANY profile that doesn't override them, so ⓪ Root works fleet-wide with no
 # per-profile picking. One bundled kit serves every profile: the stock init_boot (patched on-device, then
@@ -199,6 +203,55 @@ def install_companion(adb, log=print, apk_src=None):
         return True
     log(f"warning: Companion app install returned {rc}: {err.strip()} (provisioning still OK).")
     return False
+
+
+def _is_device_owner(adb):
+    """True if the Companion app is the active Device Owner on this unit."""
+    rc, out, _ = adb.shell("dpm list-owners")
+    return rc == 0 and COMPANION_PKG in out
+
+
+def set_device_owner(adb, log=print):
+    """Make the Companion the Device Owner: non-uninstallable + can block factory reset. Idempotent — a
+    unit that already has the Companion as Device Owner is a success (re-assert + verify). Returns True
+    only when ownership AND the lockdown restrictions are confirmed. The CALLER decides how to treat a
+    False (Download treats it as a loud warning, not an abort)."""
+    if _is_device_owner(adb):
+        log("Companion already Device Owner — re-asserting lockdown.")
+    else:
+        rc, out, err = adb.shell(f"dpm set-device-owner {DEVICE_ADMIN}")
+        if rc != 0 or "Success" not in out:
+            log(f"Device Owner NOT set ({(err or out).strip()}). Needs a FRESH unit (no accounts / "
+                "secondary users). Unit is NOT locked down.")
+            return False
+        log("Companion set as Device Owner.")
+    adb.shell(f"am start -n {COMPANION_PKG}/.MainActivity")   # nudge so onEnabled/launch re-assert ran
+    rc, dump, _ = adb.shell("dumpsys device_policy")
+    missing = [r for r in _LOCK_RESTRICTIONS if r not in dump]
+    if missing:
+        log(f"Device Owner set but restrictions missing {missing} — lockdown NOT confirmed.")
+        return False
+    log("lockdown confirmed (non-uninstallable + factory-reset/safe-boot blocked).")
+    return True
+
+
+def release(adb, log=print):
+    """Operator-only un-provision: tell the Companion (via a token-guarded broadcast) to drop the lockdown
+    and clear Device Owner, so the unit can be factory-reset / the app uninstalled (RMA/repair/resale).
+    Returns True once Device Owner is confirmed cleared. If this ever fails, an EDL/recovery wipe remains
+    the hard fallback."""
+    from . import config as _cfg
+    if not _is_device_owner(adb):
+        log("Companion is not Device Owner on this unit — nothing to release.")
+        return True
+    log("sending un-provision (release) broadcast to the Companion...")
+    adb.shell(f"am broadcast -a {RELEASE_ACTION} -e token {_cfg.get_release_token()} -n {RELEASE_RECEIVER}")
+    if _is_device_owner(adb):
+        log("release did NOT clear Device Owner (token mismatch or app missing?). Unit still locked — "
+            "retry, or fall back to an EDL/recovery wipe.")
+        return False
+    log("unit released — Device Owner cleared; factory reset / uninstall now permitted.")
+    return True
 
 
 def provision(adb, profile, log=print, dry_push=False, es_media_src=None):

@@ -19,7 +19,8 @@ class FakeRunner:
     """Records calls; returns canned (rc, out, err) shaped like the real adb."""
 
     def __init__(self, model="Odin2 Mini", golden=False, root=True, boot="1", sd=True,
-                 push_ok=True, pull_ok=True, su_blocked=False, slot="_a", first_api="33"):
+                 push_ok=True, pull_ok=True, su_blocked=False, slot="_a", first_api="33",
+                 device_owner=False, do_set_ok=True, do_restrict=True, release_clears=True):
         self.calls = []
         self.model, self.golden, self.root, self.boot, self.sd = model, golden, root, boot, sd
         self.push_ok, self.pull_ok = push_ok, pull_ok
@@ -30,6 +31,8 @@ class FakeRunner:
         # (>=33 means the unit LAUNCHED on Android 13+ and so has an init_boot partition). Defaults model an
         # A/B A13 unit on slot A — so the detected flash target stays 'init_boot_a' (existing assertions hold).
         self.slot, self.first_api = slot, first_api
+        self._owner = device_owner          # current device-owner state (mutated by a release broadcast)
+        self.do_set_ok, self.do_restrict, self.release_clears = do_set_ok, do_restrict, release_clears
 
     def __call__(self, args, input_text=None, timeout=900):
         self.calls.append(list(args))
@@ -58,6 +61,23 @@ class FakeRunner:
                     return 0, ("/storage/9C33-6BBD\n" if self.sd else ""), ""
                 return 0, "", ""
             tail = args[-1]
+            if tail.startswith("dpm list-owners"):
+                return 0, ("Device owner: com.gamecove.gamecove_companion\n" if self._owner
+                           else "No device owner.\n"), ""
+            if tail.startswith("dpm set-device-owner"):
+                if self.do_set_ok:
+                    self._owner = True
+                    return 0, "Success: Device owner set to package\n", ""
+                return 255, "", "java.lang.IllegalStateException: Not allowed to set the device owner\n"
+            if tail.startswith("dumpsys device_policy"):
+                return 0, ("no_factory_reset no_safe_boot\n" if (self._owner and self.do_restrict)
+                           else "\n"), ""
+            if tail.startswith("am broadcast") and "action.RELEASE" in tail:
+                if self.release_clears and "gc-release-7f3a9c2e" in tail:
+                    self._owner = False
+                return 0, "Broadcast completed: result=0\n", ""
+            if tail.startswith("am start"):
+                return 0, "Starting: Intent\n", ""
             if "boot_patch.sh" in tail:                 # on-device Magisk patch -> stdout sentinel
                 return 0, "- Patching ramdisk\n- Repacking boot image\nCAS_PATCH_OK\n", ""
             if tail.startswith("getprop"):
@@ -1480,6 +1500,44 @@ class TestCancel(unittest.TestCase):
         PV.fastboot_flasher(Fastboot(serial="SER", runner=fb_ok), on_critical=events.append)(
             Adb(runner=FakeRunner()), "init_boot_a", "/tmp/p.img", lambda *a: None)
         self.assertEqual(events, [True, False])          # marked entering + leaving the partition write
+
+
+class TestDeviceOwner(unittest.TestCase):
+    def _adb(self, **kw):
+        return Adb(runner=FakeRunner(**kw))
+
+    def test_set_device_owner_success(self):
+        a = self._adb(device_owner=False, do_set_ok=True, do_restrict=True)
+        self.assertTrue(PV.set_device_owner(a, log=lambda *_: None))
+        self.assertTrue(any("dpm set-device-owner" in c for c in a.runner.cmds()))
+
+    def test_set_device_owner_idempotent_when_already_owner(self):
+        r = FakeRunner(device_owner=True, do_restrict=True)
+        a = Adb(runner=r)
+        self.assertTrue(PV.set_device_owner(a, log=lambda *_: None))
+        self.assertFalse(any("dpm set-device-owner" in c for c in r.cmds()))  # did not re-set
+
+    def test_set_device_owner_fails_when_not_fresh(self):
+        a = self._adb(device_owner=False, do_set_ok=False)
+        self.assertFalse(PV.set_device_owner(a, log=lambda *_: None))
+
+    def test_set_device_owner_fails_when_restrictions_missing(self):
+        a = self._adb(device_owner=False, do_set_ok=True, do_restrict=False)
+        self.assertFalse(PV.set_device_owner(a, log=lambda *_: None))
+
+    def test_release_sends_token_broadcast_and_confirms_cleared(self):
+        r = FakeRunner(device_owner=True, release_clears=True)
+        a = Adb(runner=r)
+        self.assertTrue(PV.release(a, log=lambda *_: None))
+        self.assertTrue(any("am broadcast" in c and "action.RELEASE" in c for c in r.cmds()))
+
+    def test_release_fails_when_owner_not_cleared(self):
+        a = Adb(runner=FakeRunner(device_owner=True, release_clears=False))
+        self.assertFalse(PV.release(a, log=lambda *_: None))
+
+    def test_release_noop_when_not_owner(self):
+        a = Adb(runner=FakeRunner(device_owner=False))
+        self.assertTrue(PV.release(a, log=lambda *_: None))
 
 
 if __name__ == "__main__":
