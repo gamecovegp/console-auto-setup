@@ -519,6 +519,23 @@ class TestConfig(unittest.TestCase):
              mock.patch.object(C.pathlib.Path, "is_dir", lambda self: str(self) == "/Volumes/01 GAMECOVE"):
             self.assertEqual(C.nas_mountpoint(), "/Volumes/01 GAMECOVE")
 
+    def test_nas_default_path_follows_mountpoint(self):
+        from cas import config as C
+        from unittest import mock
+        with mock.patch.object(C, "nas_mountpoint", lambda: "/mnt/x/01 GAMECOVE"):
+            self.assertEqual(C.nas_default_path(), "/mnt/x/01 GAMECOVE/[03] SETUP/CAS Profiles")
+        with mock.patch.object(C, "nas_mountpoint", lambda: None):
+            self.assertIsNone(C.nas_default_path())
+
+    def test_library_root_local_when_nas_unmounted(self):
+        from cas import config as C, APPDIR
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as t:
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "missing.json")
+            os.environ.pop("CAS_PROFILES", None)
+            with mock.patch.object(C, "nas_default_path", lambda: None):     # NEW: None case
+                self.assertEqual(C.library_root(), APPDIR / "data" / "profiles")
+
 
 class TestReleaseToken(unittest.TestCase):
     def test_default_token_when_no_override(self):

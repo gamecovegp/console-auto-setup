@@ -26,8 +26,14 @@ NAS_DEFAULT_POSIX = "/mnt/gamecove/[03] SETUP/CAS Profiles"
 
 
 def nas_default_path():
-    """The OS-appropriate default NAS library path: the Windows UNC, else the POSIX cifs mount point."""
-    return NAS_DEFAULT if sys.platform == "win32" else NAS_DEFAULT_POSIX
+    """The NAS library path on THIS OS: the discovered share mountpoint + the subpath, or None when the
+    share isn't mounted. Replaces the old hardcoded UNC/POSIX constants so the path follows wherever the OS
+    mounted the share."""
+    mp = nas_mountpoint()
+    if not mp:
+        return None
+    sub = nas_subpath()
+    return str(pathlib.Path(mp) / sub) if sub else mp
 
 
 def config_path():
@@ -58,13 +64,14 @@ def library_root():
     lib = load_config().get("library")
     if lib:
         return pathlib.Path(lib)
-    # Default to the shared NAS library if it's mounted (UNC on Windows / cifs mount on POSIX); else local.
-    nas = pathlib.Path(nas_default_path())
-    try:
-        if nas.is_dir():
-            return nas
-    except OSError:
-        pass
+    # Default to the shared NAS library when the share is mounted (path discovered per-OS); else local.
+    nas = nas_default_path()
+    if nas:
+        try:
+            if pathlib.Path(nas).is_dir():
+                return pathlib.Path(nas)
+        except OSError:
+            pass
     return APPDIR / "data" / "profiles"
 
 
