@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Local smoke test for game_launcher / gl_capture / gl_restore (no device). Stubs pm/am/chown/restorecon/stat
+# Local smoke test for game_launcher / gl_capture / gl_restore (no device). Stubs pm/am/chown/restorecon
 # and points DATA_ROOT at scratch trees. Run: bash tests/test_game_launcher.sh
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$ROOT/provision/root/lib-root.sh"
@@ -19,6 +19,12 @@ mkdir -p "$tmp/data/com.handheld.launcher/files/datastore"
 : > "$tmp/data/com.handheld.launcher/files/datastore/GameLauncher.preferences_pb"
 got="$(DATA_ROOT="$tmp/data" game_launcher)"
 [ "$got" = "com.handheld.launcher" ] || { echo "FAIL(1 probe): [$got]"; fail=1; }
+
+# (1b) probe also matches the databases/GAME_INFO signature
+mkdir -p "$tmp/data_gi/com.oem.gi/databases"
+: > "$tmp/data_gi/com.oem.gi/databases/GAME_INFO"
+got="$(DATA_ROOT="$tmp/data_gi" game_launcher)"
+[ "$got" = "com.oem.gi" ] || { echo "FAIL(1b GAME_INFO probe): [$got]"; fail=1; }
 
 # (2) override wins even when a different pkg would probe-hit
 INSTALLED="com.oem.frontend"
