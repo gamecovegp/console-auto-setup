@@ -515,6 +515,21 @@ def _log_download_run(root, results, elapsed, log=print):
                              f"{total // 1048576} MB total in {rec['total_secs']:.0f}s"))
 
 
+def seed_default_manifest(pdir, name):
+    """Seed the per-profile selection manifest from the captured golden's pkglist — every captured app,
+    both axes (APK + Config) on. Used after the first capture so the Apps tab shows the device's apps
+    ticked (and Download has apps to restore)."""
+    pdir = pathlib.Path(pdir)
+    man = pdir / "manifest"
+    if man.exists() and P.manifest_pkgs(man):           # operator already has a real selection — keep it
+        return
+    pl = pdir / "golden_root_payload" / "pkglist.txt"
+    apps = [a.strip() for a in pl.read_text().splitlines() if a.strip()] if pl.exists() else []
+    P.save_manifest(man, apps,
+                    {"settings": "on", "hardening": "on", "grants": "on", "homescreen": "on"},
+                    header=f"# {name} default manifest")
+
+
 def capture_to_pc(adb, name, stamp, root="profiles", log=print, dry_pull=False):
     """Capture the connected golden into profiles/<name>/. The existing (good) profile is touched
     ONLY after the new payload is pulled AND verified — a failed capture/pull never destroys it."""
@@ -568,13 +583,10 @@ def capture_to_pc(adb, name, stamp, root="profiles", log=print, dry_pull=False):
                 shutil.rmtree(prev, ignore_errors=True)
             dest.rename(prev)
         incoming.rename(dest)
-        man = pdir / "manifest"
-        if not man.exists():
-            pl = dest / "pkglist.txt"
-            apps = pl.read_text().splitlines() if pl.exists() else []
-            P.save_manifest(man, [a.strip() for a in apps if a.strip()],
-                            {"settings": "on", "hardening": "on", "grants": "on", "homescreen": "on"},
-                            header=f"# {name} default manifest")
+        # Seed the selection from the captured apps when none is set yet (covers a fresh 'New profile'
+        # whose placeholder manifest has no app lines) — so the Apps tab shows the device's apps ticked
+        # and Download has apps to restore. A real, operator-edited selection is preserved.
+        seed_default_manifest(pdir, name)
     if not dry_pull:                                        # log the Save to the centralized NAS history
         import datetime
         b = P.Profile(pdir).golden_size()

@@ -757,6 +757,32 @@ class TestProvision(unittest.TestCase):
             self.assertIn("capture.sh", "\n".join(r.cmds()))
             self.assertIn("CAS_OUT=/data/local/tmp", "\n".join(r.cmds()))
 
+    def test_seed_default_manifest_populates_empty_placeholder(self):
+        # A 'New profile' leaves a placeholder manifest with NO app lines; after the first capture the
+        # selection must be seeded from the captured app set (both axes on) so the Apps tab shows the
+        # downloaded apps ticked — and Download has apps to restore.
+        with tempfile.TemporaryDirectory() as t:
+            pdir = pathlib.Path(t) / "mangmi-air-x-256"
+            (pdir / "golden_root_payload").mkdir(parents=True)
+            (pdir / "golden_root_payload" / "pkglist.txt").write_text("com.a\ncom.b\n")
+            (pdir / "manifest").write_text("# mangmi-air-x-256 (empty — capture a golden to populate)\n")
+            PV.seed_default_manifest(pdir, "mangmi-air-x-256")
+            self.assertEqual(P.manifest_pkgs(pdir / "manifest"), ["com.a", "com.b"])
+            self.assertEqual(P.manifest_axes(pdir / "manifest"),
+                             {"com.a": (True, True), "com.b": (True, True)})
+
+    def test_seed_default_manifest_preserves_existing_selection(self):
+        # If the operator already refined a real selection (manifest has app lines), seeding must NOT
+        # clobber it on a re-capture.
+        with tempfile.TemporaryDirectory() as t:
+            pdir = pathlib.Path(t) / "prof"
+            (pdir / "golden_root_payload").mkdir(parents=True)
+            (pdir / "golden_root_payload" / "pkglist.txt").write_text("com.a\ncom.b\n")
+            (pdir / "manifest").write_text("# prof\ncom.a config\n@settings on\n")
+            PV.seed_default_manifest(pdir, "prof")
+            self.assertEqual(P.manifest_pkgs(pdir / "manifest"), ["com.a"])          # unchanged
+            self.assertEqual(P.manifest_axes(pdir / "manifest"), {"com.a": (False, True)})
+
     def test_patch_init_boot_on_device_pushes_toolkit_and_pulls(self):
         # On-device patch: push the aarch64 toolkit + the stock init_boot, run boot_patch.sh, pull the
         # patched new-boot.img back to the PC. No root needed (it only rewrites the image file).
