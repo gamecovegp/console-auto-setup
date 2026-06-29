@@ -291,6 +291,20 @@ def get_nas_credentials():
     return (NAS_DEFAULT_USER, NAS_DEFAULT_PW) if NAS_DEFAULT_USER else None
 
 
+# Operator-only un-provision guard token. NOT a cryptographic secret (physical + USB-debug access is the
+# real gate); it only stops a rogue on-device app from triggering release. MUST match the Companion app's
+# res/values/cas_release.xml. Operator can override per-PC via cas-config.json ("release_token").
+RELEASE_TOKEN_DEFAULT = "gc-release-7f3a9c2e"
+
+
+def get_release_token():
+    """The release guard token: an operator override from cas-config.json if present, else the shipped
+    default (which matches the Companion build)."""
+    cfg = load_config()
+    t = cfg.get("release_token")
+    return t if t else RELEASE_TOKEN_DEFAULT
+
+
 def nas_share_root():
     r"""The SMB share root to authenticate against, derived from NAS_DEFAULT: \\host\share."""
     parts = NAS_DEFAULT.lstrip("\\").split("\\")

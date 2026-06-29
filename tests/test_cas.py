@@ -453,6 +453,27 @@ class TestConfig(unittest.TestCase):
             os.environ.pop("CAS_MEDIA", None)
 
 
+class TestReleaseToken(unittest.TestCase):
+    def test_default_token_when_no_override(self):
+        from cas import config as C
+        orig = C.load_config
+        C.load_config = lambda: {}
+        try:
+            self.assertEqual(C.get_release_token(), C.RELEASE_TOKEN_DEFAULT)
+            self.assertEqual(C.RELEASE_TOKEN_DEFAULT, "gc-release-7f3a9c2e")
+        finally:
+            C.load_config = orig
+
+    def test_operator_override_wins(self):
+        from cas import config as C
+        orig = C.load_config
+        C.load_config = lambda: {"release_token": "custom-xyz"}
+        try:
+            self.assertEqual(C.get_release_token(), "custom-xyz")
+        finally:
+            C.load_config = orig
+
+
 class TestProvision(unittest.TestCase):
     def test_provision_runs_restore_and_reboot(self):
         with tempfile.TemporaryDirectory() as t:
