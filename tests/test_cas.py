@@ -409,6 +409,13 @@ class TestProfiles(unittest.TestCase):
             self.assertIsNone(P.store_current_label(store, "nope"))
             self.assertEqual(P.store_apk_files(store, "nope"), [])
 
+    def test_list_store_apks_sorted_by_pkg(self):
+        with tempfile.TemporaryDirectory() as t:
+            store = pathlib.Path(t) / "store"
+            _seed_store(store, "org.zeta", "v1")
+            _seed_store(store, "com.alpha", "v1")
+            self.assertEqual([a["pkg"] for a in P.list_store_apks(store)], ["com.alpha", "org.zeta"])
+
 
 class TestConfig(unittest.TestCase):
     def setUp(self):

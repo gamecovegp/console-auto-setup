@@ -77,8 +77,15 @@ def list_store_apks(store_dir):
         files = store_apk_files(store_dir, d.name)
         if not files:
             continue
+        # Best-effort byte sum — ignores stat errors (NAS files may vanish between listing and stat).
+        total = 0
+        for f in files:
+            try:
+                total += f.stat().st_size
+            except OSError:
+                pass
         out.append({"pkg": d.name, "label": store_current_label(store_dir, d.name),
-                    "nfiles": len(files), "bytes": sum(f.stat().st_size for f in files)})
+                    "nfiles": len(files), "bytes": total})
     return out
 
 
