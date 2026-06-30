@@ -2106,17 +2106,6 @@ class TestModalManifestTransforms(unittest.TestCase):
         self.assertEqual(pkgs, ["a", "b", "c"])            # d (both off) excluded
         self.assertEqual(sub, {"a": (True, True), "b": (False, True), "c": (True, False)})
 
-    def test_capture_manifest_folds_launchers_into_flags(self):
-        from cas.gui import _capture_manifest_from_axes
-        axes = {"emu": (True, True), "gl": (False, True), "hl": (False, False), "off": (False, False)}
-        pkgs, sub, flags = _capture_manifest_from_axes(
-            axes, {"settings": "on"}, game_launcher="gl", home_launcher="hl")
-        self.assertEqual(pkgs, ["emu"])                    # launchers fold to flags; 'off' excluded
-        self.assertEqual(sub, {"emu": (True, True)})
-        self.assertEqual(flags["gamelauncher"], "on")      # gl Config on  -> @gamelauncher on
-        self.assertEqual(flags["homescreen"], "off")       # hl Config off -> @homescreen off
-        self.assertEqual(flags["settings"], "on")          # base flag preserved
-
 
 class TestPickCapture(unittest.TestCase):
     """_pick_capture: the Save modal's behavior choices (incl. hardening) land in the capture-manifest and
@@ -2149,6 +2138,43 @@ class TestPickCapture(unittest.TestCase):
         # and it seeds the Download default
         PV.seed_default_manifest(d, "prof")
         self.assertEqual(P.manifest_flags(d / "manifest")["hardening"], "off")
+
+    def test_launchers_are_behavior_flags_not_app_rows(self):
+        # When launchers are detected they appear as @gamelauncher/@homescreen BEHAVIOR FLAGS, not app
+        # rows; their pkgs never become manifest package lines, and the modal's flag choice is captured.
+        from cas.gui import App
+        root = pathlib.Path(tempfile.mkdtemp())
+        d = root / "prof"
+        (d / "golden_root_payload").mkdir(parents=True)
+        (d / "golden_root_payload" / "pkglist.txt").write_text("org.ppsspp.ppsspp\n")
+        (d / "profile.meta").write_text("")
+        app = App.__new__(App)
+        app.profiles_root = str(root)
+        app.log = lambda m: None
+        app._scan_device_apps = lambda s: ["org.ppsspp.ppsspp"]
+        app._detect_device_launchers = lambda s: ("com.handheld.launcher", "com.android.launcher3")
+        app._row_model = lambda s: "AIR X"
+        seen = {}
+        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, flags_caption="—"):
+            seen["row_pkgs"] = list(rows.keys())
+            seen["flag_keys"] = [f[0] for f in flag_specs]
+            return ({p: (True, True) for p in rows}, {"settings": "on", "hardening": "on", "grants": "on",
+                                                      "homescreen": "off", "gamelauncher": "on"})
+        app._app_pick_modal = fake_modal
+        self.assertTrue(app._pick_capture("S1", "prof"))
+        # launchers are NOT app rows…
+        self.assertNotIn("com.handheld.launcher", seen["row_pkgs"])
+        self.assertNotIn("com.android.launcher3", seen["row_pkgs"])
+        self.assertEqual(seen["row_pkgs"], ["org.ppsspp.ppsspp"])
+        # …they're behavior flags
+        self.assertIn("gamelauncher", seen["flag_keys"])
+        self.assertIn("homescreen", seen["flag_keys"])
+        # the launcher pkgs never become manifest package lines; the flag choice is captured
+        man = d / "capture-manifest"
+        self.assertNotIn("com.handheld.launcher", P.manifest_pkgs(man))
+        self.assertNotIn("com.android.launcher3", P.manifest_pkgs(man))
+        self.assertEqual(P.manifest_flags(man)["homescreen"], "off")
+        self.assertEqual(P.manifest_flags(man)["gamelauncher"], "on")
 
 
 class TestPickDownloads(unittest.TestCase):

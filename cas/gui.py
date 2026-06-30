@@ -86,12 +86,9 @@ _APP_LABELS = {
 # (see _sync_media_tab).
 _ESDE_PKG = "org.es_de.frontend"
 
-# Role labels for the launcher rows in the app-pick modals (the actual package id varies by device:
-# com.handheld.launcher, com.android.launcher3, …), so we label by ROLE instead of showing the raw id.
-_GAME_LAUNCHER_LABEL = "Game launcher emulator picks (@gamelauncher)"
-_HOME_LAUNCHER_LABEL = "Homescreen layout (@homescreen)"
-
-# Behavior flags shown in the Download (restore) modal — restore.sh honors each @flag on the device.
+# Behavior @flags shown (as the behavior section) in BOTH app-pick modals — the game frontend's emulator
+# picks (@gamelauncher) and the homescreen layout (@homescreen) are behaviors, NOT app rows; the launcher
+# packages are system firmware. restore.sh honors each @flag on the device.
 _DL_FLAGS = ("settings", "hardening", "grants", "homescreen", "gamelauncher")
 _DL_FLAG_LABELS = {"settings": "Display & system settings", "hardening": "Performance & update lock",
                    "grants": "Folder permissions", "homescreen": "Homescreen layout",
@@ -119,24 +116,6 @@ def _manifest_from_axes(axes):
     when EITHER axis is ticked. Pure (no Tk) so it's unit-testable."""
     pkgs = [p for p, (a, c) in axes.items() if a or c]
     return pkgs, {p: axes[p] for p in pkgs}
-
-
-def _capture_manifest_from_axes(axes, base_flags, game_launcher, home_launcher):
-    """Capture (Save) manifest transform: {pkg:(apk,cfg)} + base @-flags -> (pkgs, axes_subset, flags).
-    The game/home launcher rows fold into @gamelauncher / @homescreen flags (driven by their Config tick)
-    instead of becoming package lines — they're system firmware, captured as folders/picks. Pure (no Tk)."""
-    flags = dict(base_flags)
-    pkgs = []
-    for p, (a, c) in axes.items():
-        if p == game_launcher:
-            flags["gamelauncher"] = "on" if c else "off"
-            continue
-        if p == home_launcher:
-            flags["homescreen"] = "on" if c else "off"
-            continue
-        if a or c:
-            pkgs.append(p)
-    return pkgs, {p: axes[p] for p in pkgs}, flags
 
 
 def _human_size(nbytes):
@@ -1316,46 +1295,53 @@ class App:
         prof = P.Profile(P.pathlib.Path(self.profiles_root) / name)
         device_apps = self._scan_device_apps(serial)
         gl, hl = self._detect_device_launchers(serial)
-        rows = P.initial_capture_selection(device_apps, prof.capture_axes(), prof.capture_flags(),
-                                           game_launcher=gl, home_launcher=hl)
-        launchers = {p for p in (gl, hl) if p}
-        labels = {}
-        if gl:
-            labels[gl] = _GAME_LAUNCHER_LABEL
-        if hl:
-            labels[hl] = _HOME_LAUNCHER_LABEL
+        sel = P.initial_capture_selection(device_apps, prof.capture_axes(), prof.capture_flags(),
+                                          game_launcher=gl, home_launcher=hl)
+        # The launchers are NOT app rows — they're @gamelauncher / @homescreen behavior flags (below).
+        # Pull their default Config bit out of the selection to seed those flags; leave only real apps.
+        gl_on = sel.pop(gl, (False, True))[1] if gl else None
+        hl_on = sel.pop(hl, (False, True))[1] if hl else None
+        rows = sel
         cf = prof.capture_flags()
-        # Full behaviour set so the operator SEES everything the golden carries. settings/grants are
-        # capture toggles (gate what lands in the golden); hardening has nothing to capture — it's the
-        # golden's DEFAULT Download policy. All of them seed the Download manifest (seed_default_manifest),
-        # so what's ticked here pre-fills Download; restore.sh honours each @flag on the device.
-        flag_specs = [
-            ("settings", _DL_FLAG_LABELS["settings"],
-             "Capture this device's display/brightness/animation/screen-timeout settings into the golden "
-             "(and apply them by default on Download).",
-             cf.get("settings", "on") == "on"),
-            ("hardening", _DL_FLAG_LABELS["hardening"],
-             "The golden's DEFAULT on Download: keep emulators awake (battery-optimization exempt) and block "
-             "OTA updates that could break root. Applied on the device at Download — set the default here.",
-             cf.get("hardening", "on") == "on"),
-            ("grants", _DL_FLAG_LABELS["grants"],
-             "Capture the SAF folder-access grants (so ES-DE/emulators read the ROM/BIOS dirs) into the "
-             "golden (and restore them by default on Download).",
-             cf.get("grants", "on") == "on"),
-        ]
+        # Full behaviour set so the operator SEES everything the golden carries — all five @flags live here.
+        # @gamelauncher/@homescreen gate what's captured (only when a launcher is detected); @settings/@grants
+        # gate the device-settings / SAF-grant capture; @hardening has nothing to capture (the golden's
+        # DEFAULT Download policy). All of them seed the Download manifest (seed_default_manifest), so what's
+        # ticked here pre-fills Download; restore.sh honours each @flag on the device.
+        tips = {
+            "settings": "Capture this device's display/brightness/animation/screen-timeout settings into the "
+                        "golden (and apply them by default on Download).",
+            "hardening": "The golden's DEFAULT on Download: keep emulators awake (battery-optimization "
+                         "exempt) and block OTA updates that could break root. Applied at Download — set "
+                         "the default here.",
+            "grants": "Capture the SAF folder-access grants (so ES-DE/emulators read the ROM/BIOS dirs) "
+                      "into the golden (and restore them by default on Download).",
+            "homescreen": "Capture this device's homescreen layout (icon/folder/dock arrangement + "
+                          "wallpaper) into the golden (and restore it by default on Download).",
+            "gamelauncher": "Capture the game frontend's per-system emulator picks (PSX→DuckStation, …) "
+                            "into the golden (and apply them by default on Download).",
+        }
+        inits = {"settings": cf.get("settings", "on") == "on",
+                 "hardening": cf.get("hardening", "on") == "on",
+                 "grants": cf.get("grants", "on") == "on"}
+        if hl:
+            inits["homescreen"] = hl_on                    # detected HOME launcher → @homescreen toggle
+        if gl:
+            inits["gamelauncher"] = gl_on                  # detected game frontend → @gamelauncher toggle
+        flag_specs = [(fl, _DL_FLAG_LABELS[fl], tips[fl], inits[fl]) for fl in _DL_FLAGS if fl in inits]
         res = self._app_pick_modal(
             f"Save — capture {self._row_model(serial)} into “{name}”",
             "Tick what to CAPTURE from this device into the golden. APK bundles the installer; Config "
-            "bundles its data/settings/BIOS. The launcher rows save the homescreen / emulator picks. The "
-            "behaviour items below are saved with the golden and become its defaults on Download.",
-            prof, rows, launchers, flag_specs=flag_specs, labels=labels,
+            "bundles its data/settings/BIOS. The behaviour items below are saved with the golden and "
+            "become its defaults on Download.",
+            prof, rows, set(), flag_specs=flag_specs,
             flags_caption="— behavior (saved with the golden; default on Download) —")
         if res is None:
             self.log("Save cancelled — nothing captured.")
             return False
         axes, modal_flags = res
-        base = dict(prof.capture_flags()); base.update(modal_flags)   # @settings/@hardening/@grants toggles
-        pkgs, axes_sub, flags = _capture_manifest_from_axes(axes, base, gl, hl)
+        flags = dict(cf); flags.update(modal_flags)        # all five @flags come straight from the modal
+        pkgs, axes_sub = _manifest_from_axes(axes)         # real apps only (launchers are flags, not pkgs)
         P.save_manifest(prof.capture_manifest_path, pkgs, flags,
                         header=f"# {prof.name} capture", axes=axes_sub)
         self.log(f"capture selection for {prof.name}: {len(pkgs)} app(s) + flags={flags}")
@@ -1375,13 +1361,13 @@ class App:
             prof = P.Profile(P.pathlib.Path(self.profiles_root) / name)
             saved = prof.axes()                            # {pkg:(apk,cfg)} from the saved manifest
             launcher_pkg = prof.meta.get("launcher_pkg")
-            launchers = {launcher_pkg} if launcher_pkg else set()
-            own_pkgs = prof.all_pkgs()
+            # the launcher isn't an app row — its homescreen rides the @homescreen behavior flag below.
+            own_pkgs = [p for p in prof.all_pkgs() if p != launcher_pkg]
             store_pkgs = [a["pkg"] for a in P.list_store_apks(config.apk_store_dir())]
             rows = P.download_rows(own_pkgs, store_pkgs, saved)
-            labels = {launcher_pkg: _HOME_LAUNCHER_LABEL} if launcher_pkg else {}
+            labels = {}
             for p in store_pkgs:
-                if p not in own_pkgs and p not in labels:
+                if p not in own_pkgs:
                     labels[p] = f"{p}  ·  from store"
             flags = prof.flags()
             flag_specs = [(fl, _DL_FLAG_LABELS[fl], _DL_FLAG_TIPS[fl], flags.get(fl, "on") == "on")
@@ -1390,8 +1376,8 @@ class App:
                 f"Download — restore “{name}”",
                 "Tick which apps to INSTALL on the device(s) assigned this profile. APK installs the app; "
                 "Config restores its saved data/settings/BIOS. Apps marked “from store” install the "
-                "server’s current build.",
-                prof, rows, launchers, flag_specs, labels=labels)
+                "server’s current build. Behaviour @flags below apply on the device.",
+                prof, rows, set(), flag_specs, labels=labels)
             if res is None:
                 self.log("Download cancelled — nothing installed.")
                 return False
