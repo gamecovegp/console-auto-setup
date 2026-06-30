@@ -21,6 +21,7 @@ CORES_SRC = DATA / "retroarch-cores"   # the curated arm64 RetroArch core set, s
 MEDIA_SRC = DATA / "ES-DE" / "downloaded_media"   # shared ES-DE box-art pool (box/screenshot/marquee),
 #   pushed per-device but kept OUT of the per-profile golden (it's ~12 GB; bundling it would balloon every
 #   profile). Override the PC source with CAS_MEDIA. The golden carries only the small ES-DE config.
+MAGISK_PKG = "com.topjohnwu.magisk"                          # store key for the Magisk app (kit APK)
 COMPANION_PKG = "com.gamecove.gamecove_companion"   # the GameCove Companion app's package id. It's now a
 #   normal golden app (ticked in the app list); when it's in the manifest its captured module installs
 #   on-device via restore.sh, and the PC-side install below refreshes it to the current PC build.
@@ -106,6 +107,20 @@ def _install_apk(adb, pkg, files, log):
         return True
     log(f"warning: install of {pkg} returned {rc}: {(err or '').strip()} (continuing).")
     return False
+
+
+def _kit_apk(pkg, prof, appdir, fallback_rel):
+    """Resolve a KIT apk (Magisk/Companion) PC-side path: the server store's CURRENT build if present, else
+    the bundled fallback via resolve_asset (profile.meta override > appdir-relative default). Store-first so
+    a kit can be version-managed centrally; bundle fallback so an offline NAS never blocks rooting."""
+    try:
+        from . import config as _cfg
+        files = P.store_apk_files(_cfg.apk_store_dir(), pkg)
+        if files:
+            return files[0]
+    except Exception:
+        pass
+    return P.resolve_asset(prof, appdir, fallback_rel)
 
 
 ESHOME = "/storage/emulated/0/ES-DE"              # the device's internal ES-DE home
@@ -220,6 +235,15 @@ def install_companion(adb, log=print, apk_src=None):
     never the SD), so every provisioned unit ships with the current build. Shared across all units — a PC
     layer kept OUT of the per-profile golden. Best-effort: a missing/failed install is a WARNING, not a
     provisioning failure (the app also self-updates OTA and can be installed later)."""
+    if not apk_src:                                          # prefer the server store's CURRENT Companion build
+        try:
+            from . import config as _cfg
+            files = P.store_apk_files(_cfg.apk_store_dir(), COMPANION_PKG)
+        except Exception:
+            files = []
+        if files:
+            log("installing the GameCove Companion app from the server store ...")
+            return _install_apk(adb, COMPANION_PKG, files, log)
     src = pathlib.Path(apk_src) if apk_src else \
         pathlib.Path(os.environ.get("CAS_COMPANION_APK", str(COMPANION_SRC)))
     if not src.is_file():
@@ -973,7 +997,7 @@ def root_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
             if flasher is None:
                 flasher = fastboot_flasher(fb, on_critical=on_critical)   # default path WITH the flash marker
             ok = root(adb, fb, stock_path,
-                      magisk_apk=P.resolve_asset(prof, appdir, magisk_rel),
+                      magisk_apk=_kit_apk(MAGISK_PKG, prof, appdir, magisk_rel),
                       log=lambda m, s=serial: log(f"[{s}] {m}"),
                       model_match=prof.meta.get("model_match"), force=(serial in force_serials),
                       flasher=flasher)

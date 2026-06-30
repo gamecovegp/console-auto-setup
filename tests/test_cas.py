@@ -2262,5 +2262,38 @@ class TestApkStoreDeploy(unittest.TestCase):
                             f"expected managed-app install; calls={fr.cmds()}")
 
 
+    def test_kit_apk_prefers_store_then_resolve_asset(self):
+        from cas import config as C
+        with tempfile.TemporaryDirectory() as t:
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cfg.json")
+            prof = _mk(t, "p", apps=["a"])
+            store = pathlib.Path(t) / "store"
+            appdir = pathlib.Path(t)
+            (appdir / "data" / "Apps").mkdir(parents=True)
+            (appdir / "data" / "Apps" / "Magisk.apk").write_text("m")
+            self.assertEqual(PV._kit_apk(PV.MAGISK_PKG, prof, str(appdir), "data/Apps/Magisk.apk"),
+                             appdir / "data" / "Apps" / "Magisk.apk")        # no store -> bundle fallback
+            _seed_store(store, PV.MAGISK_PKG, "v30", content="x")
+            C.set_apk_store(str(store))
+            self.assertEqual(PV._kit_apk(PV.MAGISK_PKG, prof, str(appdir), "data/Apps/Magisk.apk").name,
+                             "v30.apk")                                       # store build wins
+
+    def test_install_companion_prefers_store_then_bundle(self):
+        from cas import config as C
+        with tempfile.TemporaryDirectory() as t:
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cfg.json")
+            store = pathlib.Path(t) / "store"
+            bundle = pathlib.Path(t) / "companion-bundle.apk"; bundle.write_text("b")
+            os.environ["CAS_COMPANION_APK"] = str(bundle)
+            fr = FakeRunner(); adb = Adb(runner=fr)
+            PV.install_companion(adb, log=lambda *a: None)                    # no store -> bundle
+            self.assertTrue(any("companion-bundle.apk" in x for c in fr.calls for x in c))
+            _seed_store(store, PV.COMPANION_PKG, "v9", content="s")
+            C.set_apk_store(str(store))
+            fr2 = FakeRunner(); adb2 = Adb(runner=fr2)
+            PV.install_companion(adb2, log=lambda *a: None)                   # store build wins
+            self.assertTrue(any("v9.apk" in x for c in fr2.calls for x in c))
+
+
 if __name__ == "__main__":
     unittest.main()
