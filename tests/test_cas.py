@@ -114,6 +114,14 @@ def make_profile(tmp, name="odin2mini", model="Odin2 ?Mini", apps=None):
     return P.Profile(d)
 
 
+def _seed_store(store, pkg, label, content="apk"):
+    """Write a single-APK store entry directly (no put_store_apk) so read-accessor tests are self-contained."""
+    d = pathlib.Path(store) / pkg
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{label}.apk").write_text(content)
+    (d / "meta").write_text(f"current={label}\n")
+
+
 class TestAdb(unittest.TestCase):
     def test_getprop_and_root(self):
         a = Adb(runner=FakeRunner())
@@ -374,6 +382,32 @@ class TestProfiles(unittest.TestCase):
         self.assertEqual(checked["org.ppsspp.ppsspp"], (True, True))
         self.assertEqual(checked["com.random.note"], (False, False))
         self.assertEqual(checked["com.handheld.launcher"], (False, True))   # launcher = config-only
+
+    def test_store_read_accessors(self):
+        with tempfile.TemporaryDirectory() as t:
+            store = pathlib.Path(t) / "store"
+            _seed_store(store, "org.cocoon.app", "cocoon-1.5.0", content="bytes")
+            self.assertEqual(P.store_current_label(store, "org.cocoon.app"), "cocoon-1.5.0")
+            files = P.store_apk_files(store, "org.cocoon.app")
+            self.assertEqual([f.name for f in files], ["cocoon-1.5.0.apk"])
+            self.assertEqual(P.list_store_apks(store),
+                             [{"pkg": "org.cocoon.app", "label": "cocoon-1.5.0",
+                               "nfiles": 1, "bytes": len("bytes")}])
+
+    def test_store_split_label_returns_all_apks(self):
+        with tempfile.TemporaryDirectory() as t:
+            store = pathlib.Path(t) / "store"; d = store / "com.split" / "v2"; d.mkdir(parents=True)
+            (d / "base.apk").write_text("a"); (d / "split_config.apk").write_text("b")
+            (store / "com.split" / "meta").write_text("current=v2\n")
+            self.assertEqual(sorted(f.name for f in P.store_apk_files(store, "com.split")),
+                             ["base.apk", "split_config.apk"])
+
+    def test_store_empty_and_missing(self):
+        with tempfile.TemporaryDirectory() as t:
+            store = pathlib.Path(t) / "store"
+            self.assertEqual(P.list_store_apks(store), [])                 # missing dir -> []
+            self.assertIsNone(P.store_current_label(store, "nope"))
+            self.assertEqual(P.store_apk_files(store, "nope"), [])
 
 
 class TestConfig(unittest.TestCase):

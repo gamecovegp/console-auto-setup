@@ -31,6 +31,57 @@ def internal_for(pkg):
     return INTERNAL_FOR.get(pkg)
 
 
+# --- managed-APK server store -------------------------------------------------------------------
+# A central, library-side APK store (config.apk_store_dir(), default library_root()/_apks): ONE current
+# version of each package deploys, and every config that lists the app (apk axis) installs it. Captured
+# golden APKs (golden_root_payload/<pkg>/apk) are SEPARATE and unchanged — the resolver prefers them.
+def apk_store_pkg_dir(store_dir, pkg):
+    """The store directory for one package: <store_dir>/<pkg>."""
+    return pathlib.Path(store_dir) / pkg
+
+
+def store_current_label(store_dir, pkg):
+    """The 'current=' label from <store>/<pkg>/meta, or None when the package has no current build (never
+    added, or soft-removed)."""
+    return _read_meta(apk_store_pkg_dir(store_dir, pkg) / "meta").get("current") or None
+
+
+def store_apk_files(store_dir, pkg):
+    """APK file(s) for the package's CURRENT label: [<label>.apk] for a single build, or every *.apk under
+    <label>/ (sorted) for a split build. [] if there's no current label or its file(s) are missing."""
+    label = store_current_label(store_dir, pkg)
+    if not label:
+        return []
+    d = apk_store_pkg_dir(store_dir, pkg)
+    single = d / f"{label}.apk"
+    if single.is_file():
+        return [single]
+    split = d / label
+    if split.is_dir():
+        return sorted(split.glob("*.apk"))
+    return []
+
+
+def list_store_apks(store_dir):
+    """Every package in the store WITH a current build: [{'pkg','label','nfiles','bytes'}], sorted by pkg.
+    Soft-removed packages (no current) and bookkeeping dirs (names starting with '_') are omitted."""
+    root = pathlib.Path(store_dir)
+    out = []
+    try:
+        entries = sorted(root.iterdir()) if root.is_dir() else []
+    except OSError:
+        entries = []
+    for d in entries:
+        if not d.is_dir() or d.name.startswith("_"):
+            continue
+        files = store_apk_files(store_dir, d.name)
+        if not files:
+            continue
+        out.append({"pkg": d.name, "label": store_current_label(store_dir, d.name),
+                    "nfiles": len(files), "bytes": sum(f.stat().st_size for f in files)})
+    return out
+
+
 def _dir_bytes(path):
     """Total size in bytes of all files under `path` (0 if missing). Best-effort — ignores stat errors."""
     total = 0
