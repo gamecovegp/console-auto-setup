@@ -416,6 +416,46 @@ class TestProfiles(unittest.TestCase):
             _seed_store(store, "com.alpha", "v1")
             self.assertEqual([a["pkg"] for a in P.list_store_apks(store)], ["com.alpha", "org.zeta"])
 
+    def test_put_defaults_label_and_sets_current(self):
+        with tempfile.TemporaryDirectory() as t:
+            store = pathlib.Path(t) / "store"
+            src = pathlib.Path(t) / "cocoon-1.5.0.apk"; src.write_text("v15")
+            label = P.put_store_apk(store, "org.cocoon.app", src)
+            self.assertEqual(label, "cocoon-1.5.0")                          # default label = filename stem
+            self.assertEqual(P.store_current_label(store, "org.cocoon.app"), "cocoon-1.5.0")
+            self.assertEqual((store / "org.cocoon.app" / "cocoon-1.5.0.apk").read_text(), "v15")
+
+    def test_second_put_repoints_current_and_retains_prior(self):
+        with tempfile.TemporaryDirectory() as t:
+            store = pathlib.Path(t) / "store"
+            a = pathlib.Path(t) / "cocoon-1.4.0.apk"; a.write_text("v14")
+            b = pathlib.Path(t) / "cocoon-1.5.0.apk"; b.write_text("v15")
+            P.put_store_apk(store, "org.cocoon.app", a)
+            P.put_store_apk(store, "org.cocoon.app", b)
+            self.assertEqual(P.store_current_label(store, "org.cocoon.app"), "cocoon-1.5.0")
+            self.assertTrue((store / "org.cocoon.app" / "cocoon-1.4.0.apk").is_file())   # prior label kept
+
+    def test_reused_label_archives_prior_bytes(self):
+        with tempfile.TemporaryDirectory() as t:
+            store = pathlib.Path(t) / "store"
+            old = pathlib.Path(t) / "old.apk"; old.write_text("old")
+            new = pathlib.Path(t) / "new.apk"; new.write_text("new")
+            P.put_store_apk(store, "p", old, label="v1")
+            P.put_store_apk(store, "p", new, label="v1")                     # re-use label
+            self.assertEqual((store / "p" / "v1.apk").read_text(), "new")
+            arch = list((store / "p" / "_archive").glob("v1.apk*"))
+            self.assertEqual([a.read_text() for a in arch], ["old"])
+
+    def test_remove_clears_current_but_keeps_files(self):
+        with tempfile.TemporaryDirectory() as t:
+            store = pathlib.Path(t) / "store"
+            src = pathlib.Path(t) / "cocoon-1.5.0.apk"; src.write_text("v15")
+            P.put_store_apk(store, "org.cocoon.app", src)
+            P.remove_store_apk(store, "org.cocoon.app")
+            self.assertIsNone(P.store_current_label(store, "org.cocoon.app"))
+            self.assertTrue((store / "org.cocoon.app" / "cocoon-1.5.0.apk").is_file())   # bytes retained
+            self.assertEqual(P.list_store_apks(store), [])                               # not listed
+
 
 class TestConfig(unittest.TestCase):
     def setUp(self):

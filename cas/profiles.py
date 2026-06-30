@@ -89,6 +89,50 @@ def list_store_apks(store_dir):
     return out
 
 
+def _archive_if_exists(target, pkgdir):
+    """Move an existing store target (file or dir) into <pkgdir>/_archive/ under a non-colliding name, so a
+    re-used label never hard-deletes the prior bytes."""
+    target = pathlib.Path(target)
+    if not target.exists():
+        return
+    arch = pathlib.Path(pkgdir) / "_archive"
+    arch.mkdir(parents=True, exist_ok=True)
+    dest, n = arch / target.name, 1
+    while dest.exists():
+        dest = arch / f"{target.name}.{n}"
+        n += 1
+    shutil.move(str(target), str(dest))
+
+
+def put_store_apk(store_dir, pkg, src, label=None):
+    """Add/replace the CURRENT build of `pkg`. `src` is a single .apk file OR a directory of split APKs.
+    Copies it under <store>/<pkg>/<label>(.apk|/) and repoints meta 'current=<label>'. `label` defaults to
+    the source's filename stem (its dir name for a split set). Any PRIOR bytes occupying the same label
+    target are archived first (never hard-deleted). Backs BOTH the GUI's Add and Update. Returns the label."""
+    src = pathlib.Path(src)
+    d = apk_store_pkg_dir(store_dir, pkg)
+    d.mkdir(parents=True, exist_ok=True)
+    label = label or (src.stem if src.is_file() else src.name)
+    if src.is_dir():
+        target = d / label
+        _archive_if_exists(target, d)
+        shutil.copytree(src, target)
+    else:
+        target = d / f"{label}.apk"
+        _archive_if_exists(target, d)
+        shutil.copy2(src, target)
+    set_meta_key(d / "meta", "current", label)
+    return label
+
+
+def remove_store_apk(store_dir, pkg):
+    """Soft-remove: clear meta 'current' so `pkg` stops deploying everywhere, while RETAINING every label
+    file in place (re-running put_store_apk restores it). No-op if the package isn't in the store."""
+    meta_path = apk_store_pkg_dir(store_dir, pkg) / "meta"
+    if meta_path.exists():
+        set_meta_key(meta_path, "current", "")
+
+
 def _dir_bytes(path):
     """Total size in bytes of all files under `path` (0 if missing). Best-effort — ignores stat errors."""
     total = 0
