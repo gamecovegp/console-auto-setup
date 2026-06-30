@@ -1482,11 +1482,16 @@ class TestCompanionInstall(unittest.TestCase):
             apk = pathlib.Path(t) / "gamecove-companion.apk"
             apk.write_bytes(b"x")
             os.environ["CAS_COMPANION_APK"] = str(apk)
+            _saved = {k: os.environ.get(k) for k in ("CAS_CONFIG", "CAS_PROFILES")}
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cfg.json")
+            os.environ["CAS_PROFILES"] = t       # isolate apk_store_dir (else install_companion resolves the REAL store)
             try:
                 r = FakeRunner()
                 ok = PV.provision(Adb(runner=r), prof, log=lambda m: None)   # full (non-dry) path
             finally:
                 os.environ.pop("CAS_COMPANION_APK", None)
+                for _k, _v in _saved.items():
+                    os.environ.pop(_k, None) if _v is None else os.environ.__setitem__(_k, _v)
             self.assertTrue(ok)
             a = "\n".join(r.cmds())
             self.assertIn("install", a)            # companion installed during provisioning
@@ -2116,18 +2121,25 @@ class TestPickDownloads(unittest.TestCase):
 
     def test_one_modal_per_distinct_profile_writes_after_all(self):
         root = pathlib.Path(tempfile.mkdtemp())
-        self._profile(root, "p", ["com.foo", "com.bar"])
-        app = self._app(root)
-        app.assigned = {"S1": "p", "S2": "p"}              # two devices, one shared profile
-        calls = []
-        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None):
-            calls.append(title)
-            return ({pk: (True, False) for pk in rows}, {"settings": "on"})
-        app._app_pick_modal = fake_modal
-        self.assertTrue(app._pick_downloads(["S1", "S2"]))
-        self.assertEqual(len(calls), 1)                    # ONE modal for the shared profile
-        m = root / "p" / "manifest"
-        self.assertEqual(P.manifest_pkgs(m), ["com.foo", "com.bar"])
+        _saved = {k: os.environ.get(k) for k in ("CAS_CONFIG", "CAS_PROFILES")}
+        os.environ["CAS_CONFIG"] = str(root / "cfg.json")
+        os.environ["CAS_PROFILES"] = str(root)             # isolate apk_store_dir (else store apps leak into the manifest)
+        try:
+            self._profile(root, "p", ["com.foo", "com.bar"])
+            app = self._app(root)
+            app.assigned = {"S1": "p", "S2": "p"}              # two devices, one shared profile
+            calls = []
+            def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None):
+                calls.append(title)
+                return ({pk: (True, False) for pk in rows}, {"settings": "on"})
+            app._app_pick_modal = fake_modal
+            self.assertTrue(app._pick_downloads(["S1", "S2"]))
+            self.assertEqual(len(calls), 1)                    # ONE modal for the shared profile
+            m = root / "p" / "manifest"
+            self.assertEqual(P.manifest_pkgs(m), ["com.foo", "com.bar"])
+        finally:
+            for _k, _v in _saved.items():
+                os.environ.pop(_k, None) if _v is None else os.environ.__setitem__(_k, _v)
 
     def test_cancel_aborts_with_no_writes(self):
         root = pathlib.Path(tempfile.mkdtemp())
@@ -2266,6 +2278,7 @@ class TestApkStoreDeploy(unittest.TestCase):
         from cas import config as C
         with tempfile.TemporaryDirectory() as t:
             os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cfg.json")
+            os.environ["CAS_PROFILES"] = t       # isolate apk_store_dir (else it falls back to the REAL data/profiles/_apks)
             prof = _mk(t, "p", apps=["a"])
             store = pathlib.Path(t) / "store"
             appdir = pathlib.Path(t)
@@ -2282,6 +2295,7 @@ class TestApkStoreDeploy(unittest.TestCase):
         from cas import config as C
         with tempfile.TemporaryDirectory() as t:
             os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cfg.json")
+            os.environ["CAS_PROFILES"] = t       # isolate apk_store_dir (else it falls back to the REAL data/profiles/_apks)
             store = pathlib.Path(t) / "store"
             bundle = pathlib.Path(t) / "companion-bundle.apk"; bundle.write_text("b")
             os.environ["CAS_COMPANION_APK"] = str(bundle)
