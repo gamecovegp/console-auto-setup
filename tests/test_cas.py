@@ -122,6 +122,9 @@ def _seed_store(store, pkg, label, content="apk"):
     (d / "meta").write_text(f"current={label}\n")
 
 
+_mk = make_profile  # alias for brevity in tests
+
+
 class TestAdb(unittest.TestCase):
     def test_getprop_and_root(self):
         a = Adb(runner=FakeRunner())
@@ -455,6 +458,29 @@ class TestProfiles(unittest.TestCase):
             self.assertIsNone(P.store_current_label(store, "org.cocoon.app"))
             self.assertTrue((store / "org.cocoon.app" / "cocoon-1.5.0.apk").is_file())   # bytes retained
             self.assertEqual(P.list_store_apks(store), [])                               # not listed
+
+    def test_resolve_prefers_payload_then_store_then_bundle(self):
+        with tempfile.TemporaryDirectory() as t:
+            prof = _mk(t, "p", apps=["com.captured"])                  # captured app has a payload apk
+            store = pathlib.Path(t) / "store"
+            self.assertEqual([f.name for f in P.resolve_app_apk("com.captured", prof, store)], ["base.apk"])
+            _seed_store(store, "org.cocoon.app", "v1")
+            self.assertEqual([f.name for f in P.resolve_app_apk("org.cocoon.app", prof, store)], ["v1.apk"])
+            b = pathlib.Path(t) / "kit.apk"; b.write_text("x")
+            self.assertEqual(P.resolve_app_apk("com.kit", prof, store, bundle_fallback=b), [b])
+            self.assertIsNone(P.resolve_app_apk("com.absent", prof, store))
+
+    def test_resolve_split_store_returns_list(self):
+        with tempfile.TemporaryDirectory() as t:
+            store = pathlib.Path(t) / "store"; d = store / "com.split" / "v2"; d.mkdir(parents=True)
+            (d / "base.apk").write_text("a"); (d / "split_config.apk").write_text("b")
+            (store / "com.split" / "meta").write_text("current=v2\n")
+            files = P.resolve_app_apk("com.split", None, store)
+            self.assertEqual(sorted(f.name for f in files), ["base.apk", "split_config.apk"])
+
+    def test_download_rows_appends_store_only_apk_on_config_off(self):
+        rows = P.download_rows(["a", "b"], ["b", "store1"], saved={"a": (True, False)})
+        self.assertEqual(rows, {"a": (True, False), "b": (True, True), "store1": (True, False)})
 
 
 class TestConfig(unittest.TestCase):

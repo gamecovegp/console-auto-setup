@@ -133,6 +133,41 @@ def remove_store_apk(store_dir, pkg):
         set_meta_key(meta_path, "current", "")
 
 
+def resolve_app_apk(pkg, prof, store_dir, bundle_fallback=None):
+    """The APK file(s) to install for `pkg`, in priority order, or None if nothing is available:
+      1. the profile's CAPTURED module — golden_root_payload/<pkg>/apk/*.apk (unchanged behaviour),
+      2. else the server store's CURRENT build (store_apk_files),
+      3. else `bundle_fallback` — a path or list of paths shipped in the CAS bundle (kit apps only).
+    Returns a list of file paths (the installer uses install-multiple when len > 1)."""
+    if prof is not None:
+        apkdir = pathlib.Path(prof.payload) / pkg / "apk"
+        cap = sorted(apkdir.glob("*.apk")) if apkdir.is_dir() else []
+        if cap:
+            return cap
+    files = store_apk_files(store_dir, pkg)
+    if files:
+        return files
+    if bundle_fallback:
+        cand = ([bundle_fallback] if isinstance(bundle_fallback, (str, pathlib.Path)) else bundle_fallback)
+        fb = [pathlib.Path(p) for p in cand if pathlib.Path(p).is_file()]
+        if fb:
+            return fb
+    return None
+
+
+def download_rows(all_pkgs, store_pkgs, saved):
+    """Ordered {pkg: (apk_bool, cfg_bool)} for the Download app-pick modal. The profile's own apps come
+    first (each defaulting to BOTH axes), then store-only apps are appended (defaulting to (True, False) —
+    APK on, no captured config to restore). A `saved` axis for any pkg overrides the default. Pure — no I/O."""
+    rows = {}
+    for pkg in all_pkgs:
+        rows[pkg] = saved.get(pkg, (True, True))
+    for pkg in store_pkgs:
+        if pkg not in rows:
+            rows[pkg] = saved.get(pkg, (True, False))
+    return rows
+
+
 def _dir_bytes(path):
     """Total size in bytes of all files under `path` (0 if missing). Best-effort — ignores stat errors."""
     total = 0
