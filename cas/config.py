@@ -139,6 +139,33 @@ def set_firmware_dir(path):
     return load_config().get("firmware_dir")
 
 
+def apk_store_dir():
+    """The managed-APK server store directory. An explicit 'apk_store' override is honored ONLY if its path
+    currently exists (so a stale NAS-pinned override on an offline bench is ignored and the store follows the
+    discovered library); otherwise library_root()/_apks. Mirrors firmware_dir's rule, so 'on the server by
+    default' needs no extra wiring."""
+    d = load_config().get("apk_store")
+    if d:
+        p = pathlib.Path(d)
+        try:
+            if p.is_dir():
+                return p
+        except OSError:
+            pass
+    return library_root() / "_apks"
+
+
+def set_apk_store(path):
+    """Persist (path) or clear (falsy) the managed-APK store directory."""
+    cfg = load_config()
+    if path:
+        cfg["apk_store"] = str(path)
+    else:
+        cfg.pop("apk_store", None)
+    save_config(cfg)
+    return load_config().get("apk_store")
+
+
 def es_media_src():
     """PC folder to push ES-DE box art FROM, or None to use the SD card (default, no per-unit push).
     Priority: CAS_MEDIA env (one-shot override) > config 'es_media_src' > None. None => SD mode: nothing is

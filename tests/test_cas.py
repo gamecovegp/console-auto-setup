@@ -618,6 +618,24 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(argv[:2], ["gio", "mount"])
         self.assertEqual(argv[2], "smb://192.168.100.227/01%20GAMECOVE")  # share only, no subpath
 
+    def test_apk_store_defaults_under_library(self):
+        from cas import config as C
+        with tempfile.TemporaryDirectory() as t:
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "missing.json")
+            os.environ["CAS_PROFILES"] = str(pathlib.Path(t) / "lib")
+            self.assertEqual(C.apk_store_dir(), pathlib.Path(t) / "lib" / "_apks")
+
+    def test_apk_store_override_honored_only_if_exists(self):
+        from cas import config as C
+        with tempfile.TemporaryDirectory() as t:
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cas-config.json")
+            os.environ["CAS_PROFILES"] = str(pathlib.Path(t) / "lib")
+            store = pathlib.Path(t) / "store"; store.mkdir()
+            C.set_apk_store(str(store))
+            self.assertEqual(C.apk_store_dir(), store)                       # exists -> honored
+            C.set_apk_store(str(pathlib.Path(t) / "gone"))                   # nonexistent override
+            self.assertEqual(C.apk_store_dir(), pathlib.Path(t) / "lib" / "_apks")  # ignored
+
 
 class TestReleaseToken(unittest.TestCase):
     def test_default_token_when_no_override(self):
