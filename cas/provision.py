@@ -351,6 +351,11 @@ def provision(adb, profile, log=print, dry_push=False, es_media_src=None):
     # PAYLOAD apps go through push + on-device restore (unchanged); MANAGED apps (apk axis, no captured
     # module) install PC-side from the server store after restore. Validate/push only the payload apps.
     pay_pkgs, managed_pkgs = _split_manifest_apps(pay, pkgs, axes)
+    if not pay_pkgs and managed_pkgs:
+        log(f"this profile selects only store-managed app(s) ({', '.join(managed_pkgs)}) and no captured "
+            "payload — a Download restores a golden payload, so there is nothing to provision. Tick at "
+            "least one captured app to Download.")
+        return False
     if not _validate_payload(pay, pay_pkgs, log):
         return False
 
@@ -401,13 +406,15 @@ def provision(adb, profile, log=print, dry_push=False, es_media_src=None):
         tf = tempfile.NamedTemporaryFile(prefix="cas_manifest_", delete=False)
         tf.close()
         dev_manifest = pathlib.Path(tf.name)
-        P.save_manifest(dev_manifest, pay_pkgs, flags, header=f"# {profile.name} (deploy)",
-                        axes={p: axes.get(p, (True, True)) for p in pay_pkgs})
-        ok_m = push(dev_manifest, f"{DEV}/manifest")
         try:
-            dev_manifest.unlink()
-        except OSError:
-            pass
+            P.save_manifest(dev_manifest, pay_pkgs, flags, header=f"# {profile.name} (deploy)",
+                            axes={p: axes.get(p, (True, True)) for p in pay_pkgs})
+            ok_m = push(dev_manifest, f"{DEV}/manifest")
+        finally:
+            try:
+                dev_manifest.unlink()
+            except OSError:
+                pass
         if not ok_m:
             return False
         if push_cores:                                     # the full curated core set, FROM THE PC
@@ -428,7 +435,6 @@ def provision(adb, profile, log=print, dry_push=False, es_media_src=None):
         return False
     if not dry_push and pay_bytes:                       # record throughput + which profile/device it was for
         try:
-            from . import config as _cfg
             _cfg.record_download(pay_bytes, max(0.001, time.monotonic() - t_push),
                                  profile=profile.name, serial=getattr(adb, "serial", None), model=model)
         except Exception:

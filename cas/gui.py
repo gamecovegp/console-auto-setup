@@ -1599,6 +1599,7 @@ class App:
         current, keeps files). Shared across ALL profiles; uploads go to the NAS by default."""
         store = config.apk_store_dir()
         dlg = tk.Toplevel(self.win); dlg.title("Managed APKs (server store)"); dlg.transient(self.win)
+        dlg.grab_set()
         tk.Label(dlg, text=f"Server store: {store}", anchor="w").pack(fill="x", padx=8, pady=(8, 4))
         tree = ttk.Treeview(dlg, columns=("pkg", "label", "files"), show="headings", height=12)
         for c, w in (("pkg", 340), ("label", 160), ("files", 60)):

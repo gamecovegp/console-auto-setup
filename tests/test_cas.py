@@ -2294,6 +2294,27 @@ class TestApkStoreDeploy(unittest.TestCase):
             PV.install_companion(adb2, log=lambda *a: None)                   # store build wins
             self.assertTrue(any("v9.apk" in x for c in fr2.calls for x in c))
 
+    def test_provision_managed_only_returns_false(self):
+        """Fix 3: a manifest selecting ONLY a managed app (no captured payload) must abort with False."""
+        from cas import config as C
+        with tempfile.TemporaryDirectory() as t:
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cfg.json")
+            # Profile has one captured app (org.es_de.frontend) in the golden payload, but the manifest
+            # only lists a managed (store) app — no captured app ticked.
+            prof = _mk(t, "p", apps=["org.es_de.frontend"])
+            store = pathlib.Path(t) / "store"
+            _seed_store(store, "org.cocoon.app", "v1")
+            C.set_apk_store(str(store))
+            P.save_manifest(prof.manifest_path, ["org.cocoon.app"],
+                            {"settings": "on"}, header="# p",
+                            axes={"org.cocoon.app": (True, False)})
+            msgs = []
+            fr = FakeRunner(model="Odin2 Mini")
+            ok = PV.provision(Adb(runner=fr), P.Profile(prof.path), log=msgs.append, dry_push=True)
+            self.assertFalse(ok, "provision must return False when manifest selects only managed apps")
+            self.assertTrue(any("store-managed" in m for m in msgs),
+                            f"expected managed-only abort message; got: {msgs}")
+
 
 if __name__ == "__main__":
     unittest.main()
