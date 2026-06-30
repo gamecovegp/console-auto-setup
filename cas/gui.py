@@ -82,13 +82,56 @@ _APP_LABELS = {
 }
 
 # The ES-DE front-end package. Its box art only matters when ES-DE itself is installed, so the
-# "ES-DE box art" tab is shown/hidden to follow this app's checkbox (see _sync_media_tab).
+# "ES-DE box art" tab is shown/hidden to follow whether the selected profile's golden has it
+# (see _sync_media_tab).
 _ESDE_PKG = "org.es_de.frontend"
+
+# Behavior flags shown in the Download (restore) modal — restore.sh honors each @flag on the device.
+_DL_FLAGS = ("settings", "hardening", "grants", "homescreen", "gamelauncher")
+_DL_FLAG_LABELS = {"settings": "Display & system settings", "hardening": "Performance & update lock",
+                   "grants": "Folder permissions", "homescreen": "Homescreen layout",
+                   "gamelauncher": "Game launcher emulator picks"}
+_DL_FLAG_TIPS = {
+    "settings": "Apply the saved display/brightness/animation/screen-timeout preferences.",
+    "hardening": "Keep emulators awake (exempt from battery optimization so they're never killed) "
+                 "and block OTA system updates that could break root.",
+    "grants": "Restore folder-access permissions so ES-DE and the emulators can read your "
+              "ROM/BIOS folders without re-asking on first launch.",
+    "homescreen": "Restore the homescreen layout — your app folders, icon/dock arrangement, "
+                  "wallpaper (and widgets, best-effort).",
+    "gamelauncher": "Save the game frontend's per-system emulator choices (PSX→DuckStation, "
+                    "PSP→PPSSPP) and auto-apply them on Download — no manual setup per unit.",
+}
 
 
 def _app_label(pkg):
     """Human-friendly name for a package (falls back to the package id for anything unmapped)."""
     return _APP_LABELS.get(pkg, pkg)
+
+
+def _manifest_from_axes(axes):
+    """Download manifest transform: {pkg:(apk,cfg)} -> (included_pkgs, axes_subset). An app is included
+    when EITHER axis is ticked. Pure (no Tk) so it's unit-testable."""
+    pkgs = [p for p, (a, c) in axes.items() if a or c]
+    return pkgs, {p: axes[p] for p in pkgs}
+
+
+def _capture_manifest_from_axes(axes, base_flags, game_launcher, home_launcher):
+    """Capture (Save) manifest transform: {pkg:(apk,cfg)} + base @-flags -> (pkgs, axes_subset, flags).
+    The game/home launcher rows fold into @gamelauncher / @homescreen flags (driven by their Config tick)
+    instead of becoming package lines — they're system firmware, captured as folders/picks. Pure (no Tk)."""
+    flags = dict(base_flags)
+    pkgs = []
+    for p, (a, c) in axes.items():
+        if p == game_launcher:
+            flags["gamelauncher"] = "on" if c else "off"
+            continue
+        if p == home_launcher:
+            flags["homescreen"] = "on" if c else "off"
+            continue
+        if a or c:
+            pkgs.append(p)
+    return pkgs, {p: axes[p] for p in pkgs}, flags
 
 
 def _human_size(nbytes):
@@ -129,12 +172,7 @@ class App:
         self._t0 = 0.0
         self._last_line = ""        # most recent log line — shown live in the status bar
         self._retry_ctx = None      # (message, retry_callable) armed by an op that had failures
-        self.pkg_vars = {}          # pkg -> (apk_var, cfg_var) — Download (restore) list
-        self.cap_vars = {}          # pkg -> (apk_var, cfg_var) — Save (capture) list
-        self._cap_game_launcher = None   # game-launcher pkg detected on the current device (stashed for writer)
-        self._cap_home_launcher = None   # HOME-launcher pkg detected on the current device
-        self._dl_launcher_pkg = None     # profile's launcher_pkg — APK disabled in the Download list
-        self.flag_vars = {}         # @flag -> tk.BooleanVar (settings/hardening/grants)
+        self._icon_refs = []        # live PhotoImage refs so Tk won't GC the app-pick modal's icons
         self.assigned = {}          # serial -> profile name (per-device; remembered across launches)
         self.assigned_manual = set()  # serials whose profile was set by hand (deliberate; allows force)
         self._last_auto = {}        # serial -> last auto-match shown (to detect + announce auto-changes)
@@ -574,40 +612,14 @@ class App:
         nb.pack(fill="both", expand=True, pady=(6, 0))
         self.nb = nb
 
-        # ── Tab 1: Apps & options (the manifest) — the primary tab ──
-        apps_tab = ttk.Frame(nb, padding=6)
-        nb.add(apps_tab, text="Apps & options")
-        _btns_row = ttk.Frame(apps_tab)
-        _btns_row.pack(side="bottom", anchor="w", pady=(6, 0))     # pinned below the scroll
-        _tip(ttk.Button(_btns_row, text="Save selection", command=self.save_manifest),
-             "Save which apps and behavior options are ticked. This is exactly what 'Download' installs.") \
-            .pack(side="left")
-        _tip(ttk.Button(_btns_row, text="Save capture selection", command=self._save_capture_manifest),
-             "Save which apps to capture FROM this device into the golden (the Save list above).") \
-            .pack(side="left", padx=(8, 0))
-        scrollwrap = ttk.Frame(apps_tab)
-        scrollwrap.pack(side="top", fill="both", expand=True)
-        _cv = tk.Canvas(scrollwrap, highlightthickness=0, borderwidth=0)
-        _vsb = ttk.Scrollbar(scrollwrap, orient="vertical", command=_cv.yview)
-        _cv.configure(yscrollcommand=_vsb.set)
-        _vsb.pack(side="right", fill="y")
-        _cv.pack(side="left", fill="both", expand=True)
-        self.modf = ttk.Frame(_cv)
-        _mid = _cv.create_window((0, 0), window=self.modf, anchor="nw")
-        self.modf.bind("<Configure>", lambda e: _cv.configure(scrollregion=_cv.bbox("all")))
-        _cv.bind("<Configure>", lambda e: _cv.itemconfigure(_mid, width=e.width))
-
-        def _wheel(e):                                    # cross-platform wheel: Win/Mac delta, X11 Button-4/5
-            step = -1 if (getattr(e, "num", 0) == 4 or getattr(e, "delta", 0) > 0) else 1
-            _cv.yview_scroll(step, "units")
-        _cv.bind("<Enter>", lambda e: (_cv.bind_all("<MouseWheel>", _wheel),
-                                       _cv.bind_all("<Button-4>", _wheel), _cv.bind_all("<Button-5>", _wheel)))
-        _cv.bind("<Leave>", lambda e: (_cv.unbind_all("<MouseWheel>"),
-                                       _cv.unbind_all("<Button-4>"), _cv.unbind_all("<Button-5>")))
-
-        # ── Tab 2: ES-DE box art (a BENCH setting persisted in cas-config.json) ──
-        # Only shown when ES-DE is in the current selection — _sync_media_tab() hides/restores it as the
-        # ES-DE app checkbox (or the profile) changes; box art is meaningless without the front-end.
+        # App selection (Save = capture / Download = restore) is NOT a sidebar list — it pops as a modal
+        # when you click ▶ Run, detected for that action (the connected device for Save, the golden for
+        # Download). See _app_pick_modal + the Save/Download wrappers in run_chain. The sidebar keeps only
+        # the bench settings below.
+        #
+        # ── Tab 1: ES-DE box art (a BENCH setting persisted in cas-config.json) ──
+        # Only shown when the selected profile's golden contains ES-DE — _sync_media_tab() hides/restores
+        # it as the profile changes; box art is meaningless without the front-end.
         media_tab = ttk.Frame(nb, padding=8)
         nb.add(media_tab, text="ES-DE box art")
         self.media_tab = media_tab
@@ -625,7 +637,7 @@ class App:
         ttk.Label(media_tab, textvariable=self.sd_media_var, foreground="#555",
                   wraplength=440, justify="left").pack(anchor="w", pady=(10, 0))
 
-        # ── Tab 3: Root images (for ⓪ Root) — one bundled kit; stock init_boot is the per-family override ──
+        # ── Tab 2: Root images (for ⓪ Root) — one bundled kit; stock init_boot is the per-family override ──
         root_tab = ttk.Frame(nb, padding=8)
         nb.add(root_tab, text="Root images")
         self.stock_var = tk.StringVar()
@@ -911,107 +923,16 @@ class App:
         self.on_select_profile()
 
     def on_select_profile(self):
-        for w in self.modf.winfo_children():
-            w.destroy()
-        self.pkg_vars = {}
-        self.cap_vars = {}
-        self._cap_game_launcher = None
-        self._cap_home_launcher = None
-        self._dl_launcher_pkg = None
-        self._icon_refs = []                 # keep PhotoImage refs alive (Tk GCs unreferenced images)
+        # App selection moved to the ▶ Run modal (see _app_pick_modal). The sidebar only reflects the
+        # profile's bench state now: golden status, stock init_boot, and the ES-DE box-art tab.
         self._update_golden_status()         # golden: none / size + download ETA
         name = self.prof_var.get()
         if not name:
-            self._sync_media_tab()                         # no profile -> no ES-DE -> hide the box-art tab
+            self._sync_media_tab()                         # no profile -> no golden -> hide the box-art tab
             return
         prof = P.Profile(P.pathlib.Path(self.profiles_root) / name)
         self.stock_var.set(prof.meta.get("stock_init_boot", ""))     # blank = the bundled default kit image
-
-        # ── Save list (capture FROM this device into the golden) ──────────────────────────────────────────
-        ttk.Label(self.modf, text="— Save (capture from device) —").pack(anchor="w", pady=(2, 0))
-        _cap_btn_row = ttk.Frame(self.modf); _cap_btn_row.pack(anchor="w")
-        ttk.Button(_cap_btn_row, text="Select all",
-                   command=lambda: self._set_all(self.cap_vars, True)).pack(side="left")
-        ttk.Button(_cap_btn_row, text="Deselect all",
-                   command=lambda: self._set_all(self.cap_vars, False)).pack(side="left", padx=(4, 0))
-        serial = self._selected_serial()
-        device_apps = self._scan_device_apps(serial)
-        gl, hl = self._detect_device_launchers(serial)
-        self._cap_game_launcher = gl
-        self._cap_home_launcher = hl
-        # default-on: EMULATOR_PKGS ∩ device_apps + game launcher; overlaid by saved capture-manifest
-        cap_sel = P.initial_capture_selection(device_apps, prof.capture_axes(), prof.capture_flags(),
-                                                  game_launcher=gl, home_launcher=hl)
-        for pkg, (apk0, cfg0) in cap_sel.items():
-            is_launcher = (pkg == gl or pkg == hl)
-            if is_launcher:
-                apk0 = False                               # system firmware — never reinstalled
-            apk_v, cfg_v = tk.BooleanVar(value=apk0), tk.BooleanVar(value=cfg0)
-            self.cap_vars[pkg] = (apk_v, cfg_v)
-            row = ttk.Frame(self.modf); row.pack(anchor="w", fill="x")
-            ttk.Label(row, text=f" {_app_label(pkg)}", width=28).pack(side="left")
-            apk_cb = ttk.Checkbutton(row, text="APK", variable=apk_v, command=self._on_app_toggle)
-            if is_launcher:
-                apk_cb.configure(state="disabled")
-            _tip(apk_cb, f"Bundle {pkg}'s installer (off = clean install / system launcher)").pack(side="left")
-            _tip(ttk.Checkbutton(row, text="Config", variable=cfg_v, command=self._on_app_toggle),
-                 f"Bundle {pkg}'s data/settings/BIOS (whole data dir for the launcher)").pack(side="left")
-
-        ttk.Separator(self.modf, orient="horizontal").pack(fill="x", pady=(4, 4))
-
-        # ── Download list (restore FROM golden TO a fresh device) ─────────────────────────────────────────
-        ttk.Label(self.modf, text="— Download (restore to device) —").pack(anchor="w", pady=(2, 0))
-        _dl_btn_row = ttk.Frame(self.modf); _dl_btn_row.pack(anchor="w")
-        ttk.Button(_dl_btn_row, text="Select all",
-                   command=lambda: self._set_all(self.pkg_vars, True)).pack(side="left")
-        ttk.Button(_dl_btn_row, text="Deselect all",
-                   command=lambda: self._set_all(self.pkg_vars, False)).pack(side="left", padx=(4, 0))
-        axes = prof.axes()                                 # {pkg: (apk, cfg)} from the saved manifest
-        launcher_pkg = prof.meta.get("launcher_pkg")
-        self._dl_launcher_pkg = launcher_pkg
-        for pkg in prof.all_pkgs():
-            # two independent axes per app: APK (bundle the installer) | Config (bundle data/settings/BIOS).
-            # Default (True, True) so every app is on when no saved manifest exists yet.
-            apk0, cfg0 = axes.get(pkg, (True, True))
-            is_launcher = (pkg == launcher_pkg)
-            if is_launcher:
-                apk0 = False                               # system firmware — never reinstalled
-            apk_v, cfg_v = tk.BooleanVar(value=apk0), tk.BooleanVar(value=cfg0)
-            self.pkg_vars[pkg] = (apk_v, cfg_v)
-            row = ttk.Frame(self.modf); row.pack(anchor="w", fill="x")
-            ttk.Label(row, text=f" {_app_label(pkg)}", width=28).pack(side="left")
-            apk_cb = ttk.Checkbutton(row, text="APK", variable=apk_v, command=self._on_app_toggle)
-            if is_launcher:
-                apk_cb.configure(state="disabled")
-            _tip(apk_cb, f"Bundle {pkg}'s installer (off = clean install / system launcher)").pack(side="left")
-            _tip(ttk.Checkbutton(row, text="Config", variable=cfg_v, command=self._on_app_toggle),
-                 f"Bundle {pkg}'s data/settings/BIOS (whole data dir for the launcher)").pack(side="left")
-
-        self._sync_media_tab()                             # ES-DE box-art tab follows the ES-DE checkbox
-        # behavior flags: @settings/@hardening/@grants/@homescreen honored by restore.sh on the device.
-        # The GameCove Companion is a normal golden app (ticked in the list above), not a behavior flag.
-        self.flag_vars = {}
-        flags = prof.flags()
-        flag_labels = {"settings": "Display & system settings", "hardening": "Performance & update lock",
-                       "grants": "Folder permissions", "homescreen": "Homescreen layout",
-                       "gamelauncher": "Game launcher emulator picks"}
-        flag_tips = {
-            "settings": "Apply the saved display/brightness/animation/screen-timeout preferences.",
-            "hardening": "Keep emulators awake (exempt from battery optimization so they're never killed) "
-                         "and block OTA system updates that could break root.",
-            "grants": "Restore folder-access permissions so ES-DE and the emulators can read your "
-                      "ROM/BIOS folders without re-asking on first launch.",
-            "homescreen": "Restore the homescreen layout — your app folders, icon/dock arrangement, "
-                          "wallpaper (and widgets, best-effort).",
-            "gamelauncher": "Save the game frontend's per-system emulator choices (PSX→DuckStation, "
-                            "PSP→PPSSPP) and auto-apply them on Download — no manual setup per unit.",
-        }
-        ttk.Label(self.modf, text="— behavior —").pack(anchor="w", pady=(6, 0))
-        for fl in ("settings", "hardening", "grants", "homescreen", "gamelauncher"):
-            fv = tk.BooleanVar(value=(flags.get(fl, "on") == "on"))
-            self.flag_vars[fl] = fv
-            cb = ttk.Checkbutton(self.modf, text=f"{flag_labels.get(fl, fl)}  (@{fl})", variable=fv)
-            _tip(cb, flag_tips.get(fl, "")).pack(anchor="w")
+        self._sync_media_tab()                             # box-art tab follows whether the golden has ES-DE
 
     def refresh_devices(self):
         self.dev_tree.delete(*self.dev_tree.get_children())
@@ -1252,18 +1173,6 @@ class App:
         sel = self.dev_tree.selection()
         return sel[0] if sel else None
 
-    def save_manifest(self):
-        name = self.prof_var.get()
-        if not name:
-            return
-        prof = P.Profile(P.pathlib.Path(self.profiles_root) / name)
-        axes = {p: (a.get(), c.get()) for p, (a, c) in self.pkg_vars.items()}
-        pkgs = [p for p, (a, c) in axes.items() if a or c]          # included if EITHER axis is ticked
-        axes = {p: axes[p] for p in pkgs}
-        flags = {fl: ("on" if v.get() else "off") for fl, v in self.flag_vars.items()}
-        P.save_manifest(prof.manifest_path, pkgs, flags, header=f"# {name}", axes=axes)
-        self.log(f"saved manifest for {name}: {len(pkgs)} app(s), flags={flags}")
-
     def _scan_device_apps(self, serial):
         """Third-party packages on the connected device (pm list -3), sorted. [] if no device/scan fails."""
         if not serial:
@@ -1285,39 +1194,151 @@ class App:
             return line[-1].strip() if rc == 0 and line else None
         return (_one("game_launcher"), _one("home_launcher"))
 
-    def _set_all(self, vars_dict, value):
-        """Set every (apk_var, cfg_var) pair in vars_dict to value.
-        Launcher rows have a disabled APK checkbox; skip apk_v for those so it never diverges.
-        Covers both Save-list launchers (_cap_game/_cap_home) and the Download-list launcher_pkg."""
-        launchers = {p for p in (self._cap_game_launcher, self._cap_home_launcher,
-                                 self._dl_launcher_pkg) if p}
+    def _set_all(self, vars_dict, value, launchers=frozenset()):
+        """Set every (apk_var, cfg_var) pair in vars_dict to value. Launcher rows keep their (disabled)
+        APK box untouched so it never diverges from the on-screen state. Used by the modal's
+        Select all / Deselect all buttons."""
         for pkg, (apk_v, cfg_v) in vars_dict.items():
             if pkg not in launchers:
                 apk_v.set(value)
             cfg_v.set(value)
-        self._sync_media_tab()
 
-    def _save_capture_manifest(self):
-        """Write the capture-manifest from the Save list (self.cap_vars). Launcher rows become
-        @gamelauncher / @homescreen flags rather than package lines."""
-        name = self.prof_var.get()
-        if not name:
-            return
+    # ── Run-time app picker ───────────────────────────────────────────────────────────────────────────
+    # App selection is no longer a sidebar list; it pops here when ▶ Run needs it. One reusable modal,
+    # two thin wrappers: Save scans the connected device, Download lists the golden. Each wrapper writes
+    # the same manifest files the old "Save … selection" buttons did, then the chain runs.
+
+    def _app_pick_modal(self, title, intro, prof, rows, launchers, flag_specs):
+        """Modal app picker. `rows` is an ordered {pkg:(apk0,cfg0)} initial tick state; `launchers` is the
+        set of pkgs whose APK box is disabled (system firmware, never reinstalled); `flag_specs` is an
+        ordered list of (key, label, tip, initial_bool) for the behavior block. Blocks until the operator
+        clicks Run or Cancel. Returns (axes, flags) on Run — axes={pkg:(apk,cfg)} for every row, flags=
+        {key:'on'/'off'} for every flag_spec — or None on Cancel/close."""
+        self._icon_refs = []                               # fresh icon refs for this modal's lifetime
+        win = tk.Toplevel(self.win)
+        win.title(title)
+        win.transient(self.win)
+        win.grab_set()
+        win.minsize(480, 420)
+        result = {}                                        # filled on Run; stays empty on Cancel
+        pick_vars, flag_vars = {}, {}
+
+        ttk.Label(win, text=intro, wraplength=470, justify="left", foreground="#555") \
+            .pack(side="top", anchor="w", padx=10, pady=(10, 4))
+
+        btnrow = ttk.Frame(win, padding=(10, 6))           # pinned at the bottom
+        btnrow.pack(side="bottom", fill="x")
+
+        def _run():
+            result["axes"] = {p: (a.get(), c.get()) for p, (a, c) in pick_vars.items()}
+            result["flags"] = {k: ("on" if v.get() else "off") for k, v in flag_vars.items()}
+            win.destroy()
+        _tip(ttk.Button(btnrow, text="▶ Run", command=_run),
+             "Save this selection and run the action.").pack(side="right")
+        ttk.Button(btnrow, text="Cancel", command=win.destroy).pack(side="right", padx=(0, 6))
+
+        selrow = ttk.Frame(win, padding=(10, 0))
+        selrow.pack(side="top", anchor="w")
+        ttk.Button(selrow, text="Select all",
+                   command=lambda: self._set_all(pick_vars, True, launchers)).pack(side="left")
+        ttk.Button(selrow, text="Deselect all",
+                   command=lambda: self._set_all(pick_vars, False, launchers)).pack(side="left", padx=(4, 0))
+
+        bodywrap = ttk.Frame(win, padding=(6, 4))
+        bodywrap.pack(side="top", fill="both", expand=True)
+        listf = self._scroll_tab(bodywrap)                 # scrollable inner frame for the app rows
+        for pkg, (apk0, cfg0) in rows.items():
+            is_launcher = pkg in launchers
+            if is_launcher:
+                apk0 = False                               # system firmware — never reinstalled
+            apk_v, cfg_v = tk.BooleanVar(value=apk0), tk.BooleanVar(value=cfg0)
+            pick_vars[pkg] = (apk_v, cfg_v)
+            row = ttk.Frame(listf); row.pack(anchor="w", fill="x")
+            self._app_name_label(row, prof, pkg)
+            apk_cb = ttk.Checkbutton(row, text="APK", variable=apk_v)
+            if is_launcher:
+                apk_cb.configure(state="disabled")
+            _tip(apk_cb, f"Bundle {pkg}'s installer (off = clean install / system launcher)").pack(side="left")
+            _tip(ttk.Checkbutton(row, text="Config", variable=cfg_v),
+                 f"Bundle {pkg}'s data/settings/BIOS (whole data dir for the launcher)").pack(side="left")
+        if flag_specs:
+            ttk.Label(listf, text="— behavior —").pack(anchor="w", pady=(6, 0))
+            for key, label, tip, init in flag_specs:
+                fv = tk.BooleanVar(value=init)
+                flag_vars[key] = fv
+                _tip(ttk.Checkbutton(listf, text=f"{label}  (@{key})", variable=fv), tip).pack(anchor="w")
+
+        win.wait_window()
+        if "axes" not in result:
+            return None
+        return result["axes"], result["flags"]
+
+    def _row_model(self, serial):
+        """The model-column text for a device row (for nicer modal titles), or the serial as fallback."""
+        try:
+            vals = self.dev_tree.item(serial).get("values") or []
+            return (str(vals[0]) if vals else "") or serial
+        except tk.TclError:
+            return serial
+
+    def _pick_capture(self, serial, name):
+        """Run-time SAVE picker: scan the connected device, show the modal, write the capture-manifest.
+        Returns True to proceed with the capture, False if the operator cancelled."""
         prof = P.Profile(P.pathlib.Path(self.profiles_root) / name)
-        axes = {p: (a.get(), c.get()) for p, (a, c) in self.cap_vars.items()}
-        flags = dict(prof.capture_flags())
-        gl, hl = self._cap_game_launcher, self._cap_home_launcher
-        pkgs = []
-        for p, (a, c) in axes.items():
-            if p == gl:
-                flags["gamelauncher"] = "on" if c else "off"; continue
-            if p == hl:
-                flags["homescreen"] = "on" if c else "off"; continue
-            if a or c:
-                pkgs.append(p)
+        device_apps = self._scan_device_apps(serial)
+        gl, hl = self._detect_device_launchers(serial)
+        rows = P.initial_capture_selection(device_apps, prof.capture_axes(), prof.capture_flags(),
+                                           game_launcher=gl, home_launcher=hl)
+        launchers = {p for p in (gl, hl) if p}
+        res = self._app_pick_modal(
+            f"Save — capture {self._row_model(serial)} into “{name}”",
+            "Tick what to CAPTURE from this device into the golden. APK bundles the installer; Config "
+            "bundles its data/settings/BIOS. The launcher rows save as the homescreen / emulator picks.",
+            prof, rows, launchers, flag_specs=[])
+        if res is None:
+            self.log("Save cancelled — nothing captured.")
+            return False
+        axes, _ = res
+        pkgs, axes_sub, flags = _capture_manifest_from_axes(axes, prof.capture_flags(), gl, hl)
         P.save_manifest(prof.capture_manifest_path, pkgs, flags,
-                        header=f"# {prof.name} capture", axes={p: axes[p] for p in pkgs})
-        self.log(f"saved capture selection for {prof.name}: {len(pkgs)} app(s) + flags={flags}")
+                        header=f"# {prof.name} capture", axes=axes_sub)
+        self.log(f"capture selection for {prof.name}: {len(pkgs)} app(s) + flags={flags}")
+        return True
+
+    def _pick_downloads(self, serials):
+        """Run-time DOWNLOAD picker: one modal per DISTINCT assigned profile among `serials`. Stashes each
+        confirmed profile's selection and writes all manifests only AFTER every modal is confirmed, so a
+        Cancel on any aborts the whole run with nothing written. Returns True to proceed, False on cancel."""
+        names = []
+        for s in serials:
+            n = self.assigned.get(s)
+            if n and n != "(no match)" and n not in names:
+                names.append(n)
+        pending = []                                       # (manifest_path, pkgs, flags, axes, name)
+        for name in names:
+            prof = P.Profile(P.pathlib.Path(self.profiles_root) / name)
+            saved = prof.axes()                            # {pkg:(apk,cfg)} from the saved manifest
+            launcher_pkg = prof.meta.get("launcher_pkg")
+            launchers = {launcher_pkg} if launcher_pkg else set()
+            rows = {pkg: saved.get(pkg, (True, True)) for pkg in prof.all_pkgs()}
+            flags = prof.flags()
+            flag_specs = [(fl, _DL_FLAG_LABELS[fl], _DL_FLAG_TIPS[fl], flags.get(fl, "on") == "on")
+                          for fl in _DL_FLAGS]
+            res = self._app_pick_modal(
+                f"Download — restore “{name}”",
+                "Tick which apps to INSTALL on the device(s) assigned this profile. APK installs the app; "
+                "Config restores its saved data/settings/BIOS.",
+                prof, rows, launchers, flag_specs)
+            if res is None:
+                self.log("Download cancelled — nothing installed.")
+                return False
+            axes, fl = res
+            pkgs, axes_sub = _manifest_from_axes(axes)
+            pending.append((prof.manifest_path, pkgs, fl, axes_sub, name))
+        for mpath, pkgs, fl, axes_sub, name in pending:
+            P.save_manifest(mpath, pkgs, fl, header=f"# {name}", axes=axes_sub)
+            self.log(f"download selection for {name}: {len(pkgs)} app(s), flags={fl}")
+        return True
 
     def _on_batch_toggle(self):
         if self.batch_var.get():
@@ -1357,14 +1378,19 @@ class App:
                                           initialvalue=self.prof_var.get())
             if not name:
                 return
+            if not self._pick_capture(serial, name):       # modal: choose what to capture (or cancel)
+                return
             self._run_chain(steps, cleared, save_name=name)
         else:
             t = self._action_targets()
             if not t:
                 return
             cleared = self._preflight(steps, t)           # skip hard-blocked, confirm risky, then run survivors
-            if cleared:
-                self._run_chain(steps, cleared)
+            if not cleared:
+                return
+            if "download" in steps and not self._pick_downloads(cleared):  # modal(s): choose apps (or cancel)
+                return
+            self._run_chain(steps, cleared)
 
     def _selected_profile(self):
         name = self.prof_var.get()
@@ -1807,25 +1833,62 @@ class App:
             self.win.after(0, lambda m=msg: self.sd_media_var.set(m))
         threading.Thread(target=work, daemon=True).start()
 
-    def _on_app_toggle(self):
-        """An app checkbox flipped: show/hide the 'ES-DE box art' tab so it only appears
-        when ES-DE is part of the selection."""
-        self._sync_media_tab()
-
     def _sync_media_tab(self):
-        """Show the 'ES-DE box art' tab only when ES-DE is in the current selection — its box art is
-        meaningless without the front-end installed. Hidden tabs keep their config and original position,
-        so add() restores this one where it was. Defensive: no-op before the notebook is built."""
+        """Show the 'ES-DE box art' tab only when the SELECTED PROFILE's golden contains ES-DE — its box
+        art is meaningless without the front-end. Hidden tabs keep their config and original position, so
+        add() restores this one where it was. Defensive: no-op before the notebook is built."""
         nb = getattr(self, "nb", None)
         tab = getattr(self, "media_tab", None)
         if nb is None or tab is None:
             return
-        v = self.pkg_vars.get(_ESDE_PKG)
-        want = bool(v and (v[0].get() or v[1].get()))
+        name = self.prof_var.get()
+        want = False
+        if name:
+            try:
+                want = _ESDE_PKG in P.Profile(P.pathlib.Path(self.profiles_root) / name).all_pkgs()
+            except Exception:
+                want = False
         try:
             nb.add(tab) if want else nb.hide(tab)
         except tk.TclError:
             pass
+
+    def _scroll_tab(self, parent):
+        """A vertically-scrollable frame filling `parent` above any bottom-pinned controls; returns the
+        inner frame to pack rows into. The canvas tracks its width onto the inner frame and the wheel
+        scrolls while the pointer is over it. Used by the app-pick modal's list area."""
+        wrap = ttk.Frame(parent)
+        wrap.pack(side="top", fill="both", expand=True)
+        cv = tk.Canvas(wrap, highlightthickness=0, borderwidth=0)
+        vsb = ttk.Scrollbar(wrap, orient="vertical", command=cv.yview)
+        cv.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        cv.pack(side="left", fill="both", expand=True)
+        inner = ttk.Frame(cv)
+        mid = cv.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda e: cv.configure(scrollregion=cv.bbox("all")))
+        cv.bind("<Configure>", lambda e: cv.itemconfigure(mid, width=e.width))
+
+        def _wheel(e):                                    # cross-platform wheel: Win/Mac delta, X11 Button-4/5
+            step = -1 if (getattr(e, "num", 0) == 4 or getattr(e, "delta", 0) > 0) else 1
+            cv.yview_scroll(step, "units")
+        def _unbind():                                    # drop the global wheel hooks (Leave, or on destroy)
+            cv.unbind_all("<MouseWheel>"); cv.unbind_all("<Button-4>"); cv.unbind_all("<Button-5>")
+        cv.bind("<Enter>", lambda e: (cv.bind_all("<MouseWheel>", _wheel),
+                                      cv.bind_all("<Button-4>", _wheel), cv.bind_all("<Button-5>", _wheel)))
+        cv.bind("<Leave>", lambda e: _unbind())
+        cv.bind("<Destroy>", lambda e: _unbind())         # modal closed with pointer inside → no dangling bind
+        return inner
+
+    def _app_name_label(self, row, prof, pkg):
+        """Left-aligned app label carrying the app's launcher icon (real APK icon → curated logo →
+        coloured placeholder), so every Save/Download row is identifiable at a glance, not text-only."""
+        icon = self._app_icon(prof, pkg) or self._placeholder_icon(_app_label(pkg))
+        lbl = ttk.Label(row, text=f" {_app_label(pkg)}", width=28)
+        if icon is not None:
+            lbl.configure(image=icon, compound="left")
+        lbl.pack(side="left")
+        return lbl
 
     ICON_PX = 24                                          # uniform icon box for the app list
 

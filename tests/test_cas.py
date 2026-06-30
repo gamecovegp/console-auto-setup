@@ -1938,5 +1938,89 @@ class TestResolveChain(unittest.TestCase):
         self.assertTrue(err)
 
 
+class TestModalManifestTransforms(unittest.TestCase):
+    """Pure axes→manifest transforms behind the run-time app-pick modal (no Tk)."""
+
+    def test_manifest_from_axes_includes_when_either_axis_on(self):
+        from cas.gui import _manifest_from_axes
+        axes = {"a": (True, True), "b": (False, True), "c": (True, False), "d": (False, False)}
+        pkgs, sub = _manifest_from_axes(axes)
+        self.assertEqual(pkgs, ["a", "b", "c"])            # d (both off) excluded
+        self.assertEqual(sub, {"a": (True, True), "b": (False, True), "c": (True, False)})
+
+    def test_capture_manifest_folds_launchers_into_flags(self):
+        from cas.gui import _capture_manifest_from_axes
+        axes = {"emu": (True, True), "gl": (False, True), "hl": (False, False), "off": (False, False)}
+        pkgs, sub, flags = _capture_manifest_from_axes(
+            axes, {"settings": "on"}, game_launcher="gl", home_launcher="hl")
+        self.assertEqual(pkgs, ["emu"])                    # launchers fold to flags; 'off' excluded
+        self.assertEqual(sub, {"emu": (True, True)})
+        self.assertEqual(flags["gamelauncher"], "on")      # gl Config on  -> @gamelauncher on
+        self.assertEqual(flags["homescreen"], "off")       # hl Config off -> @homescreen off
+        self.assertEqual(flags["settings"], "on")          # base flag preserved
+
+
+class TestPickDownloads(unittest.TestCase):
+    """_pick_downloads: one modal per DISTINCT assigned profile, write-after-all, cancel aborts clean."""
+
+    def _profile(self, root, name, pkgs):
+        d = pathlib.Path(root) / name
+        (d / "golden_root_payload").mkdir(parents=True)
+        (d / "golden_root_payload" / "pkglist.txt").write_text("\n".join(pkgs) + "\n")
+        (d / "profile.meta").write_text("")
+        return d
+
+    def _app(self, root):
+        from cas.gui import App
+        app = App.__new__(App)                             # bypass Tk __init__
+        app.profiles_root = str(root)
+        app.log = lambda m: None
+        return app
+
+    def test_one_modal_per_distinct_profile_writes_after_all(self):
+        root = pathlib.Path(tempfile.mkdtemp())
+        self._profile(root, "p", ["com.foo", "com.bar"])
+        app = self._app(root)
+        app.assigned = {"S1": "p", "S2": "p"}              # two devices, one shared profile
+        calls = []
+        def fake_modal(title, intro, prof, rows, launchers, flag_specs):
+            calls.append(title)
+            return ({pk: (True, False) for pk in rows}, {"settings": "on"})
+        app._app_pick_modal = fake_modal
+        self.assertTrue(app._pick_downloads(["S1", "S2"]))
+        self.assertEqual(len(calls), 1)                    # ONE modal for the shared profile
+        m = root / "p" / "manifest"
+        self.assertEqual(P.manifest_pkgs(m), ["com.foo", "com.bar"])
+
+    def test_cancel_aborts_with_no_writes(self):
+        root = pathlib.Path(tempfile.mkdtemp())
+        self._profile(root, "p1", ["com.foo"])
+        self._profile(root, "p2", ["com.baz"])
+        app = self._app(root)
+        app.assigned = {"S1": "p1", "S2": "p2"}            # two distinct profiles
+        seen = []
+        def fake_modal(title, intro, prof, rows, launchers, flag_specs):
+            seen.append(title)
+            return None if len(seen) == 2 else ({pk: (True, True) for pk in rows}, {})
+        app._app_pick_modal = fake_modal
+        self.assertFalse(app._pick_downloads(["S1", "S2"]))   # cancel on the 2nd modal
+        # write-after-all: a late cancel leaves NEITHER profile's manifest written
+        self.assertFalse((root / "p1" / "manifest").exists())
+        self.assertFalse((root / "p2" / "manifest").exists())
+
+    def test_skips_unassigned_and_no_match(self):
+        root = pathlib.Path(tempfile.mkdtemp())
+        self._profile(root, "p", ["com.foo"])
+        app = self._app(root)
+        app.assigned = {"S1": "p", "S2": "(no match)"}     # S3 has no entry at all
+        calls = []
+        def fake_modal(title, intro, prof, rows, launchers, flag_specs):
+            calls.append(title)
+            return ({pk: (True, True) for pk in rows}, {})
+        app._app_pick_modal = fake_modal
+        self.assertTrue(app._pick_downloads(["S1", "S2", "S3"]))
+        self.assertEqual(len(calls), 1)                    # only the real profile prompts
+
+
 if __name__ == "__main__":
     unittest.main()
