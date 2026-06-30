@@ -1303,11 +1303,13 @@ class App:
         hl_on = sel.pop(hl, (False, True))[1] if hl else None
         rows = sel
         cf = prof.capture_flags()
-        # Full behaviour set so the operator SEES everything the golden carries — all five @flags live here.
-        # @gamelauncher/@homescreen gate what's captured (only when a launcher is detected); @settings/@grants
-        # gate the device-settings / SAF-grant capture; @hardening has nothing to capture (the golden's
-        # DEFAULT Download policy). All of them seed the Download manifest (seed_default_manifest), so what's
-        # ticked here pre-fills Download; restore.sh honours each @flag on the device.
+        # Full behaviour set so the operator SEES everything the golden carries. @homescreen is ALWAYS
+        # shown — capture.sh resolves the HOME launcher itself on-device, so the operator controls it even
+        # when GUI detection comes back empty. @gamelauncher is shown ONLY when a game frontend is detected
+        # (no frontend → nothing to capture). @settings/@grants gate the device-settings / SAF-grant
+        # capture; @hardening has nothing to capture (the golden's DEFAULT Download policy). All of them seed
+        # the Download manifest (seed_default_manifest), so what's ticked here pre-fills Download; restore.sh
+        # honours each @flag on the device.
         tips = {
             "settings": "Capture this device's display/brightness/animation/screen-timeout settings into the "
                         "golden (and apply them by default on Download).",
@@ -1323,11 +1325,11 @@ class App:
         }
         inits = {"settings": cf.get("settings", "on") == "on",
                  "hardening": cf.get("hardening", "on") == "on",
-                 "grants": cf.get("grants", "on") == "on"}
-        if hl:
-            inits["homescreen"] = hl_on                    # detected HOME launcher → @homescreen toggle
+                 "grants": cf.get("grants", "on") == "on",
+                 # ALWAYS shown: seed from a detected HOME launcher, else the saved/default flag.
+                 "homescreen": hl_on if hl else (cf.get("homescreen", "on") == "on")}
         if gl:
-            inits["gamelauncher"] = gl_on                  # detected game frontend → @gamelauncher toggle
+            inits["gamelauncher"] = gl_on                  # shown ONLY when a game frontend is detected
         flag_specs = [(fl, _DL_FLAG_LABELS[fl], tips[fl], inits[fl]) for fl in _DL_FLAGS if fl in inits]
         res = self._app_pick_modal(
             f"Save — capture {self._row_model(serial)} into “{name}”",

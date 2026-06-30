@@ -2176,6 +2176,36 @@ class TestPickCapture(unittest.TestCase):
         self.assertEqual(P.manifest_flags(man)["homescreen"], "off")
         self.assertEqual(P.manifest_flags(man)["gamelauncher"], "on")
 
+    def test_homescreen_always_shown_gamelauncher_only_when_detected(self):
+        # @homescreen is ALWAYS offered (capture.sh resolves the HOME launcher itself); @gamelauncher is
+        # offered ONLY when a game frontend is detected.
+        from cas.gui import App
+        root = pathlib.Path(tempfile.mkdtemp())
+        d = root / "prof"
+        (d / "golden_root_payload").mkdir(parents=True)
+        (d / "golden_root_payload" / "pkglist.txt").write_text("com.a\n")
+        (d / "profile.meta").write_text("")
+        app = App.__new__(App)
+        app.profiles_root = str(root)
+        app.log = lambda m: None
+        app._scan_device_apps = lambda s: []
+        app._row_model = lambda s: "AIR X"
+        keys = {}
+        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, flags_caption="—"):
+            keys["k"] = [f[0] for f in flag_specs]
+            return ({}, {})
+        app._app_pick_modal = fake_modal
+        # NO launcher detected at all → homescreen still shown, gamelauncher hidden
+        app._detect_device_launchers = lambda s: (None, None)
+        app._pick_capture("S1", "prof")
+        self.assertIn("homescreen", keys["k"])
+        self.assertNotIn("gamelauncher", keys["k"])
+        # game frontend detected (home not) → both shown
+        app._detect_device_launchers = lambda s: ("com.handheld.launcher", None)
+        app._pick_capture("S1", "prof")
+        self.assertIn("homescreen", keys["k"])
+        self.assertIn("gamelauncher", keys["k"])
+
 
 class TestPickDownloads(unittest.TestCase):
     """_pick_downloads: one modal per DISTINCT assigned profile, write-after-all, cancel aborts clean."""
