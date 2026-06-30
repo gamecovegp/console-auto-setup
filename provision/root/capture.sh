@@ -102,13 +102,25 @@ for d in $INTERNAL_DIRS; do
     && ok "captured internal:$d config ($(du -sh "$P/internal_$d.tar" 2>/dev/null | cut -f1))"
 done
 # device-experience settings: full dumps for reference; restore applies the safe allowlist (lib-root.sh).
-mkdir -p "$P/settings"
-for ns in system secure global; do settings list "$ns" > "$P/settings/$ns.txt" 2>/dev/null; done
-ok "captured settings dumps (system/secure/global)"
-# persisted SAF folder grants (the system-side record; path can vary by Android build — verify on first root)
-for g in /data/system/urigrants.xml /data/system_de/0/urigrants.xml; do
-  [ -f "$g" ] && { cp "$g" "$P/urigrants.xml"; ok "captured SAF grants from $g"; break; }
-done
+# Gated by @settings in the capture-manifest (default on; off = this golden carries no display settings).
+FCSET=on; [ -n "${CAS_MANIFEST:-}" ] && [ -f "$CAS_MANIFEST" ] && { v="$(manifest_flag "$CAS_MANIFEST" settings)"; [ -n "$v" ] && FCSET="$v"; }
+if [ "$FCSET" = off ]; then
+  log "settings: capture skipped (@settings off)"
+else
+  mkdir -p "$P/settings"
+  for ns in system secure global; do settings list "$ns" > "$P/settings/$ns.txt" 2>/dev/null; done
+  ok "captured settings dumps (system/secure/global)"
+fi
+# persisted SAF folder grants (the system-side record; path can vary by Android build — verify on first root).
+# Gated by @grants in the capture-manifest (default on; off = this golden carries no SAF grants).
+FCGR=on; [ -n "${CAS_MANIFEST:-}" ] && [ -f "$CAS_MANIFEST" ] && { v="$(manifest_flag "$CAS_MANIFEST" grants)"; [ -n "$v" ] && FCGR="$v"; }
+if [ "$FCGR" = off ]; then
+  log "grants: capture skipped (@grants off)"
+else
+  for g in /data/system/urigrants.xml /data/system_de/0/urigrants.xml; do
+    [ -f "$g" ] && { cp "$g" "$P/urigrants.xml"; ok "captured SAF grants from $g"; break; }
+  done
+fi
 # HOMESCREEN layout — the launcher's own state (icon/folder/dock arrangement), plus wallpaper + the
 # appwidget map. This is ADDITIVE (problems WARN, never fail the golden): restore applies it LAST, after
 # every app is installed, so each icon's component resolves and nothing shows as "missing". Capture this

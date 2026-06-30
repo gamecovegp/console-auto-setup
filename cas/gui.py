@@ -1322,17 +1322,27 @@ class App:
             labels[gl] = _GAME_LAUNCHER_LABEL
         if hl:
             labels[hl] = _HOME_LAUNCHER_LABEL
+        cf = prof.capture_flags()
+        flag_specs = [   # capture-time behaviour toggles (NOT @hardening — that's a Download-only action)
+            ("settings", _DL_FLAG_LABELS["settings"],
+             "Capture this device's display/brightness/animation/screen-timeout settings into the golden.",
+             cf.get("settings", "on") == "on"),
+            ("grants", _DL_FLAG_LABELS["grants"],
+             "Capture the SAF folder-access grants (so ES-DE/emulators read the ROM/BIOS dirs) into the golden.",
+             cf.get("grants", "on") == "on"),
+        ]
         res = self._app_pick_modal(
             f"Save — capture {self._row_model(serial)} into “{name}”",
             "Tick what to CAPTURE from this device into the golden. APK bundles the installer; Config "
-            "bundles its data/settings/BIOS. Display settings & folder grants are always captured; the "
-            "launcher rows save the homescreen / emulator picks (untick to skip).",
-            prof, rows, launchers, flag_specs=[], labels=labels)
+            "bundles its data/settings/BIOS. The launcher rows save the homescreen / emulator picks, and the "
+            "behaviour items below carry display settings & folder grants — untick anything to leave it out.",
+            prof, rows, launchers, flag_specs=flag_specs, labels=labels)
         if res is None:
             self.log("Save cancelled — nothing captured.")
             return False
-        axes, _ = res
-        pkgs, axes_sub, flags = _capture_manifest_from_axes(axes, prof.capture_flags(), gl, hl)
+        axes, modal_flags = res
+        base = dict(prof.capture_flags()); base.update(modal_flags)   # @settings/@grants from the modal toggles
+        pkgs, axes_sub, flags = _capture_manifest_from_axes(axes, base, gl, hl)
         P.save_manifest(prof.capture_manifest_path, pkgs, flags,
                         header=f"# {prof.name} capture", axes=axes_sub)
         self.log(f"capture selection for {prof.name}: {len(pkgs)} app(s) + flags={flags}")
