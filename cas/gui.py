@@ -209,6 +209,7 @@ class App:
         setm.add_command(label="Library folder…", command=self.choose_library)
         setm.add_command(label="Log folder…", command=self.choose_log_dir)
         setm.add_command(label="Firmware folder…", command=self.choose_firmware_dir)
+        setm.add_command(label="Managed APKs…", command=self._open_apk_store)
         setm.add_separator()
         setm.add_command(label="NAS login…", command=self.nas_login_dialog)
         setm.add_separator()
@@ -1585,6 +1586,69 @@ class App:
             FW.log_event(s, fid, None, "assign", True)
         self.log(f"assigned firmware '{fid}' to: {', '.join(serials)} (remembered). Re-resolving…")
         self.refresh_devices()                                # re-resolve so the column + status reflect it
+
+    def _open_apk_store(self):
+        """Manage the server-side APK store (config.apk_store_dir()): list packages, Add/Update a build
+        (sets it CURRENT — every config that lists the app then deploys it), or Remove (soft — clears
+        current, keeps files). Shared across ALL profiles; uploads go to the NAS by default."""
+        store = config.apk_store_dir()
+        dlg = tk.Toplevel(self.win); dlg.title("Managed APKs (server store)"); dlg.transient(self.win)
+        tk.Label(dlg, text=f"Server store: {store}", anchor="w").pack(fill="x", padx=8, pady=(8, 4))
+        tree = ttk.Treeview(dlg, columns=("pkg", "label", "files"), show="headings", height=12)
+        for c, w in (("pkg", 340), ("label", 160), ("files", 60)):
+            tree.heading(c, text=c.upper()); tree.column(c, width=w, anchor="w")
+        tree.pack(fill="both", expand=True, padx=8)
+
+        def refresh():
+            tree.delete(*tree.get_children())
+            for a in P.list_store_apks(config.apk_store_dir()):
+                tree.insert("", "end", iid=a["pkg"], values=(a["pkg"], a["label"], a["nfiles"]))
+
+        def _sel():
+            s = tree.selection()
+            return s[0] if s else None
+
+        def _put(pkg):
+            f = filedialog.askopenfilename(title=f"Choose the APK for {pkg}",
+                                           filetypes=[("APK", "*.apk"), ("All files", "*.*")])
+            if not f:
+                return
+            label = simpledialog.askstring("Version label", "Version label (blank = use the file name):",
+                                           initialvalue=pathlib.Path(f).stem, parent=dlg) or None
+
+            def work():
+                lbl = P.put_store_apk(config.apk_store_dir(), pkg, f, label=label)
+                self.log(f"server store: {pkg} → {lbl} (current).")
+                self.win.after(0, refresh)
+                return True
+            self._run_bg(work, label=f"Uploading {pkg} to the store")
+
+        def add():
+            pkg = simpledialog.askstring("Add APK", "Package id (e.g. org.cocoon.app):", parent=dlg)
+            if pkg and pkg.strip():
+                _put(pkg.strip())
+
+        def update():
+            pkg = _sel()
+            if not pkg:
+                messagebox.showinfo("CAS", "Select a package row to update.")
+                return
+            _put(pkg)
+
+        def remove():
+            pkg = _sel()
+            if not pkg:
+                messagebox.showinfo("CAS", "Select a package row to remove.")
+                return
+            if messagebox.askyesno("CAS", f"Stop deploying {pkg}?\nFiles stay on the server (soft-remove)."):
+                P.remove_store_apk(config.apk_store_dir(), pkg)
+                self.log(f"server store: {pkg} removed (soft — files retained).")
+                refresh()
+
+        bar = tk.Frame(dlg); bar.pack(fill="x", padx=8, pady=8)
+        for txt, cmd in (("Add APK…", add), ("Update…", update), ("Remove", remove), ("Close", dlg.destroy)):
+            tk.Button(bar, text=txt, command=cmd).pack(side="left", padx=4)
+        refresh()
 
     def _add_firmware(self):
         """Ingest a raw firmware build folder into the library (new version) on a background thread.
