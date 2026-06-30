@@ -1353,16 +1353,22 @@ class App:
             saved = prof.axes()                            # {pkg:(apk,cfg)} from the saved manifest
             launcher_pkg = prof.meta.get("launcher_pkg")
             launchers = {launcher_pkg} if launcher_pkg else set()
-            rows = {pkg: saved.get(pkg, (True, True)) for pkg in prof.all_pkgs()}
+            own_pkgs = prof.all_pkgs()
+            store_pkgs = [a["pkg"] for a in P.list_store_apks(config.apk_store_dir())]
+            rows = P.download_rows(own_pkgs, store_pkgs, saved)
+            labels = {launcher_pkg: _HOME_LAUNCHER_LABEL} if launcher_pkg else {}
+            for p in store_pkgs:
+                if p not in own_pkgs:
+                    labels[p] = f"{p}  ·  from store"
             flags = prof.flags()
             flag_specs = [(fl, _DL_FLAG_LABELS[fl], _DL_FLAG_TIPS[fl], flags.get(fl, "on") == "on")
                           for fl in _DL_FLAGS]
             res = self._app_pick_modal(
                 f"Download — restore “{name}”",
                 "Tick which apps to INSTALL on the device(s) assigned this profile. APK installs the app; "
-                "Config restores its saved data/settings/BIOS.",
-                prof, rows, launchers, flag_specs,
-                labels={launcher_pkg: _HOME_LAUNCHER_LABEL} if launcher_pkg else None)
+                "Config restores its saved data/settings/BIOS. Apps marked “from store” install the "
+                "server’s current build.",
+                prof, rows, launchers, flag_specs, labels=labels)
             if res is None:
                 self.log("Download cancelled — nothing installed.")
                 return False
