@@ -86,7 +86,15 @@ for pkg in $RPKGS; do
     log "deploy: $pkg Config-axis off — skipping data restore"; continue
   fi
   [ -f "$P/$pkg/data.tar" ] || continue
-  pm path "$pkg" >/dev/null 2>&1 || { warn "$pkg not installed — skip data restore"; FAIL=$((FAIL+1)); continue; }
+  if ! pm path "$pkg" >/dev/null 2>&1; then
+    # A config-only app (APK-axis off) is INSTALLED ELSEWHERE (e.g. the OEM launcher self-installs it) — its
+    # absence now is recoverable (re-run Update after it installs), so WARN, don't FAIL. A normal app that
+    # should have installed but didn't is a genuine failure.
+    if [ -n "${CAS_MANIFEST:-}" ] && [ -f "$CAS_MANIFEST" ] && ! manifest_wants "$CAS_MANIFEST" "$pkg" apk; then
+      warn "config-only: $pkg not installed yet — its config will apply once it is (re-run Update)"; continue
+    fi
+    warn "$pkg not installed — skip data restore"; FAIL=$((FAIL+1)); continue
+  fi
   TUID="$(app_uid "$pkg")"                                  # this unit's uid for the app
   [ -n "$TUID" ] || { warn "$pkg: could not resolve uid (install failed?) — skip data restore"; FAIL=$((FAIL+1)); continue; }
   # validate the tar BEFORE destroying the fresh data dir (a truncated tar must not leave the app empty).
