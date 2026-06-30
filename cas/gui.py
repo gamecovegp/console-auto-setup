@@ -519,9 +519,15 @@ class App:
             status.config(text="connecting…"); dlg.update_idletasks()
             ok = nas_connect()
             self.profiles_root = str(library_root())
-            self._update_lib_label(); self.refresh_profiles()
-            if ok or self._lib_reachable():
+            self._update_lib_label(); self.refresh_profiles(); self.refresh_firmware()
+            if ok:
                 self.log("NAS connected via the app account.")
+                dlg.destroy()
+            elif self._lib_reachable():
+                # connect didn't establish a NAS mount, but a library is reachable (the LOCAL fallback) —
+                # say so plainly instead of claiming the NAS connected.
+                self.log("NAS mount not established — using the local library. Firmware on the NAS won't "
+                         "show until it's mounted.")
                 dlg.destroy()
             else:
                 status.config(text="Saved, but couldn't connect — check the username/password and that "
@@ -643,6 +649,11 @@ class App:
         ttk.Separator(root_tab, orient="horizontal").pack(fill="x", pady=(12, 8))
         ttk.Label(root_tab, text="Firmware library (device root firmware)",
                   font=("", 9, "bold")).pack(anchor="w")
+        # Where the firmware catalog resolves + reachability (mirrors the profile Library line above), so an
+        # empty dropdown is explained — e.g. the NAS _firmware dir unmounted, falling back to a local dir.
+        self.fw_lib_var = tk.StringVar()
+        ttk.Label(root_tab, textvariable=self.fw_lib_var, foreground="#555",
+                  wraplength=440, justify="left").pack(anchor="w", pady=(1, 2))
         fwrow = ttk.Frame(root_tab)
         fwrow.pack(fill="x", pady=(4, 0))
         ttk.Label(fwrow, text="Firmware:").pack(side="left")
@@ -1548,14 +1559,39 @@ class App:
         return r["firmware_id"] + ("" if r.get("ok") else " ⚠")
 
     def refresh_firmware(self):
-        """Populate the firmware dropdown with every firmware id in the library."""
+        """Populate the firmware dropdown with every firmware id in the library, and show WHERE the catalog
+        resolves + whether it's reachable — so an empty list is explained instead of silent. When a NAS
+        firmware dir is configured but currently unmounted, firmware_dir() silently falls back to a local
+        dir; we surface that ('points at the NAS, but it's unreachable') so it's clear, not a mystery."""
         try:
-            ids = [f.id for f in FW.list_firmware(FW.firmware_root())]
+            root = FW.firmware_root()
+        except Exception:
+            root = None
+        try:
+            ids = [f.id for f in FW.list_firmware(root)] if root else []
         except Exception:
             ids = []
         self.fw_combo["values"] = ids
         if ids and self.fw_var.get() not in ids:
             self.fw_var.set(ids[0])
+        if not hasattr(self, "fw_lib_var"):
+            return
+        configured = config.load_config().get("firmware_dir")    # an explicit (e.g. NAS) override, if any
+        def _isdir(p):
+            try:
+                return bool(p) and pathlib.Path(p).is_dir()
+            except OSError:
+                return False
+        if configured and not _isdir(configured):
+            # the server firmware dir is configured but not mounted right now → using the local fallback
+            self.fw_lib_var.set(f"Library: {configured}   ✗ NAS unreachable (mount dropped?) — "
+                                f"falling back to {root}")
+        elif not _isdir(root):
+            self.fw_lib_var.set(f"Library: {root}   ✗ not reachable (map the NAS drive?)")
+        elif not ids:
+            self.fw_lib_var.set(f"Library: {root}   ✓ (no firmware yet)")
+        else:
+            self.fw_lib_var.set(f"Library: {root}   ✓ ({len(ids)} firmware)")
 
     def _update_fw_status(self):
         """Show the selected device's resolved firmware + logic-check + payload path under the dropdown."""
