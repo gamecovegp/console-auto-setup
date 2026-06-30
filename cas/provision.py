@@ -82,6 +82,32 @@ def _validate_payload(pay, pkgs, log):
     return True
 
 
+def _split_manifest_apps(pay, pkgs, axes):
+    """(payload_apps, managed_apps). PAYLOAD apps carry a captured module dir under `pay` (pushed + restored
+    on-device, unchanged). MANAGED apps have the apk axis ON but NO captured module — they install PC-side
+    from the server store. Companion is excluded from managed: it has its own install path."""
+    pay = pathlib.Path(pay)
+    payload = [p for p in pkgs if (pay / p).is_dir()]
+    managed = [p for p in pkgs
+               if not (pay / p).is_dir() and axes.get(p, (True, True))[0] and p != COMPANION_PKG]
+    return payload, managed
+
+
+def _install_apk(adb, pkg, files, log):
+    """adb-install one app from the PC: `install -r -g` for a single APK, `install-multiple -r -g` for a
+    split set. Best-effort — a failure is a WARNING, not an abort (matches install_companion). True on OK."""
+    paths = [str(f) for f in files]
+    if len(paths) == 1:
+        rc, _, err = adb.raw("install", "-r", "-g", paths[0])
+    else:
+        rc, _, err = adb.raw("install-multiple", "-r", "-g", *paths)
+    if rc == 0:
+        log(f"installed {pkg} from the server store ({len(paths)} file(s)).")
+        return True
+    log(f"warning: install of {pkg} returned {rc}: {(err or '').strip()} (continuing).")
+    return False
+
+
 ESHOME = "/storage/emulated/0/ES-DE"              # the device's internal ES-DE home
 DEV_ES_TAR = "/data/local/tmp/cas_es_media.tar"   # transient box-art archive landing on the device (ext4)
 ES_ARCHIVE_SUFFIXES = (".tar", ".tar.gz", ".tgz")  # archives the device's toybox `tar` can unpack as-is
@@ -296,7 +322,12 @@ def provision(adb, profile, log=print, dry_push=False, es_media_src=None):
     pay = profile.payload
     pkgs = profile.pkgs()
     flags = profile.flags()                            # @-flags from the manifest (settings/hardening/...)
-    if not _validate_payload(pay, pkgs, log):
+    axes = profile.axes()
+    from . import config as _cfg
+    # PAYLOAD apps go through push + on-device restore (unchanged); MANAGED apps (apk axis, no captured
+    # module) install PC-side from the server store after restore. Validate/push only the payload apps.
+    pay_pkgs, managed_pkgs = _split_manifest_apps(pay, pkgs, axes)
+    if not _validate_payload(pay, pay_pkgs, log):
         return False
 
     # RetroArch cores come from the PC (CORES_SRC), not the SD. (The app's own cores also ride data.tar;
@@ -322,8 +353,8 @@ def provision(adb, profile, log=print, dry_push=False, es_media_src=None):
             log(f"PUSH FAILED after {tries} tries: {src} — aborting (a partial push would ship a broken clone).")
             return False
 
-        for i, pkg in enumerate(pkgs, 1):                  # only the manifest's app modules
-            log(f"pushing module {i}/{len(pkgs)}: {pkg}")
+        for i, pkg in enumerate(pay_pkgs, 1):              # only the payload (captured) app modules
+            log(f"pushing module {i}/{len(pay_pkgs)}: {pkg}")
             if not push(pay / pkg, f"{DEV}/payload/"):
                 return False
         for f in ("global.meta", "pkglist.txt", "urigrants.xml"):
@@ -335,7 +366,7 @@ def provision(adb, profile, log=print, dry_push=False, es_media_src=None):
             return False                                   # launcher layout + wallpaper + widget map (optional)
         if (pay / "gamelauncher").exists() and not push(pay / "gamelauncher", f"{DEV}/payload/"):
             return False                                   # game-frontend emulator picks (DataStore), optional
-        for pkg in pkgs:                                   # internal dirs for included apps only
+        for pkg in pay_pkgs:                                # internal dirs for included PAYLOAD apps only
             d = P.internal_for(pkg)
             tar = pay / f"internal_{d}.tar" if d else None
             if tar and tar.exists() and not push(tar, f"{DEV}/payload/"):
@@ -343,7 +374,17 @@ def provision(adb, profile, log=print, dry_push=False, es_media_src=None):
         for f in (RESTORE, LIBROOT):
             if not push(f, f"{DEV}/"):
                 return False
-        if not push(profile.manifest_path, f"{DEV}/manifest"):
+        tf = tempfile.NamedTemporaryFile(prefix="cas_manifest_", delete=False)
+        tf.close()
+        dev_manifest = pathlib.Path(tf.name)
+        P.save_manifest(dev_manifest, pay_pkgs, flags, header=f"# {profile.name} (deploy)",
+                        axes={p: axes.get(p, (True, True)) for p in pay_pkgs})
+        ok_m = push(dev_manifest, f"{DEV}/manifest")
+        try:
+            dev_manifest.unlink()
+        except OSError:
+            pass
+        if not ok_m:
             return False
         if push_cores:                                     # the full curated core set, FROM THE PC
             log(f"pushing RetroArch cores from PC ({sum(1 for _ in CORES_SRC.glob('*.so'))} cores)...")
@@ -379,6 +420,15 @@ def provision(adb, profile, log=print, dry_push=False, es_media_src=None):
             if not set_device_owner(adb, log=log):
                 log("WARNING: device-owner lockdown FAILED — unit shipped UN-LOCKED (uninstallable / "
                     "factory-resettable). Ensure the unit is FRESH and re-Download to lock it.")
+    if not dry_push and managed_pkgs:
+        store = _cfg.apk_store_dir()
+        for pkg in managed_pkgs:
+            files = P.resolve_app_apk(pkg, profile, store)
+            if not files:
+                log(f"WARNING: '{pkg}' is in the manifest but not in the server store ({store}) and not "
+                    "captured — skipped (the config wants it).")
+                continue
+            _install_apk(adb, pkg, files, log)
     if not dry_push:
         adb.su(f"rm -rf {DEV}")
     adb.reboot()

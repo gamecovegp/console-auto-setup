@@ -2215,5 +2215,52 @@ class TestDetectLaunchers(unittest.TestCase):
         self.assertEqual(app._detect_device_launchers(""), (None, None))
 
 
+class TestApkStoreDeploy(unittest.TestCase):
+    def setUp(self):
+        self._saved = {k: os.environ.get(k)
+                       for k in ("CAS_CONFIG", "CAS_PROFILES", "CAS_COMPANION_APK")}
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+
+    def test_split_manifest_apps(self):
+        with tempfile.TemporaryDirectory() as t:
+            prof = _mk(t, "p", apps=["com.captured"])                     # captured -> payload module exists
+            pay = prof.payload
+            pkgs = ["com.captured", "org.cocoon.app", "com.cfgonly"]
+            axes = {"com.captured": (True, True), "org.cocoon.app": (True, False),
+                    "com.cfgonly": (False, True)}
+            payload, managed = PV._split_manifest_apps(pay, pkgs, axes)
+            self.assertEqual(payload, ["com.captured"])
+            self.assertEqual(managed, ["org.cocoon.app"])                 # apk-axis, no module; cfgonly excluded
+
+    def test_install_apk_single_and_split(self):
+        fr = FakeRunner(); adb = Adb(runner=fr)
+        self.assertTrue(PV._install_apk(adb, "p", [pathlib.Path("/x/base.apk")], log=lambda *a: None))
+        self.assertTrue(any(c[-1] == "/x/base.apk" and "install" in c for c in fr.calls))
+        fr2 = FakeRunner(); adb2 = Adb(runner=fr2)
+        PV._install_apk(adb2, "p", [pathlib.Path("/x/base.apk"), pathlib.Path("/x/split.apk")],
+                        log=lambda *a: None)
+        self.assertTrue(any("install-multiple" in c for c in fr2.calls))
+
+    def test_provision_installs_managed_store_app(self):
+        from cas import config as C
+        with tempfile.TemporaryDirectory() as t:
+            prof = _mk(t, "cocoon", apps=["org.es_de.frontend"])          # one captured app
+            P.save_manifest(prof.manifest_path, ["org.es_de.frontend", "org.cocoon.app"],
+                            {"settings": "on"}, header="# cocoon",
+                            axes={"org.es_de.frontend": (True, True), "org.cocoon.app": (True, False)})
+            store = pathlib.Path(t) / "store"
+            _seed_store(store, "org.cocoon.app", "v1", content="apkbytes")
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cfg.json")
+            C.set_apk_store(str(store))
+            fr = FakeRunner(model="Retroid Pocket 6"); adb = Adb(runner=fr)
+            ok = PV.provision(adb, P.Profile(prof.path), log=lambda *a: None)
+            self.assertTrue(ok, f"provision failed; calls={fr.cmds()}")
+            self.assertTrue(any("install" in c and any("v1.apk" in x for x in c) for c in fr.calls),
+                            f"expected managed-app install; calls={fr.cmds()}")
+
+
 if __name__ == "__main__":
     unittest.main()
