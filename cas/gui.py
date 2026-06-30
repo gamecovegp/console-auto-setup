@@ -1358,7 +1358,7 @@ class App:
             rows = P.download_rows(own_pkgs, store_pkgs, saved)
             labels = {launcher_pkg: _HOME_LAUNCHER_LABEL} if launcher_pkg else {}
             for p in store_pkgs:
-                if p not in own_pkgs:
+                if p not in own_pkgs and p not in labels:
                     labels[p] = f"{p}  ·  from store"
             flags = prof.flags()
             flag_specs = [(fl, _DL_FLAG_LABELS[fl], _DL_FLAG_TIPS[fl], flags.get(fl, "on") == "on")
