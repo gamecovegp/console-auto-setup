@@ -299,14 +299,15 @@ def match_profile(model, root="profiles", sd_gb=None):
 
 def default_capture_selection(device_apps, game_launcher=None, home_launcher=None):
     """The default Save-list check state: {pkg: (apk_on, config_on)}. Emulators (EMULATOR_PKGS) -> both axes;
-    the game/HOME launcher -> config-only (APK is system firmware); every other device app -> off."""
+    the game/HOME launcher -> config-only (APK is system firmware, but their state — emulator picks /
+    homescreen — is worth keeping, so config defaults ON); every other device app -> off."""
     sel = {}
     for pkg in device_apps:
         on = pkg in EMULATOR_PKGS
         sel[pkg] = (on, on)
     for lp in (game_launcher, home_launcher):
         if lp:
-            sel[lp] = (False, lp == game_launcher)   # game launcher config-on by default; HOME off
+            sel[lp] = (False, True)                  # config-on by default (@gamelauncher / @homescreen)
     return sel
 
 
@@ -320,7 +321,7 @@ def initial_capture_selection(device_apps, saved_axes, saved_flags, game_launche
     if game_launcher and game_launcher in sel:
         sel[game_launcher] = (False, (saved_flags or {}).get("gamelauncher", "on") == "on")
     if home_launcher and home_launcher in sel:
-        sel[home_launcher] = (False, (saved_flags or {}).get("homescreen", "off") == "on")
+        sel[home_launcher] = (False, (saved_flags or {}).get("homescreen", "on") == "on")
     return sel
 
 

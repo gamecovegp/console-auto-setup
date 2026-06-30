@@ -168,6 +168,23 @@ Run ▶ ──"download"──▶ targets + preflight → distinct assigned prof
 
 ## Out of scope (YAGNI)
 
-- No change to capture/restore scripts, manifest file format, or profile API.
 - No per-device (rather than per-profile) Download modal.
 - No live preview/diff of what changed vs. the saved manifest.
+
+## Addendum (2026-06-30) — launcher-row truthfulness + labels
+
+Follow-up after on-bench review. The Save modal showed the home-launcher row, but
+`capture.sh` captured the homescreen **unconditionally** — so unticking the row did
+nothing, and the row defaulted OFF (misrepresenting an always-on capture). Two fixes:
+
+- **`capture.sh` now honors `@homescreen`** (default on), mirroring the existing
+  `@gamelauncher` gate — unticking the HOME-launcher row genuinely skips homescreen
+  capture. (`@settings`/`@grants` remain always-captured: cheap, always wanted.)
+- **Both launcher rows default config-ON** (`initial_capture_selection` /
+  `default_capture_selection`) and render with **role labels** — "Game launcher ·
+  emulator picks" / "Home launcher · homescreen" — instead of the raw package id (which
+  varies per device). `_app_pick_modal` gained a `labels={pkg: name}` override; the
+  Download modal labels its `launcher_pkg` the same way.
+
+This touches `provision/root/capture.sh` (previously listed out of scope) and
+`cas/profiles.py`; behavior is otherwise unchanged.

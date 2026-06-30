@@ -113,28 +113,37 @@ done
 # appwidget map. This is ADDITIVE (problems WARN, never fail the golden): restore applies it LAST, after
 # every app is installed, so each icon's component resolves and nothing shows as "missing". Capture this
 # AFTER arranging the homescreen on the golden (emulators foldered, ES-DE/launcher outside).
-HS="$P/homescreen"; mkdir -p "$HS"
-LP="$(home_launcher)"
-if [ -n "$LP" ] && [ -d "/data/data/$LP" ]; then
-  { echo "launcher_pkg=$LP"; echo "launcher_uid=$(app_uid "$LP")"; } > "$HS/meta"
-  # the launcher's private data (favorites DB = folder/icon/dock layout + grid prefs); skip caches.
-  tar -cf "$HS/launcher_data.tar" -C /data/data --exclude="$LP/cache" --exclude="$LP/code_cache" "$LP" 2>/dev/null \
-    || tar -cf "$HS/launcher_data.tar" -C /data/data "$LP" 2>/dev/null
-  if tar -tf "$HS/launcher_data.tar" >/dev/null 2>&1; then ok "captured homescreen launcher: $LP"
-  else warn "homescreen launcher_data.tar looks corrupt ($LP) — homescreen will be skipped on restore"; rm -f "$HS/launcher_data.tar"; fi
-else
-  warn "no home launcher resolved (or it has no data dir) — homescreen layout NOT captured"
+# Gated by @homescreen (default on); "@homescreen off" skips it (the Save modal's HOME-launcher row).
+FHS=on
+if [ -n "${CAS_MANIFEST:-}" ] && [ -f "$CAS_MANIFEST" ]; then
+  [ "$(manifest_flag "$CAS_MANIFEST" homescreen)" = off ] && FHS=off
 fi
-# wallpaper (static image + the which-wallpaper xml; lock-screen variants too) — system-owned, per-user.
-WPDIR=/data/system/users/0
-for w in wallpaper wallpaper_orig wallpaper_info.xml wallpaper_lock wallpaper_lock_orig; do
-  [ -f "$WPDIR/$w" ] && cp "$WPDIR/$w" "$HS/$w" 2>/dev/null
-done
-[ -f "$HS/wallpaper_info.xml" ] && ok "captured wallpaper"
-# appwidget bindings (BEST-EFFORT: a wiped unit reallocates appWidget ids, so widgets may not rebind).
-[ -f "$WPDIR/appwidgets.xml" ] && { cp "$WPDIR/appwidgets.xml" "$HS/appwidgets.xml" 2>/dev/null; ok "captured appwidget map (best-effort)"; }
-# drop the homescreen dir entirely if nothing usable was captured (keeps payloads clean).
-[ -n "$(ls -A "$HS" 2>/dev/null)" ] || rmdir "$HS" 2>/dev/null
+if [ "$FHS" = off ]; then
+  log "homescreen: capture skipped (@homescreen off)"
+else
+  HS="$P/homescreen"; mkdir -p "$HS"
+  LP="$(home_launcher)"
+  if [ -n "$LP" ] && [ -d "/data/data/$LP" ]; then
+    { echo "launcher_pkg=$LP"; echo "launcher_uid=$(app_uid "$LP")"; } > "$HS/meta"
+    # the launcher's private data (favorites DB = folder/icon/dock layout + grid prefs); skip caches.
+    tar -cf "$HS/launcher_data.tar" -C /data/data --exclude="$LP/cache" --exclude="$LP/code_cache" "$LP" 2>/dev/null \
+      || tar -cf "$HS/launcher_data.tar" -C /data/data "$LP" 2>/dev/null
+    if tar -tf "$HS/launcher_data.tar" >/dev/null 2>&1; then ok "captured homescreen launcher: $LP"
+    else warn "homescreen launcher_data.tar looks corrupt ($LP) — homescreen will be skipped on restore"; rm -f "$HS/launcher_data.tar"; fi
+  else
+    warn "no home launcher resolved (or it has no data dir) — homescreen layout NOT captured"
+  fi
+  # wallpaper (static image + the which-wallpaper xml; lock-screen variants too) — system-owned, per-user.
+  WPDIR=/data/system/users/0
+  for w in wallpaper wallpaper_orig wallpaper_info.xml wallpaper_lock wallpaper_lock_orig; do
+    [ -f "$WPDIR/$w" ] && cp "$WPDIR/$w" "$HS/$w" 2>/dev/null
+  done
+  [ -f "$HS/wallpaper_info.xml" ] && ok "captured wallpaper"
+  # appwidget bindings (BEST-EFFORT: a wiped unit reallocates appWidget ids, so widgets may not rebind).
+  [ -f "$WPDIR/appwidgets.xml" ] && { cp "$WPDIR/appwidgets.xml" "$HS/appwidgets.xml" 2>/dev/null; ok "captured appwidget map (best-effort)"; }
+  # drop the homescreen dir entirely if nothing usable was captured (keeps payloads clean).
+  [ -n "$(ls -A "$HS" 2>/dev/null)" ] || rmdir "$HS" 2>/dev/null
+fi
 # GAME LAUNCHER emulator picks — capture ONLY the portable DataStore/prefs (NOT GAME_INFO; that is SD-bound +
 # scan-rebuilt). Auto-detected frontend, independent of the HOME launcher above. Additive (never bumps CFAIL).
 # Gated by @gamelauncher (default on); "@gamelauncher off" disables; "@gamelauncher <pkg>" pins the frontend.

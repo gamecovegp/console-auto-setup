@@ -1814,6 +1814,18 @@ class TestSaveManifestAxes(unittest.TestCase):
         self.assertEqual(sel["com.handheld.launcher"], (False, False))   # saved gamelauncher=off honored
         self.assertEqual(sel["com.android.launcher3"], (False, True))    # saved homescreen=on honored
 
+    def test_launchers_config_on_by_default(self):
+        """No saved flags: BOTH the game launcher AND the HOME launcher default to config-ON, so the
+        homescreen + emulator picks are captured unless the operator unticks them."""
+        from cas import profiles as P
+        sel = P.initial_capture_selection(
+            [], {}, {}, game_launcher="com.handheld.launcher", home_launcher="com.android.launcher3")
+        self.assertEqual(sel["com.handheld.launcher"], (False, True))    # @gamelauncher default on
+        self.assertEqual(sel["com.android.launcher3"], (False, True))    # @homescreen default on (was off)
+        # default_capture_selection agrees on the HOME launcher default
+        self.assertEqual(P.default_capture_selection([], home_launcher="com.android.launcher3")
+                         ["com.android.launcher3"], (False, True))
+
 
 class TestProfileLauncherAndAxes(unittest.TestCase):
     def test_all_pkgs_includes_launcher_meta(self):
@@ -1983,7 +1995,7 @@ class TestPickDownloads(unittest.TestCase):
         app = self._app(root)
         app.assigned = {"S1": "p", "S2": "p"}              # two devices, one shared profile
         calls = []
-        def fake_modal(title, intro, prof, rows, launchers, flag_specs):
+        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None):
             calls.append(title)
             return ({pk: (True, False) for pk in rows}, {"settings": "on"})
         app._app_pick_modal = fake_modal
@@ -1999,7 +2011,7 @@ class TestPickDownloads(unittest.TestCase):
         app = self._app(root)
         app.assigned = {"S1": "p1", "S2": "p2"}            # two distinct profiles
         seen = []
-        def fake_modal(title, intro, prof, rows, launchers, flag_specs):
+        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None):
             seen.append(title)
             return None if len(seen) == 2 else ({pk: (True, True) for pk in rows}, {})
         app._app_pick_modal = fake_modal
@@ -2014,7 +2026,7 @@ class TestPickDownloads(unittest.TestCase):
         app = self._app(root)
         app.assigned = {"S1": "p", "S2": "(no match)"}     # S3 has no entry at all
         calls = []
-        def fake_modal(title, intro, prof, rows, launchers, flag_specs):
+        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None):
             calls.append(title)
             return ({pk: (True, True) for pk in rows}, {})
         app._app_pick_modal = fake_modal

@@ -86,6 +86,11 @@ _APP_LABELS = {
 # (see _sync_media_tab).
 _ESDE_PKG = "org.es_de.frontend"
 
+# Role labels for the launcher rows in the app-pick modals (the actual package id varies by device:
+# com.handheld.launcher, com.android.launcher3, …), so we label by ROLE instead of showing the raw id.
+_GAME_LAUNCHER_LABEL = "Game launcher · emulator picks"
+_HOME_LAUNCHER_LABEL = "Home launcher · homescreen"
+
 # Behavior flags shown in the Download (restore) modal — restore.sh honors each @flag on the device.
 _DL_FLAGS = ("settings", "hardening", "grants", "homescreen", "gamelauncher")
 _DL_FLAG_LABELS = {"settings": "Display & system settings", "hardening": "Performance & update lock",
@@ -1226,12 +1231,14 @@ class App:
     # two thin wrappers: Save scans the connected device, Download lists the golden. Each wrapper writes
     # the same manifest files the old "Save … selection" buttons did, then the chain runs.
 
-    def _app_pick_modal(self, title, intro, prof, rows, launchers, flag_specs):
+    def _app_pick_modal(self, title, intro, prof, rows, launchers, flag_specs, labels=None):
         """Modal app picker. `rows` is an ordered {pkg:(apk0,cfg0)} initial tick state; `launchers` is the
         set of pkgs whose APK box is disabled (system firmware, never reinstalled); `flag_specs` is an
-        ordered list of (key, label, tip, initial_bool) for the behavior block. Blocks until the operator
-        clicks Run or Cancel. Returns (axes, flags) on Run — axes={pkg:(apk,cfg)} for every row, flags=
-        {key:'on'/'off'} for every flag_spec — or None on Cancel/close."""
+        ordered list of (key, label, tip, initial_bool) for the behavior block; `labels` is an optional
+        {pkg: friendly_name} override (used to give the launcher rows a role label). Blocks until the
+        operator clicks Run or Cancel. Returns (axes, flags) on Run — axes={pkg:(apk,cfg)} for every row,
+        flags={key:'on'/'off'} for every flag_spec — or None on Cancel/close."""
+        labels = labels or {}
         self._icon_refs = []                               # fresh icon refs for this modal's lifetime
         win = tk.Toplevel(self.win)
         win.title(title)
@@ -1272,13 +1279,14 @@ class App:
             apk_v, cfg_v = tk.BooleanVar(value=apk0), tk.BooleanVar(value=cfg0)
             pick_vars[pkg] = (apk_v, cfg_v)
             row = ttk.Frame(listf); row.pack(anchor="w", fill="x")
-            self._app_name_label(row, prof, pkg)
+            self._app_name_label(row, prof, pkg, label=labels.get(pkg))
             apk_cb = ttk.Checkbutton(row, text="APK", variable=apk_v)
+            cfg_tip = f"Bundle {pkg}'s data/settings/BIOS (whole data dir for the launcher)"
             if is_launcher:
                 apk_cb.configure(state="disabled")
+                cfg_tip = f"Capture {pkg}'s state — its homescreen layout / emulator picks"
             _tip(apk_cb, f"Bundle {pkg}'s installer (off = clean install / system launcher)").pack(side="left")
-            _tip(ttk.Checkbutton(row, text="Config", variable=cfg_v),
-                 f"Bundle {pkg}'s data/settings/BIOS (whole data dir for the launcher)").pack(side="left")
+            _tip(ttk.Checkbutton(row, text="Config", variable=cfg_v), cfg_tip).pack(side="left")
         if flag_specs:
             ttk.Label(listf, text="— behavior —").pack(anchor="w", pady=(6, 0))
             for key, label, tip, init in flag_specs:
@@ -1308,11 +1316,17 @@ class App:
         rows = P.initial_capture_selection(device_apps, prof.capture_axes(), prof.capture_flags(),
                                            game_launcher=gl, home_launcher=hl)
         launchers = {p for p in (gl, hl) if p}
+        labels = {}
+        if gl:
+            labels[gl] = _GAME_LAUNCHER_LABEL
+        if hl:
+            labels[hl] = _HOME_LAUNCHER_LABEL
         res = self._app_pick_modal(
             f"Save — capture {self._row_model(serial)} into “{name}”",
             "Tick what to CAPTURE from this device into the golden. APK bundles the installer; Config "
-            "bundles its data/settings/BIOS. The launcher rows save as the homescreen / emulator picks.",
-            prof, rows, launchers, flag_specs=[])
+            "bundles its data/settings/BIOS. Display settings & folder grants are always captured; the "
+            "launcher rows save the homescreen / emulator picks (untick to skip).",
+            prof, rows, launchers, flag_specs=[], labels=labels)
         if res is None:
             self.log("Save cancelled — nothing captured.")
             return False
@@ -1346,7 +1360,8 @@ class App:
                 f"Download — restore “{name}”",
                 "Tick which apps to INSTALL on the device(s) assigned this profile. APK installs the app; "
                 "Config restores its saved data/settings/BIOS.",
-                prof, rows, launchers, flag_specs)
+                prof, rows, launchers, flag_specs,
+                labels={launcher_pkg: _HOME_LAUNCHER_LABEL} if launcher_pkg else None)
             if res is None:
                 self.log("Download cancelled — nothing installed.")
                 return False
@@ -1898,11 +1913,14 @@ class App:
         cv.bind("<Destroy>", lambda e: _unbind())         # modal closed with pointer inside → no dangling bind
         return inner
 
-    def _app_name_label(self, row, prof, pkg):
+    def _app_name_label(self, row, prof, pkg, label=None):
         """Left-aligned app label carrying the app's launcher icon (real APK icon → curated logo →
-        coloured placeholder), so every Save/Download row is identifiable at a glance, not text-only."""
-        icon = self._app_icon(prof, pkg) or self._placeholder_icon(_app_label(pkg))
-        lbl = ttk.Label(row, text=f" {_app_label(pkg)}", width=28)
+        coloured placeholder), so every Save/Download row is identifiable at a glance, not text-only.
+        `label` overrides the friendly name — used to give the launcher rows a role label (e.g.
+        'Home launcher · homescreen') instead of a raw package id."""
+        text = label or _app_label(pkg)
+        icon = self._app_icon(prof, pkg) or self._placeholder_icon(text)
+        lbl = ttk.Label(row, text=f" {text}", width=28)
         if icon is not None:
             lbl.configure(image=icon, compound="left")
         lbl.pack(side="left")
