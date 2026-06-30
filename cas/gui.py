@@ -88,8 +88,8 @@ _ESDE_PKG = "org.es_de.frontend"
 
 # Role labels for the launcher rows in the app-pick modals (the actual package id varies by device:
 # com.handheld.launcher, com.android.launcher3, …), so we label by ROLE instead of showing the raw id.
-_GAME_LAUNCHER_LABEL = "Game launcher · emulator picks"
-_HOME_LAUNCHER_LABEL = "Home launcher · homescreen"
+_GAME_LAUNCHER_LABEL = "Game launcher emulator picks (@gamelauncher)"
+_HOME_LAUNCHER_LABEL = "Homescreen layout (@homescreen)"
 
 # Behavior flags shown in the Download (restore) modal — restore.sh honors each @flag on the device.
 _DL_FLAGS = ("settings", "hardening", "grants", "homescreen", "gamelauncher")
