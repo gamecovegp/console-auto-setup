@@ -596,18 +596,20 @@ def _log_download_run(root, results, elapsed, log=print):
 
 
 def seed_default_manifest(pdir, name):
-    """Seed the per-profile selection manifest from the captured golden's pkglist — every captured app,
-    both axes (APK + Config) on. Used after the first capture so the Apps tab shows the device's apps
-    ticked (and Download has apps to restore)."""
+    """Seed the per-profile Download manifest from the captured golden's pkglist — every captured app,
+    both axes (APK + Config) on. Used after the first capture so Download has apps to restore. The behavior
+    defaults FOLLOW what the operator chose in the Save modal (the capture-manifest's @flags), so a Save
+    selection pre-fills Download; any flag absent from the capture-manifest defaults on (full restore)."""
     pdir = pathlib.Path(pdir)
     man = pdir / "manifest"
     if man.exists() and P.manifest_pkgs(man):           # operator already has a real selection — keep it
         return
     pl = pdir / "golden_root_payload" / "pkglist.txt"
     apps = [a.strip() for a in pl.read_text().splitlines() if a.strip()] if pl.exists() else []
-    P.save_manifest(man, apps,
-                    {"settings": "on", "hardening": "on", "grants": "on", "homescreen": "on"},
-                    header=f"# {name} default manifest")
+    cap = P.manifest_flags(pdir / "capture-manifest")   # the Save modal's behavior choices (if any)
+    flags = {fl: cap.get(fl, "on")
+             for fl in ("settings", "hardening", "grants", "homescreen", "gamelauncher")}
+    P.save_manifest(man, apps, flags, header=f"# {name} default manifest")
 
 
 def capture_to_pc(adb, name, stamp, root="profiles", log=print, dry_pull=False):

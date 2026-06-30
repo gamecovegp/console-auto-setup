@@ -1232,13 +1232,15 @@ class App:
     # two thin wrappers: Save scans the connected device, Download lists the golden. Each wrapper writes
     # the same manifest files the old "Save … selection" buttons did, then the chain runs.
 
-    def _app_pick_modal(self, title, intro, prof, rows, launchers, flag_specs, labels=None):
+    def _app_pick_modal(self, title, intro, prof, rows, launchers, flag_specs, labels=None,
+                        flags_caption="— behavior —"):
         """Modal app picker. `rows` is an ordered {pkg:(apk0,cfg0)} initial tick state; `launchers` is the
         set of pkgs whose APK box is disabled (system firmware, never reinstalled); `flag_specs` is an
-        ordered list of (key, label, tip, initial_bool) for the behavior block; `labels` is an optional
-        {pkg: friendly_name} override (used to give the launcher rows a role label). Blocks until the
-        operator clicks Run or Cancel. Returns (axes, flags) on Run — axes={pkg:(apk,cfg)} for every row,
-        flags={key:'on'/'off'} for every flag_spec — or None on Cancel/close."""
+        ordered list of (key, label, tip, initial_bool) for the behavior block (captioned by
+        `flags_caption`); `labels` is an optional {pkg: friendly_name} override (used to give the launcher
+        rows a role label). Blocks until the operator clicks Run or Cancel. Returns (axes, flags) on Run —
+        axes={pkg:(apk,cfg)} for every row, flags={key:'on'/'off'} for every flag_spec — or None on
+        Cancel/close."""
         labels = labels or {}
         self._icon_refs = []                               # fresh icon refs for this modal's lifetime
         win = tk.Toplevel(self.win)
@@ -1289,7 +1291,7 @@ class App:
             _tip(apk_cb, f"Bundle {pkg}'s installer (off = clean install / system launcher)").pack(side="left")
             _tip(ttk.Checkbutton(row, text="Config", variable=cfg_v), cfg_tip).pack(side="left")
         if flag_specs:
-            ttk.Label(listf, text="— behavior —").pack(anchor="w", pady=(6, 0))
+            ttk.Label(listf, text=flags_caption).pack(anchor="w", pady=(6, 0))
             for key, label, tip, init in flag_specs:
                 fv = tk.BooleanVar(value=init)
                 flag_vars[key] = fv
@@ -1323,25 +1325,36 @@ class App:
         if hl:
             labels[hl] = _HOME_LAUNCHER_LABEL
         cf = prof.capture_flags()
-        flag_specs = [   # capture-time behaviour toggles (NOT @hardening — that's a Download-only action)
+        # Full behaviour set so the operator SEES everything the golden carries. settings/grants are
+        # capture toggles (gate what lands in the golden); hardening has nothing to capture — it's the
+        # golden's DEFAULT Download policy. All of them seed the Download manifest (seed_default_manifest),
+        # so what's ticked here pre-fills Download; restore.sh honours each @flag on the device.
+        flag_specs = [
             ("settings", _DL_FLAG_LABELS["settings"],
-             "Capture this device's display/brightness/animation/screen-timeout settings into the golden.",
+             "Capture this device's display/brightness/animation/screen-timeout settings into the golden "
+             "(and apply them by default on Download).",
              cf.get("settings", "on") == "on"),
+            ("hardening", _DL_FLAG_LABELS["hardening"],
+             "The golden's DEFAULT on Download: keep emulators awake (battery-optimization exempt) and block "
+             "OTA updates that could break root. Applied on the device at Download — set the default here.",
+             cf.get("hardening", "on") == "on"),
             ("grants", _DL_FLAG_LABELS["grants"],
-             "Capture the SAF folder-access grants (so ES-DE/emulators read the ROM/BIOS dirs) into the golden.",
+             "Capture the SAF folder-access grants (so ES-DE/emulators read the ROM/BIOS dirs) into the "
+             "golden (and restore them by default on Download).",
              cf.get("grants", "on") == "on"),
         ]
         res = self._app_pick_modal(
             f"Save — capture {self._row_model(serial)} into “{name}”",
             "Tick what to CAPTURE from this device into the golden. APK bundles the installer; Config "
-            "bundles its data/settings/BIOS. The launcher rows save the homescreen / emulator picks, and the "
-            "behaviour items below carry display settings & folder grants — untick anything to leave it out.",
-            prof, rows, launchers, flag_specs=flag_specs, labels=labels)
+            "bundles its data/settings/BIOS. The launcher rows save the homescreen / emulator picks. The "
+            "behaviour items below are saved with the golden and become its defaults on Download.",
+            prof, rows, launchers, flag_specs=flag_specs, labels=labels,
+            flags_caption="— behavior (saved with the golden; default on Download) —")
         if res is None:
             self.log("Save cancelled — nothing captured.")
             return False
         axes, modal_flags = res
-        base = dict(prof.capture_flags()); base.update(modal_flags)   # @settings/@grants from the modal toggles
+        base = dict(prof.capture_flags()); base.update(modal_flags)   # @settings/@hardening/@grants toggles
         pkgs, axes_sub, flags = _capture_manifest_from_axes(axes, base, gl, hl)
         P.save_manifest(prof.capture_manifest_path, pkgs, flags,
                         header=f"# {prof.name} capture", axes=axes_sub)

@@ -1048,6 +1048,22 @@ class TestProvision(unittest.TestCase):
             self.assertEqual(P.manifest_pkgs(pdir / "manifest"), ["com.a"])          # unchanged
             self.assertEqual(P.manifest_axes(pdir / "manifest"), {"com.a": (False, True)})
 
+    def test_seed_default_manifest_follows_capture_flags(self):
+        # The Download defaults FOLLOW the Save modal's behavior choices (the capture-manifest @flags):
+        # what the operator unticked at Save (e.g. hardening) pre-fills Download as off; missing = on.
+        with tempfile.TemporaryDirectory() as t:
+            pdir = pathlib.Path(t) / "prof"
+            (pdir / "golden_root_payload").mkdir(parents=True)
+            (pdir / "golden_root_payload" / "pkglist.txt").write_text("com.a\n")
+            (pdir / "capture-manifest").write_text(
+                "# prof capture\ncom.a\n@hardening off\n@settings off\n@gamelauncher on\n")
+            PV.seed_default_manifest(pdir, "prof")
+            f = P.manifest_flags(pdir / "manifest")
+            self.assertEqual(f["hardening"], "off")     # Save untick propagates
+            self.assertEqual(f["settings"], "off")      # Save untick propagates
+            self.assertEqual(f["grants"], "on")         # absent in capture-manifest -> default on
+            self.assertEqual(f["gamelauncher"], "on")   # explicit on carried through
+
     def test_patch_init_boot_on_device_pushes_toolkit_and_pulls(self):
         # On-device patch: push the aarch64 toolkit + the stock init_boot, run boot_patch.sh, pull the
         # patched new-boot.img back to the PC. No root needed (it only rewrites the image file).
@@ -2100,6 +2116,39 @@ class TestModalManifestTransforms(unittest.TestCase):
         self.assertEqual(flags["gamelauncher"], "on")      # gl Config on  -> @gamelauncher on
         self.assertEqual(flags["homescreen"], "off")       # hl Config off -> @homescreen off
         self.assertEqual(flags["settings"], "on")          # base flag preserved
+
+
+class TestPickCapture(unittest.TestCase):
+    """_pick_capture: the Save modal's behavior choices (incl. hardening) land in the capture-manifest and
+    then seed the Download defaults."""
+
+    def test_hardening_flows_to_capture_manifest_and_seeds_download(self):
+        from cas.gui import App
+        root = pathlib.Path(tempfile.mkdtemp())
+        d = root / "prof"
+        (d / "golden_root_payload").mkdir(parents=True)
+        (d / "golden_root_payload" / "pkglist.txt").write_text("com.a\n")
+        (d / "profile.meta").write_text("")
+        app = App.__new__(App)
+        app.profiles_root = str(root)
+        app.log = lambda m: None
+        app._scan_device_apps = lambda s: []
+        app._detect_device_launchers = lambda s: (None, None)
+        app._row_model = lambda s: "AIR X"
+        seen = {}
+        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, flags_caption="—"):
+            seen["flag_keys"] = [f[0] for f in flag_specs]
+            # operator unticks hardening at Save
+            return ({}, {"settings": "on", "hardening": "off", "grants": "on"})
+        app._app_pick_modal = fake_modal
+        self.assertTrue(app._pick_capture("S1", "prof"))
+        # the Save modal offered settings/hardening/grants (the optimization stuff is THERE)
+        self.assertIn("hardening", seen["flag_keys"])
+        # capture-manifest carries the choice
+        self.assertEqual(P.manifest_flags(d / "capture-manifest")["hardening"], "off")
+        # and it seeds the Download default
+        PV.seed_default_manifest(d, "prof")
+        self.assertEqual(P.manifest_flags(d / "manifest")["hardening"], "off")
 
 
 class TestPickDownloads(unittest.TestCase):
