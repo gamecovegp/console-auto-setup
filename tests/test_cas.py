@@ -2022,5 +2022,61 @@ class TestPickDownloads(unittest.TestCase):
         self.assertEqual(len(calls), 1)                    # only the real profile prompts
 
 
+class TestDetectLaunchers(unittest.TestCase):
+    """_detect_device_launchers pushes lib-root.sh first (modal opens before capture pushes it), resolves
+    HOME without root and the GAME frontend with root, falling back to a plain shell when su is blocked."""
+
+    class _FakeAdb:
+        def __init__(self, serial=None, adb=None, home="com.android.launcher3",
+                     game_su="com.handheld.launcher", game_shell="", push_ok=True):
+            self._home, self._game_su, self._game_shell, self._push_ok = home, game_su, game_shell, push_ok
+            self.calls = []
+        def shell(self, cmd):
+            self.calls.append(("shell", cmd))
+            if "home_launcher" in cmd:
+                return (0, self._home + "\n", "")
+            if "game_launcher" in cmd:
+                return (0, (self._game_shell + "\n") if self._game_shell else "", "")
+            return (0, "", "")                         # mkdir
+        def su(self, cmd, timeout=900):
+            self.calls.append(("su", cmd))
+            if "game_launcher" in cmd and self._game_su is not None:
+                return (0, self._game_su + "\n", "")
+            return (124, "", "timeout")                # su blocked
+        def push(self, src, dst):
+            self.calls.append(("push", str(src)))
+            return self._push_ok
+
+    def _run(self, fake):
+        from cas import gui as G
+        from unittest.mock import patch
+        app = G.App.__new__(G.App); app.adb_bin = None
+        with patch.object(G, "Adb", lambda serial=None, adb=None: fake):
+            return app._detect_device_launchers("S1"), fake.calls
+
+    def test_pushes_libroot_then_resolves_both(self):
+        fake = self._FakeAdb()
+        (game, home), calls = self._run(fake)
+        self.assertEqual((game, home), ("com.handheld.launcher", "com.android.launcher3"))
+        self.assertTrue(any(c[0] == "push" and c[1].endswith("lib-root.sh") for c in calls))  # pushed first
+        self.assertTrue(any(c[0] == "shell" and "home_launcher" in c[1] for c in calls))       # home no-root
+
+    def test_game_falls_back_to_shell_when_su_blocked(self):
+        fake = self._FakeAdb(game_su=None, game_shell="com.handheld.launcher")  # su yields nothing
+        (game, home), calls = self._run(fake)
+        self.assertEqual(game, "com.handheld.launcher")                          # curated shell fallback hit
+        self.assertTrue(any(c[0] == "su" and "game_launcher" in c[1] for c in calls))
+
+    def test_push_failure_returns_none(self):
+        fake = self._FakeAdb(push_ok=False)
+        (game, home), _ = self._run(fake)
+        self.assertEqual((game, home), (None, None))
+
+    def test_no_serial_returns_none(self):
+        from cas import gui as G
+        app = G.App.__new__(G.App); app.adb_bin = None
+        self.assertEqual(app._detect_device_launchers(""), (None, None))
+
+
 if __name__ == "__main__":
     unittest.main()

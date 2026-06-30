@@ -1184,15 +1184,33 @@ class App:
                       for l in out.splitlines() if l.startswith("package:"))
 
     def _detect_device_launchers(self, serial):
-        """(game_launcher, home_launcher) on the device, or (None, None). Best-effort via su."""
+        """(game_launcher, home_launcher) on the device, or None for either it can't resolve. Uses the SAME
+        lib-root.sh functions the capture engine uses — but PUSHED here first, because the Save modal opens
+        BEFORE capture_to_pc pushes the scripts; without this the source failed and both came back None
+        (so the homescreen / game-launcher rows never appeared). home resolves WITHOUT root (cmd package);
+        the game frontend prefers root (signature-probe /data/data) but falls back to the curated list
+        under a plain shell when su isn't granted yet."""
         if not serial:
             return (None, None)
         a = Adb(serial=serial, adb=self.adb_bin)
-        def _one(cmd):
-            rc, out, _ = a.su(f". /data/local/tmp/cas_scripts/lib-root.sh 2>/dev/null; {cmd}")
+        a.shell("mkdir -p /data/local/tmp/cas_scripts")
+        if not a.push(PV.LIBROOT, "/data/local/tmp/cas_scripts/"):    # must be present to source
+            return (None, None)
+        src = ". /data/local/tmp/cas_scripts/lib-root.sh 2>/dev/null; "
+
+        def _last(rc, out):
             line = (out or "").strip().splitlines()
-            return line[-1].strip() if rc == 0 and line else None
-        return (_one("game_launcher"), _one("home_launcher"))
+            return line[-1].strip() if rc == 0 and line and line[-1].strip() else None
+        rc, out, _ = a.shell(src + "home_launcher")                               # no root needed
+        home = _last(rc, out)
+        # short timeout: detection is best-effort and runs on the UI thread, so a pending su-grant prompt
+        # must NOT freeze the Save modal for the default 15 min — fail fast and fall back to the shell probe.
+        rc, out, _ = a.su(src + "game_launcher", timeout=20)                       # root: /data/data probe
+        game = _last(rc, out)
+        if game is None:                                                           # su blocked → curated list
+            rc, out, _ = a.shell(src + "game_launcher")
+            game = _last(rc, out)
+        return (game, home)
 
     def _set_all(self, vars_dict, value, launchers=frozenset()):
         """Set every (apk_var, cfg_var) pair in vars_dict to value. Launcher rows keep their (disabled)
