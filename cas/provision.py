@@ -283,10 +283,16 @@ def set_device_owner(adb, log=print):
     # immediate readback can race and produce a false "not confirmed" even though the unit locks down
     # moments later. Retry up to _VERIFY_ATTEMPTS times with _VERIFY_DELAY_S between each attempt;
     # break early on success. Do NOT sleep after the final attempt.
+    # Verify against BOTH dumpsys sources: older Android lists DO restrictions under the admin's
+    # `userRestrictions:` in `dumpsys device_policy`, but Android 14+ keeps that field EMPTY and the
+    # ACTIVE restrictions surface in `dumpsys user` ("Effective"/"Device policy global restrictions").
+    # Checking only device_policy false-reports "lockdown FAILED" on a correctly-locked A14 unit.
     missing = list(_LOCK_RESTRICTIONS)
     for attempt in range(_VERIFY_ATTEMPTS):
-        rc, dump, _ = adb.shell("dumpsys device_policy")
-        missing = [r for r in _LOCK_RESTRICTIONS if r not in dump]
+        _, dp, _ = adb.shell("dumpsys device_policy")
+        _, du, _ = adb.shell("dumpsys user")
+        blob = (dp or "") + "\n" + (du or "")
+        missing = [r for r in _LOCK_RESTRICTIONS if r not in blob]
         if not missing:
             break
         if attempt < _VERIFY_ATTEMPTS - 1:

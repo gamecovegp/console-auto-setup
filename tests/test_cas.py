@@ -20,7 +20,8 @@ class FakeRunner:
 
     def __init__(self, model="Odin2 Mini", golden=False, root=True, boot="1", sd=True,
                  push_ok=True, pull_ok=True, su_blocked=False, slot="_a", first_api="33",
-                 device_owner=False, do_set_ok=True, do_restrict=True, release_clears=True):
+                 device_owner=False, do_set_ok=True, do_restrict=True, release_clears=True,
+                 restrict_in="device_policy"):
         self.calls = []
         self.model, self.golden, self.root, self.boot, self.sd = model, golden, root, boot, sd
         self.push_ok, self.pull_ok = push_ok, pull_ok
@@ -33,6 +34,10 @@ class FakeRunner:
         self.slot, self.first_api = slot, first_api
         self._owner = device_owner          # current device-owner state (mutated by a release broadcast)
         self.do_set_ok, self.do_restrict, self.release_clears = do_set_ok, do_restrict, release_clears
+        # which dumpsys surfaces the applied DO restrictions: 'device_policy' (older Android) or 'user'
+        # (Android 14+ keeps the per-admin device_policy userRestrictions field EMPTY and lists them under
+        # dumpsys user 'Effective/global restrictions' instead). Only matters when do_restrict is True.
+        self.restrict_in = restrict_in
 
     def __call__(self, args, input_text=None, timeout=900):
         self.calls.append(list(args))
@@ -70,8 +75,12 @@ class FakeRunner:
                     return 0, "Success: Device owner set to package\n", ""
                 return 255, "", "java.lang.IllegalStateException: Not allowed to set the device owner\n"
             if tail.startswith("dumpsys device_policy"):
-                return 0, ("no_factory_reset no_safe_boot\n" if (self._owner and self.do_restrict)
-                           else "\n"), ""
+                shown = self._owner and self.do_restrict and self.restrict_in == "device_policy"
+                return 0, ("no_factory_reset no_safe_boot\n" if shown else "\n"), ""
+            if tail.startswith("dumpsys user"):
+                shown = self._owner and self.do_restrict and self.restrict_in == "user"
+                return 0, ("  Effective restrictions:\n    no_factory_reset\n    no_safe_boot\n"
+                           if shown else "  Effective restrictions:\n"), ""
             if tail.startswith("am broadcast") and "action.RELEASE" in tail:
                 if self.release_clears and "gc-release-7f3a9c2e" in tail:
                     self._owner = False
@@ -1902,6 +1911,13 @@ class TestDeviceOwner(unittest.TestCase):
             self.assertFalse(PV.set_device_owner(a, log=lambda *_: None))
         finally:
             PV.time.sleep = orig_sleep
+
+    def test_set_device_owner_confirms_when_restrictions_only_in_dumpsys_user(self):
+        # Android 14+ (real MANGMI AIR X): the restrictions ARE applied but the per-admin userRestrictions
+        # field in `dumpsys device_policy` is EMPTY — they surface in `dumpsys user` instead. Verification
+        # must consult BOTH, else it FALSELY reports 'lockdown FAILED' on a correctly-locked unit.
+        a = Adb(runner=FakeRunner(do_set_ok=True, do_restrict=True, restrict_in="user"))
+        self.assertTrue(PV.set_device_owner(a, log=lambda *_: None))
 
     def test_release_sends_token_broadcast_and_confirms_cleared(self):
         r = FakeRunner(device_owner=True, release_clears=True)
