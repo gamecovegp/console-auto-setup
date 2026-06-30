@@ -18,7 +18,7 @@
 - **Store layout:** `config.apk_store_dir()` → `library_root()/_apks/<pkg>/` containing `meta` (`current=<label>`), `<label>.apk` (single) or `<label>/` (split set), and `_archive/` for displaced bytes.
 - **Kit package ids:** Magisk `com.topjohnwu.magisk`; Companion `com.gamecove.gamecove_companion` (`provision.COMPANION_PKG`).
 - **Version label** = operator-supplied, default = the source APK's filename stem. No APK parsing.
-- **Run tests** from the project root: `python3 -m unittest discover -s tests -p 'test_*.py' -t .`
+- **Run tests** from the project root with **module paths** (this env is Python 3.14 and the repo path contains `[07]`, so `unittest discover` errors with "Start directory is not importable" — do NOT use `discover`). Full suite: `python3 -m unittest tests.test_cas tests.test_firmware tests.test_warnings`. Baseline before this feature: **220 tests, OK**. Single test/class: `python3 -m unittest tests.test_cas.TestConfig.test_name -v`. Filtered: `python3 -m unittest tests.test_cas -k pattern -v`.
 - **Commit style:** Conventional Commits (`feat(profiles): …`), ending each message with the `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>` trailer.
 - Follow the house docstring style: explain **why**, not just what.
 
@@ -656,7 +656,7 @@ Add the managed-app install AFTER the Companion/lockdown block (after line ~381,
 Run: `python3 -m unittest tests.test_cas.TestApkStoreDeploy -v`
 Expected: PASS
 
-Run: `python3 -m unittest discover -s tests -p 'test_*.py' -t .`
+Run: `python3 -m unittest tests.test_cas tests.test_firmware tests.test_warnings`
 Expected: OK (no regressions — existing provision/manifest tests still pass)
 
 - [ ] **Step 5: Commit**
@@ -819,7 +819,7 @@ to:
 Run: `python3 -m unittest tests.test_cas.TestApkStoreDeploy -v`
 Expected: PASS
 
-Run: `python3 -m unittest discover -s tests -p 'test_*.py' -t .`
+Run: `python3 -m unittest tests.test_cas tests.test_firmware tests.test_warnings`
 Expected: OK
 
 - [ ] **Step 5: Commit**
@@ -1014,7 +1014,7 @@ Confirm the row appears and the manifest line is written.
 
 - [ ] **Step 4: Run the full suite (no regressions)**
 
-Run: `python3 -m unittest discover -s tests -p 'test_*.py' -t .`
+Run: `python3 -m unittest tests.test_cas tests.test_firmware tests.test_warnings`
 Expected: OK
 
 - [ ] **Step 5: Commit**
