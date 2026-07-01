@@ -634,54 +634,6 @@ class TestConfig(unittest.TestCase):
             else:
                 os.environ[k] = v
 
-    def test_linux_cifs_mountpoint_discovered_from_proc_mounts(self):
-        # The NAS is a kernel CIFS mount (//192.168.100.227/01 GAMECOVE at /mnt/gamecove), which the gvfs
-        # check misses. Discover it from /proc/mounts (octal-unescaping the space in the share name).
-        from cas import config as C
-        with tempfile.TemporaryDirectory() as t:
-            mnt = pathlib.Path(t) / "gamecove"; mnt.mkdir()
-            mounts = pathlib.Path(t) / "mounts"
-            mounts.write_text(
-                "sysfs /sys sysfs rw 0 0\n"
-                f"//192.168.100.227/01\\040GAMECOVE {mnt} cifs rw,vers=3.0,username=x 0 0\n")
-            self.assertEqual(
-                C._linux_cifs_mountpoint("192.168.100.227", "01 GAMECOVE", mounts_path=str(mounts)),
-                str(mnt))
-
-    def test_linux_cifs_mountpoint_none_when_no_match(self):
-        from cas import config as C
-        with tempfile.TemporaryDirectory() as t:
-            mounts = pathlib.Path(t) / "mounts"
-            mounts.write_text("//192.168.100.227/01\\040GAMECOVE /mnt/gc ext4 rw 0 0\n"   # not cifs
-                              "//other/share /mnt/o cifs rw 0 0\n")                        # wrong share
-            self.assertIsNone(
-                C._linux_cifs_mountpoint("192.168.100.227", "01 GAMECOVE", mounts_path=str(mounts)))
-
-    def test_default_falls_back_to_local_when_nas_unreachable(self):
-        from cas import config as C, APPDIR
-        with tempfile.TemporaryDirectory() as t:
-            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "missing.json")  # no config file
-            os.environ.pop("CAS_PROFILES", None)
-            saved = C.nas_default_path
-            try:
-                C.nas_default_path = lambda: str(pathlib.Path(t) / "no-nas-here")  # NAS not mounted
-                self.assertEqual(C.library_root(), APPDIR / "data" / "profiles")
-            finally:
-                C.nas_default_path = saved
-
-    def test_nas_default_used_when_reachable(self):
-        from cas import config as C
-        with tempfile.TemporaryDirectory() as t:
-            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "missing.json")  # no config file
-            os.environ.pop("CAS_PROFILES", None)
-            nas = pathlib.Path(t) / "nas-lib"; nas.mkdir()
-            saved = C.nas_default_path
-            try:
-                C.nas_default_path = lambda: str(nas)
-                self.assertEqual(C.library_root(), nas)          # a mounted NAS default is used by default
-            finally:
-                C.nas_default_path = saved
-
     def test_config_library_wins_over_default(self):
         from cas import config as C
         with tempfile.TemporaryDirectory() as t:
@@ -691,21 +643,6 @@ class TestConfig(unittest.TestCase):
             self.assertEqual(pathlib.Path(C.set_library("/mnt/nas/CAS Profiles")),
                              pathlib.Path("/mnt/nas/CAS Profiles"))
             self.assertEqual(C.load_config().get("library"), "/mnt/nas/CAS Profiles")
-
-    def test_nas_credentials_roundtrip_and_default(self):
-        from cas import config as C
-        with tempfile.TemporaryDirectory() as t:
-            cfgp = pathlib.Path(t) / "cas-config.json"
-            os.environ["CAS_CONFIG"] = str(cfgp)
-            # nothing saved -> the shipped default app account (so a fresh PC auto-connects)
-            self.assertEqual(C.get_nas_credentials(), (C.NAS_DEFAULT_USER, C.NAS_DEFAULT_PW))
-            # a saved account OVERRIDES the default, round-trips, and isn't written in the clear
-            C.set_nas_credentials("cas_app", "P@ss w0rd!")
-            self.assertEqual(C.get_nas_credentials(), ("cas_app", "P@ss w0rd!"))
-            self.assertNotIn("P@ss w0rd!", cfgp.read_text())
-            # clearing reverts to the shipped default
-            C.set_nas_credentials("", "")
-            self.assertEqual(C.get_nas_credentials(), (C.NAS_DEFAULT_USER, C.NAS_DEFAULT_PW))
 
     def test_device_profiles_persist(self):
         from cas import config as C
@@ -740,10 +677,6 @@ class TestConfig(unittest.TestCase):
             C.record_download(0, 5)                              # ignored (no bytes)
             C.record_download(50 * 1048576, 0)                   # ignored (no time)
             self.assertAlmostEqual(C.download_mbps("rp6-512"), 10.0, places=3)
-
-    def test_nas_share_root(self):
-        from cas import config as C
-        self.assertEqual(C.nas_share_root(), r"\\192.168.100.227\01 GAMECOVE")
 
     def test_env_wins_over_config(self):
         from cas import config as C
@@ -800,51 +733,12 @@ class TestConfig(unittest.TestCase):
             self.assertEqual(C.es_media_src(), "/env/wins")
             os.environ.pop("CAS_MEDIA", None)
 
-    def test_nas_share_name_and_subpath(self):
-        from cas import config as C
-        self.assertEqual(C.nas_share_name(), "01 GAMECOVE")
-        self.assertEqual(C.nas_subpath(), "[03] SETUP/CAS Profiles")
-
-    def test_nas_mountpoint_linux_gvfs(self):
-        from cas import config as C
-        from unittest import mock
-        with tempfile.TemporaryDirectory() as t:
-            os.environ["XDG_RUNTIME_DIR"] = t
-            try:
-                gv = pathlib.Path(t) / "gvfs" / "smb-share:server=192.168.100.227,share=01 gamecove"
-                # isolate the gvfs path from THIS box's real kernel CIFS mount (the cifs fallback is tested
-                # separately in test_linux_cifs_mountpoint_*).
-                with mock.patch.object(C.sys, "platform", "linux"), \
-                     mock.patch.object(C, "_linux_cifs_mountpoint", lambda *a, **k: None):
-                    self.assertIsNone(C.nas_mountpoint())     # no gvfs + no cifs -> not mounted
-                    gv.mkdir(parents=True)
-                    self.assertEqual(C.nas_mountpoint(), str(gv))
-            finally:
-                os.environ.pop("XDG_RUNTIME_DIR", None)
-
-    def test_nas_mountpoint_macos_volumes(self):
-        from cas import config as C
-        from unittest import mock
-        with mock.patch.object(C.sys, "platform", "darwin"), \
-             mock.patch.object(C.pathlib.Path, "is_dir", lambda self: str(self) == "/Volumes/01 GAMECOVE"):
-            self.assertEqual(C.nas_mountpoint(), "/Volumes/01 GAMECOVE")
-
-    def test_nas_default_path_follows_mountpoint(self):
-        from cas import config as C
-        from unittest import mock
-        with mock.patch.object(C, "nas_mountpoint", lambda: "/mnt/x/01 GAMECOVE"):
-            self.assertEqual(C.nas_default_path(), "/mnt/x/01 GAMECOVE/[03] SETUP/CAS Profiles")
-        with mock.patch.object(C, "nas_mountpoint", lambda: None):
-            self.assertIsNone(C.nas_default_path())
-
-    def test_library_root_local_when_nas_unmounted(self):
+    def test_library_root_local_default(self):
         from cas import config as C, APPDIR
-        from unittest import mock
         with tempfile.TemporaryDirectory() as t:
             os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "missing.json")
             os.environ.pop("CAS_PROFILES", None)
-            with mock.patch.object(C, "nas_default_path", lambda: None):     # NEW: None case
-                self.assertEqual(C.library_root(), APPDIR / "data" / "profiles")
+            self.assertEqual(C.library_root(), APPDIR / "data" / "profiles")
 
     def test_firmware_dir_ignores_stale_override(self):
         from cas import config as C
@@ -866,45 +760,6 @@ class TestConfig(unittest.TestCase):
             cfgp.write_text('{"firmware_dir": %s}' % __import__("json").dumps(str(real)))
             os.environ["CAS_CONFIG"] = str(cfgp)
             self.assertEqual(C.firmware_dir(), real)
-
-    def _connect_cmd(self, platform):
-        # Run nas_connect on a faked OS with NAS 'reachable' but share not yet mounted, capturing the
-        # subprocess command it would run. nas_mountpoint() returns None (share not mounted) while
-        # library_reachable() returns True (local library exists) — proving the new guard no longer
-        # short-circuits on local-library presence. Returns the argv (list) of the mount command.
-        from cas import config as C
-        from unittest import mock
-        captured = {}
-        def fake_run(args, *a, **k):
-            captured["argv"] = args
-            class R: returncode = 0; stdout = ""; stderr = ""
-            return R()
-        with mock.patch.object(C.sys, "platform", platform), \
-             mock.patch.object(C, "get_nas_credentials", lambda: ("u", "p w")), \
-             mock.patch.object(C, "nas_reachable", lambda timeout=1.5: True), \
-             mock.patch.object(C, "nas_mountpoint", lambda: None), \
-             mock.patch.object(C, "library_reachable", lambda: True), \
-             mock.patch.object(C.subprocess, "run", fake_run), \
-             mock.patch.object(C.pathlib.Path, "mkdir", lambda self, **kw: None):
-            C.nas_connect()
-        return captured.get("argv")
-
-    def test_nas_connect_attempts_mount_despite_local_library(self):
-        # Regression: a local library makes library_reachable() True, but nas_connect must still try the NAS.
-        argv = self._connect_cmd("linux")
-        self.assertIsNotNone(argv)                      # a mount command WAS issued
-        self.assertEqual(argv[:2], ["gio", "mount"])
-
-    def test_nas_connect_macos_mounts_share(self):
-        argv = self._connect_cmd("darwin")
-        self.assertEqual(argv[0], "mount_smbfs")
-        self.assertTrue(any("01%20GAMECOVE" in str(x) for x in argv))   # share, URL-encoded
-        self.assertTrue(any(str(x).endswith("/Volumes/01 GAMECOVE") for x in argv))
-
-    def test_nas_connect_linux_mounts_share_not_subpath(self):
-        argv = self._connect_cmd("linux")
-        self.assertEqual(argv[:2], ["gio", "mount"])
-        self.assertEqual(argv[2], "smb://192.168.100.227/01%20GAMECOVE")  # share only, no subpath
 
     def test_apk_store_defaults_under_library(self):
         from cas import config as C
