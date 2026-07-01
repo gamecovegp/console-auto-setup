@@ -71,6 +71,41 @@ source. `release_token` helpers stay (not NAS-related).
   drop "NAS" (say "external / shared drive"). `choose_library` initialdir uses
   the current `library` or `APPDIR/data` (no `nas_default_path()`).
 
+### Per-machine run-history logs (`cas/config.py`, `cas/provision.py`, `cas/firmware.py`)
+
+With the NAS gone there is no single owner of the shared `*-history.jsonl` files.
+If each bench keeps its own drive and syncs goldens by copy-pasting the whole
+`CAS Profiles/` directory, two benches writing the same `download-history.jsonl`
+clobber each other. Fix: **namespace each history file by machine** so two benches
+never write the same filename — a folder-merge copy then preserves every bench's
+history.
+
+These files are **write-only audit logs** — nothing in CAS reads them back (the
+Download ETA uses `download_stats` in the local, per-PC `cas-config.json`), so this
+is a write-side change only.
+
+Add to `config.py`:
+
+- `machine_tag()` → a filesystem-safe, lowercased, sanitized `socket.gethostname()`
+  (non-`[A-Za-z0-9._-]` → `-`, stripped); `"unknown"` if the hostname is empty.
+- `history_filename(stem)` → `f"{stem}.{machine_tag()}.jsonl"`.
+
+Rewire the writers to pass a **stem** and build the per-machine filename:
+
+- `provision._append_history(root, stem, rec, ...)` → writes
+  `history_dir(default=root)/history_filename(stem)`. Callers pass
+  `"download-history"` and `"save-history"`.
+- `firmware.py` writer → `history_dir()/history_filename("firmware-history")`.
+
+Result on the drive: `download-history.<host>.jsonl`, `save-history.<host>.jsonl`,
+`firmware-history.<host>.jsonl`. Any pre-existing plain `*-history.jsonl` files
+are left untouched (old combined log; a human can keep or merge them).
+
+Caveat (documented, not code): this is safe under a **merge/overwrite** copy
+(the default file-manager folder-into-folder behavior). A **destructive** sync
+(delete destination, then paste) would still drop the destination bench's own log
+— unavoidable, and the goldens are the intended target of that overwrite anyway.
+
 ### `cas/warnings.py`
 
 `library_unreachable` title/detail/fix drop NAS wording → e.g. detail: "The
@@ -114,6 +149,14 @@ Add: `library_root()` resolution (env > `library` config > `APPDIR/data/profiles
 `firmware_dir`/`apk_store_dir`/`history_dir` follow `library_root()`;
 `set_library` roundtrip + clear with a local path; `library_reachable()`.
 
+Per-machine logs: `machine_tag()` sanitization (spaces/slashes → `-`, empty →
+`"unknown"`) and `history_filename("download-history")` shape. The existing
+history-write tests (`tests/test_cas.py` download/save, `tests/test_firmware.py`)
+assert the file exists — update them to look for
+`config.history_filename(stem)` (host-independent) rather than a hardcoded
+`download-history.jsonl`, and drop the NAS-vs-library log-destination cases
+(`test_cas.py` ~L1160) since there is no NAS log dir anymore.
+
 ## Risks
 
 - A leftover reference to a removed `nas_*` / `NAS_DEFAULT` symbol → import error.
@@ -131,4 +174,6 @@ Add: `library_root()` resolution (env > `library` config > `APPDIR/data/profiles
   path with ✓; the profile list shows `mangmi-air-x-256` and
   `retroid-pocket-6-512`; the Firmware tab shows the drive `_firmware`; a Download
   reads from the drive at local-disk speed (no ~7 MB/s ceiling).
+- After a Download/Save, the drive shows `download-history.<host>.jsonl` /
+  `save-history.<host>.jsonl` named for this bench (not the plain filename).
 - `grep -rniE 'nas|smb|cifs|net use|gio mount|192\.168\.100\.227' cas/` is clean.
