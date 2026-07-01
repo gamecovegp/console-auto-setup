@@ -230,3 +230,21 @@ homescreen_bundle_apps(){
   done
   echo "$_hb_n"
 }
+# homescreen_install_missing <payload_dir> — install any placed app that is ABSENT on THIS unit, so its
+# icon resolves when the favorites DB is applied (a wiped unit / different model may lack the game launcher
+# or other placed apps). Skips apps already present. Additive: a miss WARNs, never fails the restore.
+homescreen_install_missing(){
+  _hm_pd="$1"; _hm_hsa="$_hm_pd/homescreen/apps"
+  [ -d "$_hm_hsa" ] || return 0
+  for _hm_d in "$_hm_hsa"/*/; do
+    [ -d "$_hm_d" ] || continue
+    _hm_p="$(basename "$_hm_d")"
+    if pm path "$_hm_p" >/dev/null 2>&1; then
+      log "homescreen: $_hm_p already present — no install needed"
+    else
+      install_apks "$_hm_d" "$_hm_p" \
+        || warn "homescreen: could not install $_hm_p — its icon may not resolve (platform-signed system app on a foreign key?)"
+    fi
+  done
+  return 0
+}

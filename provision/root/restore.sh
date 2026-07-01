@@ -297,6 +297,10 @@ else
     if [ -z "$LUID" ]; then
       warn "homescreen: cannot resolve $LP uid — skip"
     else
+      # SELF-CONTAINED LAYOUT: install any placed app that's absent on THIS unit BEFORE re-applying the
+      # favorites DB, so every icon's component resolves. Runs on the same-family success path only (we're
+      # about to apply the layout). Additive — never bumps FAIL.
+      homescreen_install_missing "$P"
       am force-stop "$LP" 2>/dev/null
       rm -rf "/data/data/$LP/"* "/data/data/$LP/".[!.]* 2>/dev/null
       if tar -xf "$HS/launcher_data.tar" -C /data/data 2>/dev/null; then
