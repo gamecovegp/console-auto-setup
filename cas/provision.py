@@ -109,6 +109,19 @@ def _install_apk(adb, pkg, files, log):
     return False
 
 
+def install_store_app_pc(store_dir, pkg, mk_adb, serials, log=print):
+    """Ad-hoc install: push the store's CURRENT build of `pkg` to each serial straight from the PC
+    (`adb install -r -g`; splits via install-multiple, reused from _install_apk). A plain user install —
+    no profile, golden, or root. Best-effort PER DEVICE: one failure warns and continues to the rest
+    (matches _install_apk). Returns {serial: ok_bool}. Empty dict + a note when the store has no current
+    build for `pkg` (e.g. the NAS is unreachable), so the caller can report 'nothing installed'."""
+    files = P.store_apk_files(store_dir, pkg)
+    if not files:
+        log(f"ad-hoc install: no current build for {pkg} in the store (is the NAS reachable?) — nothing to install.")
+        return {}
+    return {s: _install_apk(mk_adb(s), pkg, files, log) for s in serials}
+
+
 def _kit_apk(pkg, prof, appdir, fallback_rel):
     """Resolve a KIT apk (Magisk/Companion) PC-side path: the server store's CURRENT build if present, else
     the bundled fallback via resolve_asset (profile.meta override > appdir-relative default). Store-first so

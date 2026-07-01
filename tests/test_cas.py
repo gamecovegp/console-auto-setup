@@ -2630,6 +2630,58 @@ class TestApkStoreDeploy(unittest.TestCase):
                         log=lambda *a: None)
         self.assertTrue(any("install-multiple" in c for c in fr2.calls))
 
+    def test_install_store_app_pc_to_multiple_serials(self):
+        # ad-hoc install: the store's CURRENT build is pushed to EACH serial via adb install
+        with tempfile.TemporaryDirectory() as t:
+            store = pathlib.Path(t) / "store"
+            _seed_store(store, "org.cocoon.app", "v1", content="apkbytes")
+            runners = {}
+
+            def mk_adb(s):
+                fr = FakeRunner(); runners[s] = fr
+                return Adb(serial=s, runner=fr)
+            res = PV.install_store_app_pc(str(store), "org.cocoon.app", mk_adb, ["S1", "S2"],
+                                          log=lambda *a: None)
+            self.assertEqual(res, {"S1": True, "S2": True})
+            for s in ("S1", "S2"):
+                self.assertTrue(
+                    any("install" in c and any("v1.apk" in x for x in c) for c in runners[s].calls),
+                    f"expected install of v1.apk on {s}; calls={runners[s].cmds()}")
+
+    def test_install_store_app_pc_missing_build_is_noop(self):
+        # no current build for the pkg -> {} + a note, no adb call attempted
+        with tempfile.TemporaryDirectory() as t:
+            store = pathlib.Path(t) / "store"; store.mkdir()
+            logs = []
+            res = PV.install_store_app_pc(str(store), "org.absent.app",
+                                          lambda s: Adb(serial=s, runner=FakeRunner()), ["S1"],
+                                          log=lambda m: logs.append(m))
+            self.assertEqual(res, {})
+            self.assertTrue(any("no current build" in m for m in logs), f"logs={logs}")
+
+    def test_install_store_app_pc_best_effort_on_failure(self):
+        # S1's adb install fails (rc!=0); S2 succeeds -> S1 False, S2 True, BOTH still attempted
+        class _FailInstall(FakeRunner):
+            def __call__(self, args, input_text=None, timeout=900):
+                self.calls.append(list(args))
+                if "install" in args or "install-multiple" in args:
+                    return 1, "", "INSTALL_FAILED"
+                return 0, "", ""
+        with tempfile.TemporaryDirectory() as t:
+            store = pathlib.Path(t) / "store"
+            _seed_store(store, "org.cocoon.app", "v1", content="apkbytes")
+            runners = {}
+
+            def mk_adb(s):
+                fr = _FailInstall() if s == "S1" else FakeRunner()
+                runners[s] = fr
+                return Adb(serial=s, runner=fr)
+            res = PV.install_store_app_pc(str(store), "org.cocoon.app", mk_adb, ["S1", "S2"],
+                                          log=lambda *a: None)
+            self.assertEqual(res, {"S1": False, "S2": True})
+            self.assertTrue(any("install" in c for c in runners["S1"].calls))   # S1 was attempted...
+            self.assertTrue(any("install" in c for c in runners["S2"].calls))   # ...and S2 too (not aborted)
+
     def test_provision_installs_managed_store_app(self):
         from cas import config as C
         with tempfile.TemporaryDirectory() as t:

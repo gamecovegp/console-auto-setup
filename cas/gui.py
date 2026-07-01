@@ -1794,8 +1794,32 @@ class App:
                 self.log(f"server store: {pkg} removed (soft — files retained).")
                 refresh()
 
+        def install_to_devices():
+            # Ad-hoc: push the selected store app to the SAME devices Run targets (Apply-to-ALL or the
+            # selected rows). Plain user install — no profile/golden/root. Off-thread so the UI never freezes.
+            pkg = _sel()
+            if not pkg:
+                messagebox.showinfo("CAS", "Select a package row to install to the device(s).")
+                return
+            serials = self._action_targets()
+            if not serials:
+                return
+            if not messagebox.askyesno(
+                    "CAS — install to device(s)",
+                    f"Install {pkg} (current store build) to {len(serials)} device(s)?\n\n" + "\n".join(serials)):
+                return
+
+            def work():
+                res = PV.install_store_app_pc(config.apk_store_dir(), pkg,
+                                              lambda s: Adb(serial=s, adb=self.adb_bin), serials, self.log)
+                ok = sum(1 for v in res.values() if v)
+                self.log(f"ad-hoc install: {pkg} → {ok}/{len(serials)} device(s) OK.")
+                return True
+            self._run_bg(work, label=f"Installing {pkg} → {len(serials)} device(s)")
+
         bar = tk.Frame(dlg); bar.pack(fill="x", padx=8, pady=8)
-        for txt, cmd in (("Add APK…", add), ("Update…", update), ("Remove", remove), ("Close", dlg.destroy)):
+        for txt, cmd in (("Add APK…", add), ("Update…", update), ("Install → device(s)", install_to_devices),
+                         ("Remove", remove), ("Close", dlg.destroy)):
             tk.Button(bar, text=txt, command=cmd).pack(side="left", padx=4)
         refresh()
 
