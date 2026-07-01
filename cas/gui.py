@@ -31,6 +31,19 @@ def _stamp():
     return datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
+def _profile_library_label(root, has_override, local_fallback, reachable, nas_default):
+    """'Library: …' status text for the profile library — mirrors the firmware line's reachability display.
+    With NO explicit override, library_root() silently falls back NAS->local when the share is unmounted; the
+    old label then showed that local path as ✓, hiding the dropped mount. Surface it instead: the intended NAS
+    location + the local dir it fell back to, so 'you're not on the server' is obvious, not a mystery."""
+    root = str(root)
+    if not has_override and nas_default and root == str(local_fallback):
+        return f"Library: {nas_default}   ✗ NAS unreachable (mount dropped?) — falling back to {root}"
+    if not reachable:
+        return f"Library: {root}   ✗ not reachable (map the NAS drive?)"
+    return f"Library: {root}   ✓"
+
+
 class _Tooltip:
     """Minimal hover tooltip (no external deps): a yellow popup on <Enter>, gone on <Leave>."""
     def __init__(self, widget, text):
@@ -1953,9 +1966,10 @@ class App:
             return False
 
     def _update_lib_label(self):
-        root = self.profiles_root
-        mark = "✓" if self._lib_reachable() else "✗ not reachable (map the NAS drive?)"
-        self.lib_var.set(f"Library: {root}   {mark}")
+        override = bool(os.environ.get("CAS_PROFILES") or config.load_config().get("library"))
+        self.lib_var.set(_profile_library_label(
+            self.profiles_root, override, APPDIR / "data" / "profiles",
+            self._lib_reachable(), config.NAS_DEFAULT))
 
     def _update_golden_status(self):
         """Show the selected profile's golden: none saved, or its size + an estimated download time
