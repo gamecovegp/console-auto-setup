@@ -770,6 +770,21 @@ class TestConfig(unittest.TestCase):
             os.environ["CAS_PROFILES"] = str(pathlib.Path(t) / "nope")
             self.assertFalse(C.library_reachable())
 
+    def test_machine_tag_sanitizes_hostname(self):
+        from cas import config as C
+        from unittest import mock
+        with mock.patch("socket.gethostname", return_value="Bench 01/Room#2"):
+            self.assertEqual(C.machine_tag(), "bench-01-room-2")
+        with mock.patch("socket.gethostname", return_value=""):
+            self.assertEqual(C.machine_tag(), "unknown")
+
+    def test_history_filename_shape(self):
+        from cas import config as C
+        from unittest import mock
+        with mock.patch.object(C, "machine_tag", lambda: "bench-01"):
+            self.assertEqual(C.history_filename("download-history"),
+                             "download-history.bench-01.jsonl")
+
     def test_es_media_src_set_get_clear(self):
         from cas import config as C
         with tempfile.TemporaryDirectory() as t:
@@ -1111,6 +1126,7 @@ class TestProvision(unittest.TestCase):
     def test_download_run_logged_to_library(self):
         # the WHOLE Download is recorded (total length + each device/profile) to the library, every run
         import json
+        from cas import config as C
         with tempfile.TemporaryDirectory() as t:
             os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cas-config.json")   # isolate: no log_dir override
             try:
@@ -1119,7 +1135,7 @@ class TestProvision(unittest.TestCase):
                                        [("ABC123", "device")], root=t, log=lambda m: None,
                                        profile_map={"ABC123": P.Profile(pathlib.Path(t) / "odin2mini")})
                 self.assertEqual(res["ABC123"][0], "ok")
-                hist = pathlib.Path(t) / "download-history.jsonl"
+                hist = pathlib.Path(t) / C.history_filename("download-history")
                 self.assertTrue(hist.exists())              # written into the library dir (no log_dir set)
                 rec = json.loads(hist.read_text().splitlines()[-1])
                 self.assertEqual(rec["ok"], 1)
@@ -1131,14 +1147,15 @@ class TestProvision(unittest.TestCase):
                 os.environ.pop("CAS_CONFIG", None)
 
     def test_append_history_writes_jsonl(self):
-        # the shared run-history appender used by BOTH download-history.jsonl and save-history.jsonl
+        # the shared run-history appender used by BOTH download-history and save-history
         import json
+        from cas import config as C
         with tempfile.TemporaryDirectory() as t:
             os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cas-config.json")   # isolate: no log_dir set
             try:
-                PV._append_history(t, "save-history.jsonl", {"profile": "rp6-512", "bytes": 123}, log=lambda m: None)
-                PV._append_history(t, "save-history.jsonl", {"profile": "odin2", "bytes": 456}, log=lambda m: None)
-                lines = (pathlib.Path(t) / "save-history.jsonl").read_text().splitlines()
+                PV._append_history(t, "save-history", {"profile": "rp6-512", "bytes": 123}, log=lambda m: None)
+                PV._append_history(t, "save-history", {"profile": "odin2", "bytes": 456}, log=lambda m: None)
+                lines = (pathlib.Path(t) / C.history_filename("save-history")).read_text().splitlines()
                 self.assertEqual(len(lines), 2)
                 self.assertEqual(json.loads(lines[0])["profile"], "rp6-512")
                 self.assertEqual(json.loads(lines[1])["bytes"], 456)
@@ -1146,22 +1163,22 @@ class TestProvision(unittest.TestCase):
                 os.environ.pop("CAS_CONFIG", None)
 
     def test_append_history_routes_to_log_dir(self):
-        # A configured + reachable shared log_dir (e.g. the NAS) receives the run history, NOT the library
-        # root — so logs centralize across benches while goldens stay on a fast LOCAL library. An unreachable
-        # log_dir falls back to the library root so a run is never lost.
+        # A configured + reachable shared log_dir receives the run history, NOT the library root — so logs
+        # centralize across benches while goldens stay on a fast LOCAL library. An unreachable log_dir falls
+        # back to the library root so a run is never lost.
         from cas import config as C
         with tempfile.TemporaryDirectory() as t:
             lib = pathlib.Path(t) / "lib"; lib.mkdir()
-            nas = pathlib.Path(t) / "nas"; nas.mkdir()
+            alt = pathlib.Path(t) / "alt"; alt.mkdir()
             os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cas-config.json")
             try:
-                C.set_log_dir(str(nas))
-                PV._append_history(str(lib), "download-history.jsonl", {"ok": 1}, log=lambda m: None)
-                self.assertTrue((nas / "download-history.jsonl").exists())     # landed on the NAS log dir
-                self.assertFalse((lib / "download-history.jsonl").exists())    # NOT the library root
-                C.set_log_dir(str(pathlib.Path(t) / "gone"))                   # unreachable -> graceful fallback
-                PV._append_history(str(lib), "save-history.jsonl", {"ok": 1}, log=lambda m: None)
-                self.assertTrue((lib / "save-history.jsonl").exists())         # fell back to the library root
+                C.set_log_dir(str(alt))
+                PV._append_history(str(lib), "download-history", {"ok": 1}, log=lambda m: None)
+                self.assertTrue((alt / C.history_filename("download-history")).exists())   # log_dir override
+                self.assertFalse((lib / C.history_filename("download-history")).exists())  # NOT the library root
+                C.set_log_dir(str(pathlib.Path(t) / "gone"))                               # unreachable -> fallback
+                PV._append_history(str(lib), "save-history", {"ok": 1}, log=lambda m: None)
+                self.assertTrue((lib / C.history_filename("save-history")).exists())       # fell back to library root
             finally:
                 os.environ.pop("CAS_CONFIG", None)
 

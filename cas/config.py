@@ -272,6 +272,23 @@ def download_mbps(profile=None):
     return (tot_b / 1048576.0) / tot_s
 
 
+def machine_tag():
+    """A filesystem-safe per-machine tag (the sanitized hostname) used to namespace the run-history logs, so
+    multiple benches that sync the library by whole-directory copy-paste never clobber each other's
+    (write-only) audit logs. Lowercased; any run of non-[A-Za-z0-9._-] -> '-'; 'unknown' if empty."""
+    try:
+        raw = socket.gethostname() or ""
+    except OSError:
+        raw = ""
+    tag = re.sub(r"[^A-Za-z0-9._-]+", "-", raw).strip("-.").lower()
+    return tag or "unknown"
+
+
+def history_filename(stem):
+    """`<stem>.<machine_tag>.jsonl` — the per-machine run-history filename (copy-paste-safe across benches)."""
+    return f"{stem}.{machine_tag()}.jsonl"
+
+
 def library_reachable():
     """True if the configured library path exists as a directory (e.g. the NAS drive is mapped)."""
     try:

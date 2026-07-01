@@ -497,7 +497,7 @@ def log_event(serial, firmware_id, version, action, manual, when=None):
             "action": action,
             "manual": bool(manual),
         }
-        p = pathlib.Path(config.history_dir()) / "firmware-history.jsonl"
+        p = pathlib.Path(config.history_dir()) / config.history_filename("firmware-history")
         p.parent.mkdir(parents=True, exist_ok=True)
         with open(p, "a") as f:
             f.write(json.dumps(rec) + "\n")

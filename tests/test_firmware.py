@@ -358,7 +358,7 @@ class TestAuditLog(unittest.TestCase):
     def test_log_event_appends_jsonl(self):
         FW.log_event("S1", "fw", "v1", "assign", True, when="2026-06-27 12:00")
         FW.log_event("S2", "fw2", "v2", "update", False, when="2026-06-27 12:01")
-        p = pathlib.Path(C.history_dir()) / "firmware-history.jsonl"
+        p = pathlib.Path(C.history_dir()) / C.history_filename("firmware-history")
         lines = [json.loads(l) for l in p.read_text().splitlines()]
         self.assertEqual(len(lines), 2)
         self.assertEqual(lines[0]["serial"], "S1")
