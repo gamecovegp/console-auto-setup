@@ -100,7 +100,8 @@ _DL_FLAG_TIPS = {
     "grants": "Restore folder-access permissions so ES-DE and the emulators can read your "
               "ROM/BIOS folders without re-asking on first launch.",
     "homescreen": "Restore the homescreen layout — your app folders, icon/dock arrangement, "
-                  "wallpaper (and widgets, best-effort).",
+                  "wallpaper (and widgets, best-effort). Placed apps missing on the unit are "
+                  "installed first so every icon resolves.",
     "gamelauncher": "Save the game frontend's per-system emulator choices (PSX→DuckStation, "
                     "PSP→PPSSPP) and auto-apply them on Download — no manual setup per unit.",
 }
@@ -1330,7 +1331,8 @@ class App:
             "grants": "Capture the SAF folder-access grants (so ES-DE/emulators read the ROM/BIOS dirs) "
                       "into the golden (and restore them by default on Download).",
             "homescreen": "Capture this device's homescreen layout (icon/folder/dock arrangement + "
-                          "wallpaper) into the golden (and restore it by default on Download).",
+                          "wallpaper) — and bundle the installers for the apps you placed so every "
+                          "icon resolves on any unit model — into the golden (restored by default on Download).",
             "gamelauncher": "Capture the game frontend's per-system emulator picks (PSX→DuckStation, …) "
                             "into the golden (and apply them by default on Download).",
         }
