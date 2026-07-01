@@ -31,16 +31,12 @@ def _stamp():
     return datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
-def _profile_library_label(root, has_override, local_fallback, reachable, nas_default):
-    """'Library: …' status text for the profile library — mirrors the firmware line's reachability display.
-    With NO explicit override, library_root() silently falls back NAS->local when the share is unmounted; the
-    old label then showed that local path as ✓, hiding the dropped mount. Surface it instead: the intended NAS
-    location + the local dir it fell back to, so 'you're not on the server' is obvious, not a mystery."""
+def _profile_library_label(root, reachable):
+    """'Library: …' status line for the profile library, with a reachability marker (the drive may be
+    unplugged/unmounted)."""
     root = str(root)
-    if not has_override and nas_default and root == str(local_fallback):
-        return f"Library: {nas_default}   ✗ NAS unreachable (mount dropped?) — falling back to {root}"
     if not reachable:
-        return f"Library: {root}   ✗ not reachable (map the NAS drive?)"
+        return f"Library: {root}   ✗ not reachable (external drive unplugged?)"
     return f"Library: {root}   ✓"
 
 
@@ -162,7 +158,6 @@ class App:
         self.win = win
         self.adb_bin = adb_bin
         self.fb_bin = fb_bin
-        self._nas_autoconnect()                 # log into the NAS (if app creds saved) before resolving
         self.profiles_root = str(library_root())
         self.logq = queue.Queue()
         self.busy = False
@@ -204,8 +199,6 @@ class App:
         setm.add_command(label="Log folder…", command=self.choose_log_dir)
         setm.add_command(label="Firmware folder…", command=self.choose_firmware_dir)
         setm.add_command(label="Managed APKs…", command=self._open_apk_store)
-        setm.add_separator()
-        setm.add_command(label="NAS login…", command=self.nas_login_dialog)
         setm.add_separator()
         setm.add_command(label="Release selected unit (un-provision)…", command=self.release_selected)
         bar.add_cascade(label="Settings", menu=setm)
@@ -348,47 +341,39 @@ class App:
         threading.Thread(target=work_download, daemon=True).start()
 
     def _open_library(self):
-        """Open the storage location in the file manager. Opens the active library, but when the library
-        has fallen back to local (NAS not mounted here) it opens the NAS share itself so you still land on
-        192.168.100.227 — converting the Windows UNC path to an smb:// URL on Linux/macOS so the file
-        manager mounts it on the fly."""
-        from .config import NAS_DEFAULT, load_config
+        """Open the active library folder in the OS file manager."""
         target = str(self.profiles_root)
-        explicit = os.environ.get("CAS_PROFILES") or load_config().get("library")
-        if not explicit and target == str(APPDIR / "data" / "profiles"):
-            target = NAS_DEFAULT          # default fell back to local — take the user to the NAS instead
-        if sys.platform != "win32" and target.startswith("\\\\"):
-            target = "smb://" + target[2:].replace("\\", "/")   # \\host\share\.. -> smb://host/share/..
         if not self._open_path(target):
             messagebox.showwarning(
                 "CAS",
                 f"Couldn't open a file manager for:\n{target}\n\n"
-                "On Windows this opens in Explorer. On this machine, open it manually in your file "
-                "manager (paste the address above).")
+                "Open it manually in your file manager (paste the path above).")
 
     def choose_log_dir(self):
-        """Pick a shared folder (e.g. the mounted NAS) where the download/save run-history .jsonl logs are
-        written, so they centralize across benches WITHOUT moving the heavy goldens off the local library.
+        """Pick a shared folder (e.g. a mounted external/shared drive) where the download/save run-history
+        .jsonl logs are written, so they centralize across benches WITHOUT moving the heavy goldens off the
+        local library.
         Cancel offers to clear it (logs then fall back to the library root). Logs always fall back to local
         if the chosen folder is later unreachable, so a run is never lost."""
         cur = config.load_config().get("log_dir")
         d = filedialog.askdirectory(
-            title="Run-history log folder — shared/NAS folder for download/save logs  (Cancel to clear)")
+            title="Run-history log folder — a local/shared folder for download/save logs  (Cancel to clear)")
         if d:
             config.set_log_dir(d)
-            self.log(f"Run-history logs → {d}  (download-history.jsonl / save-history.jsonl).")
+            self.log(f"Run-history logs → {d}  (per-machine download/save run-history).")
         elif cur and messagebox.askyesno(
                 "CAS", "Clear the shared log folder? Run-history will go to the library root instead."):
             config.set_log_dir(None)
             self.log("Run-history logs → library root (shared log folder cleared).")
 
     def choose_firmware_dir(self):
-        """Pick the device-root-firmware library folder (e.g. the mounted NAS '…/CAS Profiles/_firmware'),
-        so the firmware catalog is shared across benches while the heavy goldens stay on a fast local
-        library. Cancel offers to clear it (firmware then lives under the library root)."""
+        """Pick the device-root-firmware library folder (e.g. a mounted external/shared drive's
+        '…/CAS Profiles/_firmware'), so the firmware catalog is shared across benches while the heavy
+        goldens stay on a fast local library. Cancel offers to clear it (firmware then lives under the
+        library root)."""
         cur = config.load_config().get("firmware_dir")
         d = filedialog.askdirectory(
-            title="Firmware library folder — shared/NAS folder for device root firmware  (Cancel to clear)")
+            title="Firmware library folder — a local/external folder for device root firmware  (Cancel to clear)")
         if d:
             config.set_firmware_dir(d)
             self.log(f"Firmware library → {d}")
@@ -400,9 +385,9 @@ class App:
             self.refresh_firmware()
 
     def choose_library(self):
-        """Pick the profile/golden library folder — e.g. the mounted NAS '…/CAS Profiles' so goldens are
-        shared across benches too. Cancel offers to CLEAR the override so the library follows the NAS default
-        when mounted (local fallback only when offline). Re-resolves profiles, firmware and devices after."""
+        """Pick the profile/golden library folder — e.g. the external drive '…/CAS Profiles' so goldens are
+        shared across benches too. Cancel offers to CLEAR the override so the library falls back to the local
+        default. Re-resolves profiles, firmware and devices after."""
         def _applied():
             self.profiles_root = str(library_root())
             self._update_lib_label()
@@ -411,34 +396,29 @@ class App:
             self.refresh_devices()
         cur = config.load_config().get("library")
         d = filedialog.askdirectory(
-            title="Profile/golden library folder — e.g. the mounted NAS '…/CAS Profiles'  (Cancel to clear)",
-            initialdir=(cur or config.nas_default_path()))
+            title="Profile/golden library folder — e.g. the external drive '…/CAS Profiles'  (Cancel to clear)",
+            initialdir=(cur or str(APPDIR / "data")))
         if d:
             config.set_library(d)
             _applied()
             self.log(f"Library → {d}")
         elif cur and messagebox.askyesno(
-                "CAS", "Clear the library override? The library will follow the NAS when it's mounted "
-                       "(local fallback only when offline)."):
+                "CAS", "Clear the library override? The library falls back to the local default "
+                       "(APPDIR/data/profiles)."):
             config.set_library(None)
             _applied()
             self.log(f"Library override cleared → {self.profiles_root}")
 
     def _open_path(self, target):
-        """Open a folder path or smb:// URL in the OS file manager. Returns True if a viewer was launched.
-        xdg-open often has no smb:// handler, so network URLs are routed straight to a file manager that
-        speaks smb (KDE Dolphin, GNOME Files, etc.)."""
+        """Open a local folder path in the OS file manager. Returns True if a viewer was launched."""
         try:
             if sys.platform == "win32":
-                os.startfile(target)                     # noqa: Explorer handles UNC + local paths
+                os.startfile(target)                     # noqa: Explorer handles local paths
                 return True
             if sys.platform == "darwin":
                 subprocess.Popen(["open", target])
                 return True
-            is_url = "://" in target
-            order = (["dolphin", "nautilus", "nemo", "caja", "pcmanfm-qt", "pcmanfm", "thunar"]
-                     if is_url else
-                     ["xdg-open", "dolphin", "nautilus", "nemo", "caja", "pcmanfm-qt", "pcmanfm", "thunar"])
+            order = ["xdg-open", "dolphin", "nautilus", "nemo", "caja", "pcmanfm-qt", "pcmanfm", "thunar"]
             for fm in order:
                 if shutil.which(fm):
                     subprocess.Popen([fm, target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -449,14 +429,12 @@ class App:
             return False
 
     def _about(self):
-        from .config import NAS_DEFAULT, load_config
+        from .config import load_config
         p = str(self.profiles_root)
         if os.environ.get("CAS_PROFILES") or load_config().get("library"):
-            where = "configured override"
-        elif p == NAS_DEFAULT or p.startswith("\\\\"):
-            where = "NAS (default)"
+            where = "configured library"
         elif p == str(APPDIR / "data" / "profiles"):
-            where = "local — NAS not mounted"
+            where = "local default"
         else:
             where = ""
         reach = "reachable ✓" if self._lib_reachable() else "not reachable ✗"
@@ -498,59 +476,6 @@ class App:
             dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
         except Exception:
             pass
-        dlg.grab_set()
-
-    def _nas_autoconnect(self):
-        """If NAS app creds are stored, authenticate before the library path is resolved (so the NAS
-        default resolves on a PC with no drive mapped). Fully best-effort — never blocks startup hard."""
-        try:
-            from .config import get_nas_credentials, nas_connect
-            if get_nas_credentials():
-                nas_connect()
-        except Exception:
-            pass
-
-    def nas_login_dialog(self):
-        """Sign in to the NAS with the dedicated CAS app account (stored obfuscated in cas-config.json)."""
-        from .config import get_nas_credentials, set_nas_credentials, nas_connect
-        cur = get_nas_credentials() or ("", "")
-        dlg = tk.Toplevel(self.win); dlg.title("NAS login")
-        dlg.transient(self.win); dlg.resizable(False, False)
-        frm = ttk.Frame(dlg, padding=16); frm.pack(fill="both", expand=True)
-        ttk.Label(frm, text="Sign in to the NAS with the CAS app account.\n"
-                            "Saved in cas-config.json (obfuscated) so this PC auto-connects next launch.",
-                  justify="left").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
-        ttk.Label(frm, text="Username").grid(row=1, column=0, sticky="e", padx=(0, 8), pady=4)
-        uvar = tk.StringVar(value=cur[0])
-        ttk.Entry(frm, textvariable=uvar, width=30).grid(row=1, column=1, sticky="w")
-        ttk.Label(frm, text="Password").grid(row=2, column=0, sticky="e", padx=(0, 8), pady=4)
-        pvar = tk.StringVar(value=cur[1])
-        ttk.Entry(frm, textvariable=pvar, width=30, show="•").grid(row=2, column=1, sticky="w")
-        status = ttk.Label(frm, text="", foreground="#666")
-        status.grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
-
-        def save():
-            set_nas_credentials(uvar.get().strip(), pvar.get())
-            status.config(text="connecting…"); dlg.update_idletasks()
-            ok = nas_connect()
-            self.profiles_root = str(library_root())
-            self._update_lib_label(); self.refresh_profiles(); self.refresh_firmware()
-            if ok:
-                self.log("NAS connected via the app account.")
-                dlg.destroy()
-            elif self._lib_reachable():
-                # connect didn't establish a NAS mount, but a library is reachable (the LOCAL fallback) —
-                # say so plainly instead of claiming the NAS connected.
-                self.log("NAS mount not established — using the local library. Firmware on the NAS won't "
-                         "show until it's mounted.")
-                dlg.destroy()
-            else:
-                status.config(text="Saved, but couldn't connect — check the username/password and that "
-                                   "192.168.100.227 is reachable.")
-        btns = ttk.Frame(frm); btns.grid(row=4, column=0, columnspan=2, pady=(12, 0))
-        ttk.Button(btns, text="Save & connect", command=save).pack(side="left", padx=4)
-        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side="left", padx=4)
-        dlg.bind("<Escape>", lambda e: dlg.destroy())
         dlg.grab_set()
 
     # ---------- layout ----------
@@ -665,7 +590,8 @@ class App:
         ttk.Label(root_tab, text="Firmware library (device root firmware)",
                   font=("", 9, "bold")).pack(anchor="w")
         # Where the firmware catalog resolves + reachability (mirrors the profile Library line above), so an
-        # empty dropdown is explained — e.g. the NAS _firmware dir unmounted, falling back to a local dir.
+        # empty dropdown is explained — e.g. the library drive's _firmware dir unmounted, falling back to a
+        # local dir.
         self.fw_lib_var = tk.StringVar()
         ttk.Label(root_tab, textvariable=self.fw_lib_var, foreground="#555",
                   wraplength=440, justify="left").pack(anchor="w", pady=(1, 2))
@@ -939,7 +865,7 @@ class App:
     def refresh_profiles(self):
         self._update_lib_label()
         if not self._lib_reachable():
-            self.log(f"Library not reachable: {self.profiles_root} — is the NAS drive mapped? "
+            self.log(f"Library not reachable: {self.profiles_root} — is the library drive connected? "
                      "Use 'Library…' to fix the path.")
         names = [p.name for p in P.list_profiles(self.profiles_root)]
         self.prof_combo["values"] = names
@@ -1609,9 +1535,10 @@ class App:
 
     def refresh_firmware(self):
         """Populate the firmware dropdown with every firmware id in the library, and show WHERE the catalog
-        resolves + whether it's reachable — so an empty list is explained instead of silent. When a NAS
-        firmware dir is configured but currently unmounted, firmware_dir() silently falls back to a local
-        dir; we surface that ('points at the NAS, but it's unreachable') so it's clear, not a mystery."""
+        resolves + whether it's reachable — so an empty list is explained instead of silent. When a shared
+        external firmware dir is configured but currently unmounted, firmware_dir() silently falls back to
+        a local dir; we surface that ('points at the library drive, but it's unreachable') so it's clear,
+        not a mystery."""
         try:
             root = FW.firmware_root()
         except Exception:
@@ -1628,7 +1555,7 @@ class App:
             self.fw_var.set(choices[0])
         if not hasattr(self, "fw_lib_var"):
             return
-        configured = config.load_config().get("firmware_dir")    # an explicit (e.g. NAS) override, if any
+        configured = config.load_config().get("firmware_dir")    # an explicit (e.g. shared drive) override, if any
         def _isdir(p):
             try:
                 return bool(p) and pathlib.Path(p).is_dir()
@@ -1636,10 +1563,10 @@ class App:
                 return False
         if configured and not _isdir(configured):
             # the server firmware dir is configured but not mounted right now → using the local fallback
-            self.fw_lib_var.set(f"Library: {configured}   ✗ NAS unreachable (mount dropped?) — "
+            self.fw_lib_var.set(f"Library: {configured}   ✗ library drive unreachable (mount dropped?) — "
                                 f"falling back to {root}")
         elif not _isdir(root):
-            self.fw_lib_var.set(f"Library: {root}   ✗ not reachable (map the NAS drive?)")
+            self.fw_lib_var.set(f"Library: {root}   ✗ not reachable (connect the library drive?)")
         elif not ids:
             self.fw_lib_var.set(f"Library: {root}   ✓ (no firmware yet)")
         else:
@@ -1721,7 +1648,7 @@ class App:
     def _open_apk_store(self):
         """Manage the server-side APK store (config.apk_store_dir()): list packages, Add/Update a build
         (sets it CURRENT — every config that lists the app then deploys it), or Remove (soft — clears
-        current, keeps files). Shared across ALL profiles; uploads go to the NAS by default."""
+        current, keeps files). Shared across ALL profiles; uploads go to the library by default."""
         store = config.apk_store_dir()
         dlg = tk.Toplevel(self.win); dlg.title("Managed APKs (server store)"); dlg.transient(self.win)
         dlg.grab_set()
@@ -1990,14 +1917,12 @@ class App:
             return False
 
     def _update_lib_label(self):
-        override = bool(os.environ.get("CAS_PROFILES") or config.load_config().get("library"))
-        self.lib_var.set(_profile_library_label(
-            self.profiles_root, override, APPDIR / "data" / "profiles",
-            self._lib_reachable(), config.NAS_DEFAULT))
+        self.lib_var.set(_profile_library_label(self.profiles_root, self._lib_reachable()))
 
     def _update_golden_status(self):
         """Show the selected profile's golden: none saved, or its size + an estimated download time
-        (averaged from past Downloads). Sizing runs off-thread so a NAS library never freezes the UI."""
+        (averaged from past Downloads). Sizing runs off-thread so a slow external library never freezes
+        the UI."""
         if not hasattr(self, "golden_var"):
             return
         name = self.prof_var.get()
@@ -2047,8 +1972,8 @@ class App:
 
     def _store_path(self, p):
         """How a picked Root image is recorded in profile.meta: APPDIR-relative when it lives inside the app
-        bundle (portable across machines + the shared NAS profile library), else the absolute path. Both
-        forms resolve via profiles.resolve_asset at root time."""
+        bundle (portable across machines + the shared external profile library), else the absolute path.
+        Both forms resolve via profiles.resolve_asset at root time."""
         p = P.pathlib.Path(p).resolve()
         try:
             return str(p.relative_to(P.pathlib.Path(APPDIR).resolve()))

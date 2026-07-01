@@ -576,32 +576,33 @@ def provision_all(make_adb, devices, root="profiles", log=print, profile=None, p
             return ("error", str(e))
     t0 = time.monotonic()
     results = _each_device(devices, worker, parallel)
-    _log_download_run(root, results, time.monotonic() - t0, log)   # whole-run record -> the NAS library
+    _log_download_run(root, results, time.monotonic() - t0, log)   # whole-run record -> the library's history
     return results
 
 
-def _append_history(root, fname, rec, log=print, summary=""):
-    """Append ONE JSON-line record to <history_dir>/<fname> — the centralized run history. Destination is the
-    shared NAS `log_dir` when configured + reachable (unified cross-bench logs), else the library root
-    (`root`). Best-effort: a write failure WARNS, never aborts; the summary shows WHERE it landed."""
+def _append_history(root, stem, rec, log=print, summary=""):
+    """Append ONE JSON-line record to <history_dir>/<stem>.<machine>.jsonl — the per-machine run history.
+    Namespaced by machine so benches syncing the library by copy-paste never clobber each other's logs.
+    Destination is the configured+reachable `log_dir` override else the library root (`root`). Best-effort:
+    a write failure WARNS, never aborts; the summary shows WHERE it landed."""
     import json
     from . import config
     dest = config.history_dir(default=root)
-    path = pathlib.Path(dest) / fname
+    path = pathlib.Path(dest) / config.history_filename(stem)
     try:
         with open(path, "a", encoding="utf-8") as f:        # one JSON line per event (small -> ~atomic append)
             f.write(json.dumps(rec) + "\n")
         if summary:
-            log(f"{summary}  → {path}")                      # show the exact destination (NAS vs local)
+            log(f"{summary}  → {path}")                      # show the exact destination (shared vs local)
         return True
     except OSError as e:
-        log(f"warning: could not write {fname} to {dest} ({e}) — is the log dir / NAS reachable?")
+        log(f"warning: could not write {path.name} to {dest} ({e}) — is the log dir / library drive reachable?")
         return False
 
 
 def _log_download_run(root, results, elapsed, log=print):
-    """Append ONE whole-Download record to <library>/download-history.jsonl. Captures the run's TOTAL length
-    (bytes + seconds) and every device + its profile."""
+    """Append ONE whole-Download record to the per-machine download-history.<machine>.jsonl. Captures the
+    run's TOTAL length (bytes + seconds) and every device + its profile."""
     import datetime
     devs, total = [], 0
     for serial, (status, detail) in results.items():
@@ -624,8 +625,8 @@ def _log_download_run(root, results, elapsed, log=print):
         "failed": sum(1 for d in devs if d["status"] in ("fail", "error")),
         "devices": devs,
     }
-    _append_history(root, "download-history.jsonl", rec, log,
-                    summary=(f"download run logged → download-history.jsonl: {len(devs)} device(s), "
+    _append_history(root, "download-history", rec, log,
+                    summary=(f"download run logged: {len(devs)} device(s), "
                              f"{total // 1048576} MB total in {rec['total_secs']:.0f}s"))
 
 
@@ -715,16 +716,16 @@ def capture_to_pc(adb, name, stamp, root="profiles", log=print, dry_pull=False):
         # whose placeholder manifest has no app lines) — so the Apps tab shows the device's apps ticked
         # and Download has apps to restore. A real, operator-edited selection is preserved.
         seed_default_manifest(pdir, name)
-    if not dry_pull:                                        # log the Save to the centralized NAS history
+    if not dry_pull:                                        # log the Save to the per-machine save-history
         import datetime
         b = P.Profile(pdir).golden_size()
-        _append_history(root, "save-history.jsonl", {
+        _append_history(root, "save-history", {
             "when": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "profile": name,
             "serial": getattr(adb, "serial", None),
             "bytes": b,
             "secs": round(time.monotonic() - t0, 1),
-        }, log, summary=f"save logged → save-history.jsonl: {name} ({b // 1048576} MB)")
+        }, log, summary=f"save logged: {name} ({b // 1048576} MB)")
     log(f"==> captured golden into profiles/{name} (prev kept for rollback)")
     return True
 

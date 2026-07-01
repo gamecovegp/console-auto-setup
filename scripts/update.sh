@@ -11,9 +11,9 @@
 #  provision/root/firmware, data/Apps) are NOT in git; they live in THIS folder and are
 #  linked into the freshly built dist/cas. data/Apps/gamecove-companion.apk is the GameCove
 #  Companion app installed on every unit during provisioning (install_companion).
-#  The golden library is normally the
-#  NAS, so a local profiles/ is optional. (windows-kit holds Windows adb.exe —
-#  on Linux/macOS adb comes from PATH or a platform-tools/ dir, so it's skipped.)
+#  The golden library = the folder set in Settings -> Library folder... (else
+#  local profiles/). (windows-kit holds Windows adb.exe — on Linux/macOS adb
+#  comes from PATH or a platform-tools/ dir, so it's skipped.)
 # ============================================================================
 set -e
 cd "$(dirname "$0")/.."   # script lives in scripts/; operate from the repo root
@@ -48,4 +48,4 @@ link "data/ES-DE/downloaded_media"
 link data/Apps                      # gamecove-companion.apk -> installed on every unit (install_companion)
 
 echo "=== DONE — updated + rebuilt.  Run:  $DEST/cas-gui ==="
-echo "  (golden library = NAS when mounted; else local profiles/)"
+echo "  (golden library = the folder set in Settings -> Library folder...; else local profiles/)"
