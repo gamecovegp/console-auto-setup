@@ -213,3 +213,20 @@ install_apks(){
   rm -rf "$_ia_stage"
   return $_ia_rc
 }
+# homescreen_bundle_apps <launcher_data_dir> <payload_dir> <launcher_pkg> — SELF-CONTAINED LAYOUT: bundle
+# the installer for every app the layout references so each icon resolves on ANY target model. Skips the
+# launcher itself and apps the per-app loop already captured ($payload/<pkg>/apk) — no duplicate APKs.
+# Copies base+splits from `pm path`. Prints the count of bundled apps. Additive: a copy miss is silent.
+homescreen_bundle_apps(){
+  _hb_ldir="$1"; _hb_pd="$2"; _hb_lp="$3"; _hb_hsa="$_hb_pd/homescreen/apps"; _hb_n=0
+  for _hb_p in $(homescreen_apps "$_hb_ldir"); do
+    [ "$_hb_p" = "$_hb_lp" ] && continue
+    [ -d "$_hb_pd/$_hb_p/apk" ] && continue
+    _hb_paths="$(pm path "$_hb_p" 2>/dev/null | sed 's/^package://')"
+    [ -n "$_hb_paths" ] || continue
+    mkdir -p "$_hb_hsa/$_hb_p"
+    for _hb_ap in $_hb_paths; do cp "$_hb_ap" "$_hb_hsa/$_hb_p/" 2>/dev/null; done
+    if [ -n "$(ls -A "$_hb_hsa/$_hb_p" 2>/dev/null)" ]; then _hb_n=$((_hb_n+1)); else rmdir "$_hb_hsa/$_hb_p" 2>/dev/null; fi
+  done
+  echo "$_hb_n"
+}

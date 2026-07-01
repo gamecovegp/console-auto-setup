@@ -28,4 +28,31 @@ got2="$(homescreen_apps "$ld2")"; rc2=$?
 got3="$(homescreen_apps "$tmp/does-not-exist")"; rc3=$?
 [ -z "$got3" ] && [ "$rc3" -eq 0 ] || { echo "FAIL(missing dir): [$got3] rc=$rc3"; fail=1; }
 
+# === homescreen_bundle_apps: bundle referenced apps' APKs, skip launcher + already-captured ==========
+apkroot="$tmp/apks"; mkdir -p "$apkroot"
+: > "$apkroot/foo-base.apk"; : > "$apkroot/bar-base.apk"; : > "$apkroot/launch-base.apk"
+# pm path stub: map each pkg to a scratch APK file that exists
+pm(){ case "$1" in
+        path) case "$2" in
+                com.foo)         echo "package:$apkroot/foo-base.apk";;
+                com.bar)         echo "package:$apkroot/bar-base.apk";;
+                com.launch.home) echo "package:$apkroot/launch-base.apk";;
+                *) return 1;; esac;;
+        *) return 0;; esac; }
+
+bld="$tmp/bld/com.launch.home"; mkdir -p "$bld/databases"
+printf '%s\n' \
+  '#Intent;component=com.foo/.Main;end' \
+  'package=com.bar;' \
+  '#Intent;component=com.launch.home/.Home;end' \
+  '#Intent;component=com.nopath/.X;end' > "$bld/databases/launcher.db"   # com.nopath: pm path fails -> skipped
+pay="$tmp/payload"; mkdir -p "$pay/com.bar/apk"                          # com.bar already captured -> skipped
+n="$(homescreen_bundle_apps "$bld" "$pay" "com.launch.home")"
+[ "$n" = "1" ] || { echo "FAIL(bundle count): [$n]"; fail=1; }
+[ -f "$pay/homescreen/apps/com.foo/foo-base.apk" ] || { echo "FAIL(bundle: com.foo not bundled)"; fail=1; }
+[ ! -d "$pay/homescreen/apps/com.bar" ]         || { echo "FAIL(bundle: com.bar should be skipped, already captured)"; fail=1; }
+[ ! -d "$pay/homescreen/apps/com.launch.home" ] || { echo "FAIL(bundle: launcher should be skipped)"; fail=1; }
+[ ! -d "$pay/homescreen/apps/com.nopath" ]      || { echo "FAIL(bundle: no-path pkg should be skipped)"; fail=1; }
+unset -f pm
+
 [ "$fail" -eq 0 ] && { echo "PASS: homescreen_apps"; exit 0; } || exit 1

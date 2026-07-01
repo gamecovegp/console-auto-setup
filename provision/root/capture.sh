@@ -142,6 +142,13 @@ else
       || tar -cf "$HS/launcher_data.tar" -C /data/data "$LP" 2>/dev/null
     if tar -tf "$HS/launcher_data.tar" >/dev/null 2>&1; then ok "captured homescreen launcher: $LP"
     else warn "homescreen launcher_data.tar looks corrupt ($LP) — homescreen will be skipped on restore"; rm -f "$HS/launcher_data.tar"; fi
+    # SELF-CONTAINED LAYOUT: bundle installers for the apps placed on the homescreen so every icon resolves
+    # on ANY unit model (a placed app absent on the unit is installed on restore, then the favorites DB is
+    # applied). Additive — never bumps CFAIL. Only when the layout was actually captured.
+    if [ -f "$HS/launcher_data.tar" ]; then
+      _hs_n="$(homescreen_bundle_apps "/data/data/$LP" "$P" "$LP")"
+      [ "${_hs_n:-0}" -gt 0 ] 2>/dev/null && ok "homescreen: bundled $_hs_n placed-app installer(s) so icons resolve on any model"
+    fi
   else
     warn "no home launcher resolved (or it has no data dir) — homescreen layout NOT captured"
   fi
