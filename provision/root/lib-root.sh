@@ -122,6 +122,17 @@ home_launcher(){
   cmd package resolve-activity -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null \
     | sed -n 's/.*packageName=\([^ }]*\).*/\1/p' | head -1
 }
+# The set of packages a homescreen layout REFERENCES — for self-containment, so every placed icon can
+# resolve on any unit model. Intent strings in the Launcher3-family favorites DB are stored as plaintext
+# (component=<pkg>/<cls> and package=<pkg>), so a launcher-agnostic token scan works without sqlite3 and
+# degrades to empty on an exotic binary blob. PURE: no pm/device dependency (caller filters by pm path).
+# homescreen_apps <launcher_data_dir> -> deduped pkg names on stdout (launcher itself NOT excluded here).
+homescreen_apps(){
+  _ha_dir="$1"; [ -d "$_ha_dir" ] || return 0
+  { grep -rahoE 'component=[A-Za-z0-9._]+/' "$_ha_dir" 2>/dev/null | sed 's/^component=//; s#/.*##'
+    grep -rahoE 'package=[A-Za-z0-9._]+'     "$_ha_dir" 2>/dev/null | sed 's/^package=//'
+  } | sort -u
+}
 # The GAME FRONTEND (holds per-system emulator picks) — DISTINCT from the Android HOME app (home_launcher).
 # Curated fallback list; the probe below handles OEM rebrands that keep the ES-DE-fork data shape.
 GAME_LAUNCHERS="com.handheld.launcher"
