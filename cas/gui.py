@@ -410,20 +410,15 @@ class App:
             self.log(f"Library override cleared → {self.profiles_root}")
 
     def _open_path(self, target):
-        """Open a folder path or smb:// URL in the OS file manager. Returns True if a viewer was launched.
-        xdg-open often has no smb:// handler, so network URLs are routed straight to a file manager that
-        speaks smb (KDE Dolphin, GNOME Files, etc.)."""
+        """Open a local folder path in the OS file manager. Returns True if a viewer was launched."""
         try:
             if sys.platform == "win32":
-                os.startfile(target)                     # noqa: Explorer handles UNC + local paths
+                os.startfile(target)                     # noqa: Explorer handles local paths
                 return True
             if sys.platform == "darwin":
                 subprocess.Popen(["open", target])
                 return True
-            is_url = "://" in target
-            order = (["dolphin", "nautilus", "nemo", "caja", "pcmanfm-qt", "pcmanfm", "thunar"]
-                     if is_url else
-                     ["xdg-open", "dolphin", "nautilus", "nemo", "caja", "pcmanfm-qt", "pcmanfm", "thunar"])
+            order = ["xdg-open", "dolphin", "nautilus", "nemo", "caja", "pcmanfm-qt", "pcmanfm", "thunar"]
             for fm in order:
                 if shutil.which(fm):
                     subprocess.Popen([fm, target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
