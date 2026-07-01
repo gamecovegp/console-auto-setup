@@ -56,18 +56,23 @@ n="$(homescreen_bundle_apps "$bld" "$pay" "com.launch.home")"
 unset -f pm
 
 # === homescreen_install_missing: install only ABSENT placed apps (additive) =========================
+# Stub pm + install_apks inside a SUBSHELL so they stay local — never clobber the REAL install_apks that
+# lib-root.sh sourced (bash has one global function namespace; unset -f would break re-runs of the suite).
 pay2="$tmp/payload2"; mkdir -p "$pay2/homescreen/apps/com.present" "$pay2/homescreen/apps/com.absent"
 : > "$pay2/homescreen/apps/com.present/base.apk"; : > "$pay2/homescreen/apps/com.absent/base.apk"
-pm(){ case "$1" in
-        path) case "$2" in com.present) return 0;; *) return 1;; esac;;   # only com.present is installed
-        *) return 0;; esac; }
 INSTALL_LOG="$tmp/install.log"; : > "$INSTALL_LOG"
-install_apks(){ echo "$2" >> "$INSTALL_LOG"; return 0; }                    # stub: record which pkg we install
-homescreen_install_missing "$pay2" || { echo "FAIL(install_missing rc)"; fail=1; }
+(
+  pm(){ case "$1" in
+          path) case "$2" in com.present) return 0;; *) return 1;; esac;;   # only com.present is installed
+          *) return 0;; esac; }
+  install_apks(){ echo "$2" >> "$INSTALL_LOG"; return 0; }                   # stub: record which pkg we install
+  homescreen_install_missing "$pay2" >/dev/null 2>&1 || exit 1
+) || { echo "FAIL(install_missing rc)"; fail=1; }
 [ "$(cat "$INSTALL_LOG" 2>/dev/null)" = "com.absent" ] || { echo "FAIL(install_missing: wrong set): [$(tr '\n' ' ' < "$INSTALL_LOG")]"; fail=1; }
-unset -f pm install_apks
 
-# no homescreen/apps dir -> rc 0, no error
-homescreen_install_missing "$tmp/payload" || { echo "FAIL(install_missing: no-apps dir rc)"; fail=1; }
+# no homescreen/apps dir -> early-return, rc 0, NO output (fresh EMPTY payload actually exercises the guard)
+mkdir -p "$tmp/payload3"
+outNM="$(homescreen_install_missing "$tmp/payload3" 2>&1)"; rcNM=$?
+[ -z "$outNM" ] && [ "$rcNM" -eq 0 ] || { echo "FAIL(install_missing: no-apps dir): [$outNM] rc=$rcNM"; fail=1; }
 
 [ "$fail" -eq 0 ] && { echo "PASS: homescreen_apps"; exit 0; } || exit 1
