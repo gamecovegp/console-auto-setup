@@ -21,7 +21,7 @@ class FakeRunner:
     def __init__(self, model="Odin2 Mini", golden=False, root=True, boot="1", sd=True,
                  push_ok=True, pull_ok=True, su_blocked=False, slot="_a", first_api="33",
                  device_owner=False, do_set_ok=True, do_restrict=True, release_clears=True,
-                 restrict_in="device_policy"):
+                 restrict_in="device_policy", do_set_err=None):
         self.calls = []
         self.model, self.golden, self.root, self.boot, self.sd = model, golden, root, boot, sd
         self.push_ok, self.pull_ok = push_ok, pull_ok
@@ -34,6 +34,7 @@ class FakeRunner:
         self.slot, self.first_api = slot, first_api
         self._owner = device_owner          # current device-owner state (mutated by a release broadcast)
         self.do_set_ok, self.do_restrict, self.release_clears = do_set_ok, do_restrict, release_clears
+        self.do_set_err = do_set_err        # override the failure stderr (e.g. an 'Unknown admin' error)
         # which dumpsys surfaces the applied DO restrictions: 'device_policy' (older Android) or 'user'
         # (Android 14+ keeps the per-admin device_policy userRestrictions field EMPTY and lists them under
         # dumpsys user 'Effective/global restrictions' instead). Only matters when do_restrict is True.
@@ -73,7 +74,8 @@ class FakeRunner:
                 if self.do_set_ok:
                     self._owner = True
                     return 0, "Success: Device owner set to package\n", ""
-                return 255, "", "java.lang.IllegalStateException: Not allowed to set the device owner\n"
+                return 255, "", (self.do_set_err
+                                 or "java.lang.IllegalStateException: Not allowed to set the device owner\n")
             if tail.startswith("dumpsys device_policy"):
                 shown = self._owner and self.do_restrict and self.restrict_in == "device_policy"
                 return 0, ("no_factory_reset no_safe_boot\n" if shown else "\n"), ""
@@ -167,6 +169,21 @@ class TestAdb(unittest.TestCase):
         Adb(serial="XYZ", runner=r).getprop("ro.product.model")
         self.assertIn("-s", r.calls[0])
         self.assertIn("XYZ", r.calls[0])
+
+    def test_raw_honors_cancel_event(self):
+        """Cancel must abort plain adb ops too (push/shell/raw) — not just the *_stream calls — so a
+        Download (whose big phase is adb push, via raw) actually stops when the operator hits Cancel."""
+        import threading, time
+        from cas.adb import Adb, is_cancelled
+        ev = threading.Event()
+        a = Adb(adb="sleep", cancel=ev)                 # real subprocess_runner; `adb` stands in as `sleep`
+        out = {}
+        th = threading.Thread(target=lambda: out.__setitem__("r", a.raw("10")))   # `sleep 10`
+        th.start()
+        time.sleep(0.4); ev.set()                        # operator cancels shortly after it starts
+        th.join(timeout=6)
+        self.assertFalse(th.is_alive(), "raw() ignored cancel — the child kept running")
+        self.assertTrue(is_cancelled(out["r"][0]), f"expected CANCELLED rc, got {out['r'][0]}")
 
     def test_sd_info(self):
         self.assertIn("9C33-6BBD", Adb(runner=FakeRunner(sd=True)).sd_info())
@@ -487,9 +504,123 @@ class TestProfiles(unittest.TestCase):
             files = P.resolve_app_apk("com.split", None, store)
             self.assertEqual(sorted(f.name for f in files), ["base.apk", "split_config.apk"])
 
-    def test_download_rows_appends_store_only_apk_on_config_off(self):
-        rows = P.download_rows(["a", "b"], ["b", "store1"], saved={"a": (True, False)})
-        self.assertEqual(rows, {"a": (True, False), "b": (True, True), "store1": (True, False)})
+    def test_download_rows_golden_drives_defaults(self):
+        # 'a' captured WITH apk+config, 'b' apk-only (apk, no config), 'store1' store-only (managed).
+        rows, cfg_disabled = P.download_rows(["a", "b"], ["b", "store1"],
+                                             has_apk={"a": True, "b": True},
+                                             has_config={"a": True, "b": False})
+        self.assertEqual(rows, {"a": (True, True),         # captured apk + config -> APK on, Config on
+                                "b": (True, False),        # captured apk-only -> APK on, Config off
+                                "store1": (False, False)}) # store-only -> APK OFF (opt-in), no config
+        # Config box is disabled wherever the golden captured nothing to restore.
+        self.assertEqual(cfg_disabled, {"b", "store1"})
+
+    def test_download_rows_apk_default_follows_captured_apk(self):
+        # 'a' has a captured apk; 'b' is config-only (config captured, NO apk — e.g. a sideloaded emulator).
+        rows, cfg_disabled = P.download_rows(["a", "b"], [],
+                                             has_apk={"a": True, "b": False},
+                                             has_config={"a": True, "b": True})
+        self.assertEqual(rows["a"], (True, True))
+        self.assertEqual(rows["b"], (False, True))   # no captured apk -> APK off (you sideload it); Config on
+        self.assertEqual(cfg_disabled, set())        # both have captured config
+
+    def test_default_capture_config_only_for_sideloaded_pkg(self):
+        # Both PS2 builds (.android = AetherSX2, .tturnip = NetherSX2-Turnip) are sideloaded -> config only.
+        sel = P.default_capture_selection(["xyz.aethersx2.android", "xyz.aethersx2.tturnip",
+                                           "com.github.stenzek.duckstation"])
+        self.assertEqual(sel["xyz.aethersx2.android"], (False, True))      # config-only
+        self.assertEqual(sel["xyz.aethersx2.tturnip"], (False, True))      # config-only (now recognised)
+        self.assertEqual(sel["com.github.stenzek.duckstation"], (True, True))  # normal emulator: both axes
+
+    def test_initial_capture_excludes_apps_not_on_device(self):
+        # A saved manifest (from another unit) lists AetherSX2, but THIS device only has NetherSX2. The Save
+        # list must reflect what's actually installed — never show a saved app that isn't on the scanned unit.
+        sel = P.initial_capture_selection(
+            ["xyz.aethersx2.tturnip"],                                   # device has only NetherSX2
+            saved_axes={"xyz.aethersx2.android": (True, True),          # manifest lists AetherSX2 (NOT installed)
+                        "xyz.aethersx2.tturnip": (False, True)},
+            saved_flags={})
+        self.assertIn("xyz.aethersx2.tturnip", sel)                     # installed -> shown
+        self.assertNotIn("xyz.aethersx2.android", sel)                  # not installed -> NOT shown
+
+    def test_initial_capture_forces_apk_off_for_config_only(self):
+        # A stale saved manifest with the PS2 app as APK+Config must NOT re-enable APK capture — the
+        # sideloaded-build policy (config only) wins so the operator never bundles the PS2 APK by accident.
+        sel = P.initial_capture_selection(
+            ["xyz.aethersx2.android"],
+            saved_axes={"xyz.aethersx2.android": (True, True)},   # old manifest had both axes
+            saved_flags={})
+        self.assertEqual(sel["xyz.aethersx2.android"], (False, True))   # APK forced off; config kept
+
+    def test_has_captured_apk_reflects_payload_apk(self):
+        with tempfile.TemporaryDirectory() as t:
+            prof = _mk(t, "p", apps=["com.withapk"])           # _mk seeds apk/base.apk
+            pay = prof.payload
+            (pay / "com.cfgonly").mkdir(parents=True)          # config captured, NO apk dir
+            (pay / "com.cfgonly" / "data.tar").write_text("x")
+            self.assertTrue(prof.has_captured_apk("com.withapk"))
+            self.assertFalse(prof.has_captured_apk("com.cfgonly"))
+            self.assertFalse(prof.has_captured_apk("org.store.only"))
+
+    def test_has_captured_config_reflects_captured_data(self):
+        with tempfile.TemporaryDirectory() as t:
+            prof = _mk(t, "p", apps=["com.withcfg"])       # _mk seeds apk + data.tar
+            pay = prof.payload
+            (pay / "com.apkonly" / "apk").mkdir(parents=True)   # apk captured, NO data.tar
+            (pay / "com.apkonly" / "apk" / "base.apk").write_text("x")
+            (pay / "com.adataonly").mkdir(parents=True)         # only external data captured
+            (pay / "com.adataonly" / "adata.tar").write_text("x")
+            self.assertTrue(prof.has_captured_config("com.withcfg"))
+            self.assertFalse(prof.has_captured_config("com.apkonly"))
+            self.assertTrue(prof.has_captured_config("com.adataonly"))   # adata.tar counts as config
+            self.assertFalse(prof.has_captured_config("org.store.only"))  # no payload module at all
+
+
+class TestApkPackageId(unittest.TestCase):
+    """profiles.apk_package_id reads the <manifest package='…'> id straight from an APK's binary
+    AndroidManifest.xml (pure-Python AXML parse, no aapt) — so Add-APK can auto-fill the package id."""
+
+    @staticmethod
+    def _axml(pkg):
+        """A minimal but spec-valid binary AndroidManifest.xml declaring `package=pkg` (UTF-16 pool)."""
+        import struct
+        strs = ["manifest", "package", pkg]
+        offsets = b""; body = b""
+        for s in strs:
+            offsets += struct.pack("<I", len(body))
+            body += struct.pack("<H", len(s)) + s.encode("utf-16-le") + b"\x00\x00"
+        while len(body) % 4:
+            body += b"\x00"
+        strings_start = 28 + len(offsets)
+        pool = struct.pack("<HHIIIIII", 0x0001, 28, strings_start + len(body), len(strs), 0, 0,
+                           strings_start, 0) + offsets + body
+        attr = struct.pack("<IIIHBBI", 0xFFFFFFFF, 1, 2, 8, 0, 0x03, 2)
+        ext = struct.pack("<IIHHHHHH", 0xFFFFFFFF, 0, 0x14, 0x14, 1, 0, 0, 0)
+        elem_body = struct.pack("<II", 1, 0xFFFFFFFF) + ext + attr
+        start = struct.pack("<HHI", 0x0102, 0x10, 8 + len(elem_body)) + elem_body
+        return struct.pack("<HHI", 0x0003, 8, 8 + len(pool) + len(start)) + pool + start
+
+    def _apk(self, tmp, pkg):
+        import zipfile
+        p = pathlib.Path(tmp) / "x.apk"
+        with zipfile.ZipFile(p, "w") as z:
+            z.writestr("AndroidManifest.xml", self._axml(pkg))
+        return p
+
+    def test_reads_package_from_manifest(self):
+        with tempfile.TemporaryDirectory() as t:
+            self.assertEqual(P.apk_package_id(self._apk(t, "com.example.app")), "com.example.app")
+            self.assertEqual(P.apk_package_id(self._apk(t, "xyz.aethersx2.tturnip")), "xyz.aethersx2.tturnip")
+
+    def test_none_on_non_apk_or_missing_manifest(self):
+        with tempfile.TemporaryDirectory() as t:
+            import zipfile
+            junk = pathlib.Path(t) / "junk.bin"; junk.write_bytes(b"not a zip at all")
+            self.assertIsNone(P.apk_package_id(junk))
+            nomani = pathlib.Path(t) / "nomani.apk"
+            with zipfile.ZipFile(nomani, "w") as z:
+                z.writestr("classes.dex", b"x")
+            self.assertIsNone(P.apk_package_id(nomani))
 
 
 class TestConfig(unittest.TestCase):
@@ -502,6 +633,29 @@ class TestConfig(unittest.TestCase):
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+
+    def test_linux_cifs_mountpoint_discovered_from_proc_mounts(self):
+        # The NAS is a kernel CIFS mount (//192.168.100.227/01 GAMECOVE at /mnt/gamecove), which the gvfs
+        # check misses. Discover it from /proc/mounts (octal-unescaping the space in the share name).
+        from cas import config as C
+        with tempfile.TemporaryDirectory() as t:
+            mnt = pathlib.Path(t) / "gamecove"; mnt.mkdir()
+            mounts = pathlib.Path(t) / "mounts"
+            mounts.write_text(
+                "sysfs /sys sysfs rw 0 0\n"
+                f"//192.168.100.227/01\\040GAMECOVE {mnt} cifs rw,vers=3.0,username=x 0 0\n")
+            self.assertEqual(
+                C._linux_cifs_mountpoint("192.168.100.227", "01 GAMECOVE", mounts_path=str(mounts)),
+                str(mnt))
+
+    def test_linux_cifs_mountpoint_none_when_no_match(self):
+        from cas import config as C
+        with tempfile.TemporaryDirectory() as t:
+            mounts = pathlib.Path(t) / "mounts"
+            mounts.write_text("//192.168.100.227/01\\040GAMECOVE /mnt/gc ext4 rw 0 0\n"   # not cifs
+                              "//other/share /mnt/o cifs rw 0 0\n")                        # wrong share
+            self.assertIsNone(
+                C._linux_cifs_mountpoint("192.168.100.227", "01 GAMECOVE", mounts_path=str(mounts)))
 
     def test_default_falls_back_to_local_when_nas_unreachable(self):
         from cas import config as C, APPDIR
@@ -643,8 +797,11 @@ class TestConfig(unittest.TestCase):
             os.environ["XDG_RUNTIME_DIR"] = t
             try:
                 gv = pathlib.Path(t) / "gvfs" / "smb-share:server=192.168.100.227,share=01 gamecove"
-                with mock.patch.object(C.sys, "platform", "linux"):
-                    self.assertIsNone(C.nas_mountpoint())     # not mounted yet
+                # isolate the gvfs path from THIS box's real kernel CIFS mount (the cifs fallback is tested
+                # separately in test_linux_cifs_mountpoint_*).
+                with mock.patch.object(C.sys, "platform", "linux"), \
+                     mock.patch.object(C, "_linux_cifs_mountpoint", lambda *a, **k: None):
+                    self.assertIsNone(C.nas_mountpoint())     # no gvfs + no cifs -> not mounted
                     gv.mkdir(parents=True)
                     self.assertEqual(C.nas_mountpoint(), str(gv))
             finally:
@@ -1031,6 +1188,18 @@ class TestProvision(unittest.TestCase):
             PV.capture_to_pc(Adb(runner=r), "newprof", "20260616", root=t, log=lambda m: None, dry_pull=True)
             self.assertNotIn("CAS_MANIFEST=", "\n".join(r.cmds()))   # back-compat: capture-all
 
+    def test_capture_to_pc_aborts_fast_when_not_rooted(self):
+        # Save clones the golden's ROOT payload -> if the unit isn't rooted, fail fast BEFORE pushing
+        # scripts / running capture, so the operator isn't left waiting on a doomed capture.
+        with tempfile.TemporaryDirectory() as t:
+            r = FakeRunner(root=False)
+            msgs = []
+            ok = PV.capture_to_pc(Adb(runner=r), "newprof", "20260616", root=t, log=msgs.append)
+            self.assertFalse(ok)
+            self.assertTrue(any("root" in m.lower() for m in msgs), f"expected not-rooted message; got {msgs}")
+            self.assertNotIn("capture.sh", "\n".join(r.cmds()))          # aborted before capturing
+            self.assertFalse(any("push" in c for c in r.cmds()))         # aborted before pushing scripts
+
     def test_seed_default_manifest_populates_empty_placeholder(self):
         # A 'New profile' leaves a placeholder manifest with NO app lines; after the first capture the
         # selection must be seeded from the captured app set (both axes on) so the Apps tab shows the
@@ -1166,6 +1335,26 @@ class TestSeal(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("development_settings_enabled 0", "\n".join(ra.cmds()))  # hidden despite no root
         self.assertIn("adb_enabled 0", ra.cmds()[-1])                          # USB debugging still last
+
+    def test_seal_warns_upfront_when_not_rooted(self):
+        # Option (b): a not-rooted unit gets a clear EARLY warning (may already be sealed / Root skipped),
+        # but seal STILL proceeds — the flash-to-guarantee-un-root safety is preserved (not a hard-fail).
+        ra, fb = FakeRunner(root=False), FbRunner()
+        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as f:
+            stock = f.name
+        msgs = []
+        try:
+            ok = PV.seal(Adb(runner=ra), Fastboot(runner=fb), stock, log=msgs.append, wait=False)
+        finally:
+            os.unlink(stock)
+        self.assertTrue(ok)                                                    # still seals
+        # UPFRONT + INFORMATIVE: right after the "SEAL: …" banner, a clear heads-up that the unit reports
+        # not-rooted (may already be sealed / Root skipped) and that seal will flash anyway — so the
+        # operator realizes immediately rather than after the ~3-min flash.
+        head = " ".join(msgs[:2]).lower()
+        self.assertIn("not rooted", head)
+        self.assertIn("already", head)         # "may already be sealed" context
+        self.assertIn("flash", head)           # "flashing anyway to guarantee un-root"
 
     def test_seal_refuses_golden(self):
         ra, fb = FakeRunner(root=True, golden=True), FbRunner()
@@ -1900,7 +2089,21 @@ class TestDeviceOwner(unittest.TestCase):
 
     def test_set_device_owner_fails_when_not_fresh(self):
         a = self._adb(device_owner=False, do_set_ok=False)
-        self.assertFalse(PV.set_device_owner(a, log=lambda *_: None))
+        msgs = []
+        self.assertFalse(PV.set_device_owner(a, log=msgs.append))
+        self.assertTrue(any("FRESH unit" in m for m in msgs), f"got {msgs}")
+
+    def test_set_device_owner_unknown_admin_reports_bad_companion_build(self):
+        # The installed Companion APK lacks the device-admin receiver -> the device returns 'Unknown admin'.
+        # That's a wrong/old Companion build, NOT an accounts/'fresh unit' problem — the message must say so.
+        err = ("java.lang.IllegalArgumentException: Unknown admin: ComponentInfo{"
+               "com.gamecove.gamecove_companion/com.gamecove.gamecove_companion.GcDeviceAdminReceiver}")
+        a = self._adb(device_owner=False, do_set_ok=False, do_set_err=err)
+        msgs = []
+        self.assertFalse(PV.set_device_owner(a, log=msgs.append))
+        blob = "\n".join(msgs)
+        self.assertIn("GcDeviceAdminReceiver", blob)              # names the missing receiver
+        self.assertNotIn("FRESH unit", blob)                     # NOT the accounts/fresh-unit message
 
     def test_set_device_owner_fails_when_restrictions_missing(self):
         # Monkeypatch sleep to a no-op: the polling loop would otherwise sleep ~3s on the failure path.
@@ -1998,6 +2201,22 @@ class TestProfileLauncherAndAxes(unittest.TestCase):
         prof = P.Profile(d)
         self.assertIn("com.handheld.launcher", prof.all_pkgs())
         self.assertIn("com.foo", prof.all_pkgs())
+
+    def test_launcher_pkg_falls_back_to_homescreen_meta(self):
+        # The capture writes launcher_pkg into homescreen/meta (NOT profile.meta). launcher_pkg() must
+        # resolve it from there, so the Download list excludes the device's own launcher (it's a system
+        # app, never installable) the same way all_pkgs() appends it — the two must never disagree.
+        d = pathlib.Path(tempfile.mkdtemp())
+        hs = d / "golden_root_payload" / "homescreen"
+        hs.mkdir(parents=True)
+        (d / "golden_root_payload" / "pkglist.txt").write_text("com.foo\n")
+        (d / "profile.meta").write_text("model_match=\n")          # NO launcher_pkg here
+        (hs / "meta").write_text("launcher_pkg=com.android.launcher3\nlauncher_uid=10084\n")
+        prof = P.Profile(d)
+        self.assertEqual(prof.launcher_pkg(), "com.android.launcher3")
+        self.assertIn("com.android.launcher3", prof.all_pkgs())     # appended for completeness
+        own = [p for p in prof.all_pkgs() if p != prof.launcher_pkg()]
+        self.assertNotIn("com.android.launcher3", own)              # …but excluded from the Download rows
 
     def test_axes_reads_manifest_tokens(self):
         d = pathlib.Path(tempfile.mkdtemp())
@@ -2250,7 +2469,7 @@ class TestPickDownloads(unittest.TestCase):
             app = self._app(root)
             app.assigned = {"S1": "p", "S2": "p"}              # two devices, one shared profile
             calls = []
-            def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None):
+            def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, cfg_disabled=None):
                 calls.append(title)
                 return ({pk: (True, False) for pk in rows}, {"settings": "on"})
             app._app_pick_modal = fake_modal
@@ -2269,7 +2488,7 @@ class TestPickDownloads(unittest.TestCase):
         app = self._app(root)
         app.assigned = {"S1": "p1", "S2": "p2"}            # two distinct profiles
         seen = []
-        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None):
+        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, cfg_disabled=None):
             seen.append(title)
             return None if len(seen) == 2 else ({pk: (True, True) for pk in rows}, {})
         app._app_pick_modal = fake_modal
@@ -2284,12 +2503,46 @@ class TestPickDownloads(unittest.TestCase):
         app = self._app(root)
         app.assigned = {"S1": "p", "S2": "(no match)"}     # S3 has no entry at all
         calls = []
-        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None):
+        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, cfg_disabled=None):
             calls.append(title)
             return ({pk: (True, True) for pk in rows}, {})
         app._app_pick_modal = fake_modal
         self.assertTrue(app._pick_downloads(["S1", "S2", "S3"]))
         self.assertEqual(len(calls), 1)                    # only the real profile prompts
+
+    def test_modal_gets_golden_driven_rows_and_disabled_config(self):
+        """Wiring: a captured app (with config) is pre-ticked; an apk-only capture has Config disabled; a
+        store-only app is listed un-ticked with Config disabled (it wasn't in the golden)."""
+        root = pathlib.Path(tempfile.mkdtemp())
+        _saved = {k: os.environ.get(k) for k in ("CAS_CONFIG", "CAS_PROFILES")}
+        os.environ["CAS_CONFIG"] = str(root / "cfg.json")
+        os.environ["CAS_PROFILES"] = str(root)             # apk_store_dir -> root/_apks (we seed it below)
+        try:
+            d = self._profile(root, "p", ["com.withcfg", "com.apkonly"])
+            pay = d / "golden_root_payload"
+            (pay / "com.withcfg" / "apk").mkdir(parents=True)      # captured apk + config
+            (pay / "com.withcfg" / "apk" / "base.apk").write_text("x")
+            (pay / "com.withcfg" / "data.tar").write_text("x")
+            (pay / "com.apkonly" / "apk").mkdir(parents=True)      # captured apk-only (no data.tar)
+            (pay / "com.apkonly" / "apk" / "base.apk").write_text("x")
+            _seed_store(root / "_apks", "com.storeonly", "v1")     # store-only managed app
+            app = self._app(root)
+            app.assigned = {"S1": "p"}
+            seen = {}
+            def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, cfg_disabled=None):
+                seen["rows"], seen["cfg_disabled"] = rows, cfg_disabled
+                return ({pk: rows[pk] for pk in rows}, {})         # accept the proposed defaults
+            app._app_pick_modal = fake_modal
+            self.assertTrue(app._pick_downloads(["S1"]))
+            self.assertEqual(seen["rows"]["com.withcfg"], (True, True))
+            self.assertEqual(seen["rows"]["com.apkonly"], (True, False))
+            self.assertEqual(seen["rows"]["com.storeonly"], (False, False))
+            self.assertEqual(seen["cfg_disabled"], {"com.apkonly", "com.storeonly"})
+            # accepting the defaults installs only the golden apps; the store-only app is NOT written
+            self.assertEqual(sorted(P.manifest_pkgs(d / "manifest")), ["com.apkonly", "com.withcfg"])
+        finally:
+            for _k, _v in _saved.items():
+                os.environ.pop(_k, None) if _v is None else os.environ.__setitem__(_k, _v)
 
 
 class TestDetectLaunchers(unittest.TestCase):
@@ -2449,6 +2702,170 @@ class TestApkStoreDeploy(unittest.TestCase):
             self.assertFalse(ok, "provision must return False when manifest selects only managed apps")
             self.assertTrue(any("store-managed" in m for m in msgs),
                             f"expected managed-only abort message; got: {msgs}")
+
+    def test_provision_push_aborts_immediately_on_cancel(self):
+        """A cancelled Download must STOP at once: the payload-push retry loop must not keep retrying a
+        push (3x with sleeps) once the operator has hit Cancel."""
+        import threading
+        with tempfile.TemporaryDirectory() as t:
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cfg.json")
+            prof = _mk(t, "p", apps=["com.app"])           # one captured payload app
+            ev = threading.Event(); ev.set()               # operator already cancelled
+            fr = FakeRunner(push_ok=False)                 # every push fails (would normally retry 3x)
+            ok = PV.provision(Adb(runner=fr, cancel=ev), P.Profile(prof.path), log=lambda *a: None)
+            self.assertFalse(ok)
+            pushes = [c for c in fr.calls if "push" in c]
+            self.assertEqual(len(pushes), 1, f"cancel must abort the push without retrying; got {len(pushes)}")
+
+
+class TestAppLabels(unittest.TestCase):
+    """Friendly-name map: both PS2 package ids are recognised so neither shows as a raw package id."""
+
+    def test_ps2_package_ids_are_labelled(self):
+        from cas.gui import _app_label
+        self.assertEqual(_app_label("xyz.aethersx2.android"), "AetherSX2  ·  PS2")
+        self.assertEqual(_app_label("xyz.aethersx2.tturnip"), "NetherSX2  ·  PS2")
+
+
+class TestAssignFirmware(unittest.TestCase):
+    """assign_firmware must PERSIST the manual firmware override (it used to call a non-existent
+    config.set_device_firmware, which threw mid-handler so nothing was saved)."""
+
+    def test_assign_firmware_persists_manual_override(self):
+        import types
+        from unittest import mock
+        from cas.gui import App
+        from cas import firmware as FW
+        saved = {k: os.environ.get(k) for k in ("CAS_CONFIG", "CAS_PROFILES")}
+        with tempfile.TemporaryDirectory() as t:
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cfg.json")
+            os.environ["CAS_PROFILES"] = str(t)                  # keep history_dir/log_event off the NAS
+            try:
+                app = App.__new__(App)
+                app.dev_tree = types.SimpleNamespace(selection=lambda: ["2ee078bd"])
+                app.fw_var = types.SimpleNamespace(get=lambda: "ayn-m2")
+                app.log = lambda m: None
+                app.refresh_devices = lambda: None
+                with mock.patch("cas.gui.messagebox.askyesno", return_value=True):
+                    app.assign_firmware()
+                df = FW.get_device_firmware()
+                self.assertIn("2ee078bd", df)
+                self.assertEqual(df["2ee078bd"]["firmware_id"], "ayn-m2")
+                self.assertTrue(df["2ee078bd"]["manual"])
+            finally:
+                for k, v in saved.items():
+                    os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+
+    def test_unassign_firmware_clears_override(self):
+        import types
+        from unittest import mock
+        from cas.gui import App
+        from cas import firmware as FW
+        saved = {k: os.environ.get(k) for k in ("CAS_CONFIG", "CAS_PROFILES")}
+        with tempfile.TemporaryDirectory() as t:
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cfg.json")
+            os.environ["CAS_PROFILES"] = str(t)
+            try:
+                FW.set_device_firmware("2ee078bd", "ayn-m0", manual=True)   # a (wrong) override is in place
+                app = App.__new__(App)
+                app.dev_tree = types.SimpleNamespace(selection=lambda: ["2ee078bd"])
+                app.log = lambda m: None
+                app.refresh_devices = lambda: None
+                with mock.patch("cas.gui.messagebox.askyesno", return_value=True):
+                    app.unassign_firmware()
+                self.assertNotIn("2ee078bd", FW.get_device_firmware())       # override cleared
+            finally:
+                for k, v in saved.items():
+                    os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+
+
+class TestStockInitBoot(unittest.TestCase):
+    """The Stock init_boot field follows the SELECTED DEVICE's assigned profile, and defaults to the
+    bundled kit init_boot when that profile sets no override."""
+
+    class _Var:
+        def __init__(self, v=""): self.v = v
+        def set(self, x): self.v = x
+        def get(self): return self.v
+
+    def _env(self, t):
+        os.environ["CAS_PROFILES"] = str(t)
+        os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cfg.json")
+
+    def test_browse_targets_selected_devices_profile(self):
+        import types
+        from unittest import mock
+        from cas.gui import App
+        saved = {k: os.environ.get(k) for k in ("CAS_CONFIG", "CAS_PROFILES")}
+        with tempfile.TemporaryDirectory() as t:
+            self._env(t)
+            try:
+                _mk(t, "profA"); _mk(t, "profB")
+                app = App.__new__(App); app.profiles_root = str(t); app.log = lambda m: None
+                app.prof_var = types.SimpleNamespace(get=lambda: "profA")     # dropdown = A
+                app.dev_tree = types.SimpleNamespace(selection=lambda: ["S1"])
+                app.assigned = {"S1": "profB"}                                # device's profile = B
+                app.stock_var = self._Var()
+                img = pathlib.Path(t) / "rp6_init_boot.img"; img.write_bytes(b"x")
+                with mock.patch("cas.gui.filedialog.askopenfilename", return_value=str(img)):
+                    app._browse_stock_init_boot()
+                self.assertTrue(P.Profile(pathlib.Path(t) / "profB").meta.get("stock_init_boot", "")
+                                .endswith("rp6_init_boot.img"))               # device's profile updated
+                self.assertFalse(P.Profile(pathlib.Path(t) / "profA").meta.get("stock_init_boot", "")
+                                 .endswith("rp6_init_boot.img"))              # dropdown profile untouched
+            finally:
+                for k, v in saved.items():
+                    os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+
+    def test_sync_stock_field_defaults_to_kit_when_no_override(self):
+        import types
+        from cas.gui import App
+        from cas import provision as PV
+        saved = {k: os.environ.get(k) for k in ("CAS_CONFIG", "CAS_PROFILES")}
+        with tempfile.TemporaryDirectory() as t:
+            self._env(t)
+            try:
+                bare = pathlib.Path(t) / "bare"; (bare / "golden_root_payload").mkdir(parents=True)
+                (bare / "profile.meta").write_text("model_match=X\n")         # NO stock_init_boot override
+                app = App.__new__(App); app.profiles_root = str(t)
+                app.assigned = {"S1": "bare"}; app.stock_var = self._Var("stale")
+                app._sync_stock_field("S1")
+                self.assertEqual(app.stock_var.get(), PV.DEFAULT_STOCK_INIT_BOOT)   # defaulted to the kit
+                P.set_meta_key(bare / "profile.meta", "stock_init_boot", "custom/x.img")
+                app._sync_stock_field("S1")
+                self.assertEqual(app.stock_var.get(), "custom/x.img")          # override wins when set
+            finally:
+                for k, v in saved.items():
+                    os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+
+
+class TestRunChainReport(unittest.TestCase):
+    """Regression: a completed chain (e.g. Save) must hand _report a result it can consume, or done()
+    crashes mid-way and leaves the UI wedged in the busy/loading state (buttons greyed, watch cursor)."""
+
+    def _fake(self):
+        import types
+        logs = []
+        return types.SimpleNamespace(log=logs.append), logs
+
+    def test_chain_result_is_report_compatible(self):
+        from cas.gui import App
+        r = App._chain_result(["A", "B"], ["A"])          # A survived, B failed
+        # canonical (status, detail) 2-tuples with the "ok" success token _report/retry recognise
+        self.assertEqual(r["A"], ("ok", ""))
+        self.assertEqual(r["B"], ("fail", ""))
+        fake, logs = self._fake()
+        App._report(fake, "Running Save on 1 device(s)", r)   # must NOT raise
+        self.assertTrue(any("1 ok" in m for m in logs), f"expected a '1 ok' summary; got {logs}")
+        self.assertTrue(any("1 failed" in m for m in logs), f"expected a '1 failed' summary; got {logs}")
+
+    def test_report_tolerates_short_status_tuple(self):
+        """Defense-in-depth: a malformed 1-tuple status must never crash _report (which runs inside
+        done(); a crash there leaves the controls disabled)."""
+        from cas.gui import App
+        fake, logs = self._fake()
+        App._report(fake, "X", {"S1": ("ok",), "S2": ("fail",)})   # 1-tuples, no detail
+        self.assertTrue(any("1 ok" in m for m in logs), f"got {logs}")
 
 
 if __name__ == "__main__":

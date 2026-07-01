@@ -9,6 +9,7 @@ import base64
 import json
 import os
 import pathlib
+import re
 import socket
 import subprocess
 import sys
@@ -375,9 +376,38 @@ def nas_mountpoint():
             return str(p) if p.is_dir() else None
         runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
         p = pathlib.Path(runtime) / "gvfs" / f"smb-share:server={nas_host()},share={share.lower()}"
-        return str(p) if p.is_dir() else None
+        if p.is_dir():
+            return str(p)
+        # gvfs is the desktop case; also honor a KERNEL CIFS/SMB mount (mount.cifs / fstab, e.g. the share
+        # mounted at /mnt/gamecove) so the library follows the NAS without a manual per-dir override.
+        mp = _linux_cifs_mountpoint(nas_host(), share)
+        return mp if (mp and pathlib.Path(mp).is_dir()) else None
     except OSError:
         return None
+
+
+def _unescape_mount(s):
+    r"""Decode /proc/mounts octal escapes (space -> \040, tab -> \011, backslash -> \134, …)."""
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), s)
+
+
+def _linux_cifs_mountpoint(host, share, mounts_path="/proc/mounts"):
+    """Mountpoint of a kernel CIFS/SMB mount of //host/share from /proc/mounts, or None. Covers the common
+    mount.cifs/fstab case (e.g. //192.168.100.227/01 GAMECOVE at /mnt/gamecove) that the gvfs check misses.
+    Octal-unescapes the space in a share name like '01 GAMECOVE'. Pure parse — the caller checks is_dir()."""
+    want = f"//{host}/{share}".replace("\\", "/").lower().rstrip("/")
+    try:
+        with open(mounts_path) as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 3 or parts[2] not in ("cifs", "smb3", "smbfs"):
+            continue
+        if _unescape_mount(parts[0]).replace("\\", "/").lower().rstrip("/") == want:
+            return _unescape_mount(parts[1])
+    return None
 
 
 def nas_host():

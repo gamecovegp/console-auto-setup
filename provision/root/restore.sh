@@ -188,6 +188,21 @@ if echo "$RPKGS" | grep -q org.es_de.frontend && [ -f "$ES_SET" ]; then
   else
     warn "ES-DE box art: SD mode but no SD serial — MediaDirectory left at default (box art may be absent)."
   fi
+  # 2d) ES-DE ROM directory — the golden doesn't carry a ROMDirectory (ES-DE Android normally stores the
+  #     ROM folder as a SAF pick, which isn't in the payload), so a fresh unit came up with the SAF grant
+  #     but NO ROM folder set and re-prompted. ROMs ride the SD, so point ROMDirectory at THIS unit's card
+  #     (/storage/$SERIAL/ROMs). Same in-place drop+append as MediaDirectory; all-files access (granted
+  #     above) lets ES-DE read the path without re-picking. Skip with no SD (ROMs unavailable anyway).
+  if [ -n "$SERIAL" ]; then
+    ROM_DIR="/storage/$SERIAL/ROMs"
+    sed -i '/name="ROMDirectory"/d' "$ES_SET" 2>/dev/null      # drop any existing line (avoids duplicates)
+    [ -s "$ES_SET" ] && [ -n "$(tail -c1 "$ES_SET" 2>/dev/null)" ] && printf '\n' >> "$ES_SET"  # ensure EOL
+    printf '<string name="ROMDirectory" value="%s" />\n' "$ROM_DIR" >> "$ES_SET"
+    relabel "$ES_SET" 2>/dev/null
+    ok "ES-DE ROMDirectory -> $ROM_DIR"
+  else
+    warn "ES-DE ROMs: no SD serial — ROMDirectory left at default (ES-DE may re-prompt for the ROM folder)."
+  fi
 fi
 
 # 3) RetroArch cores: bulk-copy the arm64 .so set into the internal (exec-able) cores dir.

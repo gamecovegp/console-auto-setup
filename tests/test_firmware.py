@@ -317,6 +317,19 @@ class TestResolve(unittest.TestCase):
         self.assertTrue(r["manual"])
         self.assertFalse(r["ok"])  # logic_check warns: MQ66 serial vs MQ65 firmware
 
+    def test_default_kit_sentinel_pins_to_bundled_init_boot(self):
+        # Assigning the "(default kit)" sentinel pins the unit to the bundled DEFAULT init_boot: no Firmware
+        # object (so root falls back to the kit image), no auto-match, no warning, sticky.
+        FW.set_device_firmware("ZZ", FW.DEFAULT_FW_ID, manual=True)
+        r = FW.resolve("ZZ", {"serial": "ZZ", "device": "OTHER"}, self.root)
+        self.assertEqual(r["firmware_id"], FW.DEFAULT_FW_ID)
+        self.assertIsNone(r["firmware"])     # no build -> root_all keeps the DEFAULT kit init_boot
+        self.assertTrue(r["ok"])             # NOT "(no match)" / not an error
+        self.assertTrue(r["manual"])
+        self.assertFalse(r["warnings"])
+        # and it must NOT get auto-reassigned away
+        self.assertEqual(FW.get_device_firmware()["ZZ"]["firmware_id"], FW.DEFAULT_FW_ID)
+
     def test_pinned_version_used(self):
         FW.set_device_firmware("S", "mangmi-air-x-mq66", version="20260101-000000", manual=True)
         r = FW.resolve("S", self._idn("S"), self.root)

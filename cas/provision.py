@@ -274,8 +274,16 @@ def set_device_owner(adb, log=print):
     else:
         rc, out, err = adb.shell(f"dpm set-device-owner {DEVICE_ADMIN}")
         if rc != 0 or "Success" not in out:
-            log(f"Device Owner NOT set ({(err or out).strip()}). Needs a FRESH unit (no accounts / "
-                "secondary users). Unit is NOT locked down.")
+            detail = (err or out).strip()
+            if "Unknown admin" in detail:
+                # The installed Companion APK has no device-admin receiver — a wrong/old build, NOT an
+                # accounts problem. Point at the real fix instead of the misleading "fresh unit" advice.
+                log(f"Device Owner NOT set — the installed Companion has no device-admin receiver "
+                    f"({DEVICE_ADMIN}). Update the server-store Companion to a build that declares "
+                    "GcDeviceAdminReceiver, then re-Download. Unit is NOT locked down.")
+            else:
+                log(f"Device Owner NOT set ({detail}). Needs a FRESH unit (no accounts / "
+                    "secondary users). Unit is NOT locked down.")
             return False
         log("Companion set as Device Owner.")
     adb.shell(f"am start -n {COMPANION_PKG}/.MainActivity")   # nudge so onEnabled/launch re-assert ran
@@ -381,6 +389,9 @@ def provision(adb, profile, log=print, dry_push=False, es_media_src=None):
             for i in range(1, tries + 1):
                 if adb.push(src, dst):
                     return True
+                if adb.cancel is not None and adb.cancel.is_set():
+                    log(f"⏹ cancelled — stopping the push of {pathlib.Path(str(src)).name}.")
+                    return False                           # operator cancelled: abort NOW, don't retry
                 if i < tries:
                     log(f"push glitch ({i}/{tries}) on {pathlib.Path(str(src)).name} — retrying "
                         "(parallel transfers can saturate USB)...")
@@ -519,6 +530,8 @@ def provision_all(make_adb, devices, root="profiles", log=print, profile=None, p
             return ("skip", state)
         try:
             adb = make_adb(serial)
+            if adb.cancel is not None and adb.cancel.is_set():
+                return ("cancelled", "")
             if profile_map is not None and serial in profile_map:
                 prof = profile_map[serial]
                 if prof is None:
@@ -540,6 +553,8 @@ def provision_all(make_adb, devices, root="profiles", log=print, profile=None, p
             ok = provision(adb, prof, log=_wlog, es_media_src=es_media_src)
             if ok:
                 return ("ok", prof.name)
+            if adb.cancel is not None and adb.cancel.is_set():
+                return ("cancelled", prof.name)            # operator cancelled -> ⏹, not a ❌ failure
             # The last line provision() logged before bailing IS the reason (e.g. 'no root…',
             # 'restore FAILED…'); surface it so the report says WHY, not just which profile.
             return ("fail", msgs[-1] if msgs else prof.name)
@@ -625,6 +640,13 @@ def capture_to_pc(adb, name, stamp, root="profiles", log=print, dry_pull=False):
     cap_man = pdir / "capture-manifest"
     dest = pdir / "golden_root_payload"
     t0 = time.monotonic()
+    # Root preflight: Save clones the golden's ROOT payload (per-app data/BIOS/settings), which needs root.
+    # Fail FAST here instead of pushing scripts and then hanging on the su capture — so a non-rooted unit
+    # is caught immediately, not after a long doomed capture. (dry_pull is the no-device test path.)
+    if not dry_pull and not adb.is_root():
+        log("not rooted — run '⓪ Root' first. Save needs root to clone the golden's payload; "
+            "aborting now instead of after a long capture. Unit untouched.")
+        return False
     if not dry_pull:
         adb.shell("mkdir -p /data/local/tmp/cas_scripts")
         if not adb.push(CAPTURE, "/data/local/tmp/cas_scripts/") or \
@@ -875,6 +897,14 @@ def seal(adb, fastboot, stock_init_boot, log=print, wait=True, model_match=None,
     Never strands the unit in fastboot, and never disables adb on an unverified/failed seal.
     force=True proceeds on a model MISMATCH with a loud warning instead of refusing."""
     log("SEAL: locking the unit down for retail.")
+    # Upfront heads-up (option b): if the unit reports not-rooted, say so IMMEDIATELY — it may already be
+    # sealed, or ⓪ Root / ② Download were skipped. Seal still flashes stock to GUARANTEE un-root (the
+    # flaky-su-grant safety), so this is a warning, not an abort — the operator can cancel if it wasn't
+    # provisioned rather than discover it after the ~2-3 min flash.
+    if not adb.is_root():
+        log("⚠ device reports NOT rooted — it may ALREADY be sealed, or ⓪ Root / ② Download were skipped. "
+            "Sealing will still flash stock to guarantee un-root (~2-3 min); the ship-clean scrub is skipped "
+            "(needs root). Cancel now and run Root + Download first if this unit wasn't provisioned.")
     flasher = flasher or fastboot_flasher(fastboot, wait=wait)   # brand-agnostic: caller passes edl_flasher for EDL units
 
     # NEVER seal/un-root the GOLDEN. is_golden() needs root to read the marker, so only check when rooted

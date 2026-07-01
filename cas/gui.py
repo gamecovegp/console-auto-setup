@@ -71,7 +71,8 @@ _APP_LABELS = {
     "org.dolphinemu.dolphinemu": "Dolphin  ·  GameCube / Wii",
     "com.flycast.emulator": "Flycast  ·  Dreamcast",
     "com.github.stenzek.duckstation": "DuckStation  ·  PS1",
-    "xyz.aethersx2.android": "NetherSX2  ·  PS2",
+    "xyz.aethersx2.android": "AetherSX2  ·  PS2",
+    "xyz.aethersx2.tturnip": "NetherSX2  ·  PS2",
     "me.magnum.melonds.nightly": "melonDS  ·  DS",
     "org.citra.emu": "Citra  ·  3DS",
     "org.ppsspp.ppsspp": "PPSSPP  ·  PSP",
@@ -663,6 +664,10 @@ class App:
         _tip(ttk.Button(fwrow, text="Assign → selected", command=self.assign_firmware),
              "Set this firmware on the selected device row(s) as a sticky MANUAL override (always wins over "
              "the serial-prefix auto-match). Remembered across launches.").pack(side="left", padx=2)
+        _tip(ttk.Button(fwrow, text="Unset", command=self.unassign_firmware),
+             "Clear the firmware override on the selected device row(s). Root then auto-matches, or uses "
+             "the DEFAULT init_boot kit when nothing matches — use this when the library only has a "
+             "wrong-platform image for this unit.").pack(side="left", padx=2)
         _tip(ttk.Button(fwrow, text="Add / update…", command=self._add_firmware),
              "Ingest a raw firmware BUILD FOLDER into the library as a new version (auto-detects device / "
              "storage / flash target, keeps history). Pick the folder containing the emmc/ or ufs/ payload.") \
@@ -826,7 +831,8 @@ class App:
             el = int(time.monotonic() - self._t0)
             self.status_var.set(f"Ready.  (last action took {el // 60}m {el % 60:02d}s)")
             self.log(f"⏱ {self._action} — finished in {el // 60}m {el % 60:02d}s")
-            self._report(self._action, result_box.get("r"))
+            # Restore the controls BEFORE the report/retry prompt — those run after, so an exception in
+            # either must never be able to leave the buttons greyed and the watch cursor stuck ("loading").
             self.cancel_btn.configure(state="disabled", text="✗ Cancel")
             self.cancel_event = None
             self._flash_critical = False
@@ -836,6 +842,7 @@ class App:
                 self.win.configure(cursor="")
             except tk.TclError:
                 pass
+            self._report(self._action, result_box.get("r"))
             # if the op armed a retry (some devices failed), offer to re-run JUST those now that we're idle.
             ctx = self._retry_ctx
             self._retry_ctx = None
@@ -882,13 +889,21 @@ class App:
         SKIP = ("skip", "skip-golden", "no-profile", "no-init_boot")
         CANCEL = ("cancelled",)
         if isinstance(result, dict):
-            good = [s for s, (st, _) in result.items() if st in DONE]
-            skipped = [s for s, (st, _) in result.items() if st in SKIP]
-            cancelled = [s for s, (st, _) in result.items() if st in CANCEL]
-            bad = [s for s, (st, _) in result.items()
+            # Normalise each value to (status, detail). Tolerate a bare status or a short/long tuple so a
+            # malformed result can never raise here — _report runs inside done(), and a crash there used to
+            # leave the controls disabled and the watch cursor stuck ("done saving but still loading").
+            def _split(v):
+                if isinstance(v, (tuple, list)):
+                    return (v[0] if v else "", v[1] if len(v) > 1 else "")
+                return (v, "")
+            norm = {s: _split(v) for s, v in result.items()}
+            good = [s for s, (st, _) in norm.items() if st in DONE]
+            skipped = [s for s, (st, _) in norm.items() if st in SKIP]
+            cancelled = [s for s, (st, _) in norm.items() if st in CANCEL]
+            bad = [s for s, (st, _) in norm.items()
                    if st not in DONE and st not in SKIP and st not in CANCEL]
             self.log(f"──────── REPORT: {label} ────────")
-            for s, (st, d) in result.items():
+            for s, (st, d) in norm.items():
                 mark = ("✅" if st in DONE else "⏭" if st in SKIP else "⏹" if st in CANCEL else "❌")
                 self.log(f"   {mark} {s}: {st}" + (f" — {d}" if d else ""))
             summary = f"   → {len(good)} ok"
@@ -927,7 +942,9 @@ class App:
             self._sync_media_tab()                         # no profile -> no golden -> hide the box-art tab
             return
         prof = P.Profile(P.pathlib.Path(self.profiles_root) / name)
-        self.stock_var.set(prof.meta.get("stock_init_boot", ""))     # blank = the bundled default kit image
+        # Show the effective stock init_boot: the profile's own override, or the bundled DEFAULT kit image
+        # when none is set (so it's never blank/ambiguous — it's clear Root falls back to the kit init_boot).
+        self.stock_var.set(prof.meta.get("stock_init_boot") or PV.DEFAULT_STOCK_INIT_BOOT)
         self._sync_media_tab()                             # box-art tab follows whether the golden has ES-DE
 
     def refresh_devices(self):
@@ -1208,14 +1225,15 @@ class App:
             game = _last(rc, out)
         return (game, home)
 
-    def _set_all(self, vars_dict, value, launchers=frozenset()):
+    def _set_all(self, vars_dict, value, launchers=frozenset(), cfg_disabled=frozenset()):
         """Set every (apk_var, cfg_var) pair in vars_dict to value. Launcher rows keep their (disabled)
-        APK box untouched so it never diverges from the on-screen state. Used by the modal's
-        Select all / Deselect all buttons."""
+        APK box untouched, and cfg_disabled rows keep their (disabled) Config box untouched, so neither
+        diverges from the on-screen state. Used by the modal's Select all / Deselect all buttons."""
         for pkg, (apk_v, cfg_v) in vars_dict.items():
             if pkg not in launchers:
                 apk_v.set(value)
-            cfg_v.set(value)
+            if pkg not in cfg_disabled:
+                cfg_v.set(value)
 
     # ── Run-time app picker ───────────────────────────────────────────────────────────────────────────
     # App selection is no longer a sidebar list; it pops here when ▶ Run needs it. One reusable modal,
@@ -1223,15 +1241,17 @@ class App:
     # the same manifest files the old "Save … selection" buttons did, then the chain runs.
 
     def _app_pick_modal(self, title, intro, prof, rows, launchers, flag_specs, labels=None,
-                        flags_caption="— behavior —"):
+                        flags_caption="— behavior —", cfg_disabled=None):
         """Modal app picker. `rows` is an ordered {pkg:(apk0,cfg0)} initial tick state; `launchers` is the
-        set of pkgs whose APK box is disabled (system firmware, never reinstalled); `flag_specs` is an
+        set of pkgs whose APK box is disabled (system firmware, never reinstalled); `cfg_disabled` is the
+        set of pkgs whose Config box is disabled (nothing was captured to restore); `flag_specs` is an
         ordered list of (key, label, tip, initial_bool) for the behavior block (captioned by
         `flags_caption`); `labels` is an optional {pkg: friendly_name} override (used to give the launcher
         rows a role label). Blocks until the operator clicks Run or Cancel. Returns (axes, flags) on Run —
         axes={pkg:(apk,cfg)} for every row, flags={key:'on'/'off'} for every flag_spec — or None on
         Cancel/close."""
         labels = labels or {}
+        cfg_disabled = cfg_disabled or set()
         self._icon_refs = []                               # fresh icon refs for this modal's lifetime
         win = tk.Toplevel(self.win)
         win.title(title)
@@ -1258,17 +1278,21 @@ class App:
         selrow = ttk.Frame(win, padding=(10, 0))
         selrow.pack(side="top", anchor="w")
         ttk.Button(selrow, text="Select all",
-                   command=lambda: self._set_all(pick_vars, True, launchers)).pack(side="left")
+                   command=lambda: self._set_all(pick_vars, True, launchers, cfg_disabled)).pack(side="left")
         ttk.Button(selrow, text="Deselect all",
-                   command=lambda: self._set_all(pick_vars, False, launchers)).pack(side="left", padx=(4, 0))
+                   command=lambda: self._set_all(pick_vars, False, launchers, cfg_disabled)) \
+            .pack(side="left", padx=(4, 0))
 
         bodywrap = ttk.Frame(win, padding=(6, 4))
         bodywrap.pack(side="top", fill="both", expand=True)
         listf = self._scroll_tab(bodywrap)                 # scrollable inner frame for the app rows
         for pkg, (apk0, cfg0) in rows.items():
             is_launcher = pkg in launchers
+            cfg_off = pkg in cfg_disabled
             if is_launcher:
                 apk0 = False                               # system firmware — never reinstalled
+            if cfg_off:
+                cfg0 = False                               # nothing captured -> can't restore config
             apk_v, cfg_v = tk.BooleanVar(value=apk0), tk.BooleanVar(value=cfg0)
             pick_vars[pkg] = (apk_v, cfg_v)
             row = ttk.Frame(listf); row.pack(anchor="w", fill="x")
@@ -1279,7 +1303,11 @@ class App:
                 apk_cb.configure(state="disabled")
                 cfg_tip = f"Capture {pkg}'s state — its homescreen layout / emulator picks"
             _tip(apk_cb, f"Bundle {pkg}'s installer (off = clean install / system launcher)").pack(side="left")
-            _tip(ttk.Checkbutton(row, text="Config", variable=cfg_v), cfg_tip).pack(side="left")
+            cfg_cb = ttk.Checkbutton(row, text="Config", variable=cfg_v)
+            if cfg_off:
+                cfg_cb.configure(state="disabled")
+                cfg_tip = f"No captured config for {pkg} — nothing to restore."
+            _tip(cfg_cb, cfg_tip).pack(side="left")
         if flag_specs:
             ttk.Label(listf, text=flags_caption).pack(anchor="w", pady=(6, 0))
             for key, label, tip, init in flag_specs:
@@ -1372,12 +1400,17 @@ class App:
         pending = []                                       # (manifest_path, pkgs, flags, axes, name)
         for name in names:
             prof = P.Profile(P.pathlib.Path(self.profiles_root) / name)
-            saved = prof.axes()                            # {pkg:(apk,cfg)} from the saved manifest
-            launcher_pkg = prof.meta.get("launcher_pkg")
-            # the launcher isn't an app row — its homescreen rides the @homescreen behavior flag below.
+            launcher_pkg = prof.launcher_pkg()
+            # the launcher isn't an app row — it's a device SYSTEM app (e.g. com.android.launcher3, never
+            # captured), and its homescreen rides the @homescreen behavior flag below.
             own_pkgs = [p for p in prof.all_pkgs() if p != launcher_pkg]
             store_pkgs = [a["pkg"] for a in P.list_store_apks(config.apk_store_dir())]
-            rows = P.download_rows(own_pkgs, store_pkgs, saved)
+            # Golden-driven defaults: a captured app is pre-ticked (APK only if the golden bundled one —
+            # config-only/sideloaded apps stay APK-off; Config only if it was captured); a store-only app
+            # is NOT in the golden, so it's listed but un-ticked (opt in to push it).
+            has_apk = {p: prof.has_captured_apk(p) for p in own_pkgs}
+            has_cfg = {p: prof.has_captured_config(p) for p in own_pkgs}
+            rows, cfg_disabled = P.download_rows(own_pkgs, store_pkgs, has_apk, has_cfg)
             labels = {}
             for p in store_pkgs:
                 if p not in own_pkgs:
@@ -1388,9 +1421,10 @@ class App:
             res = self._app_pick_modal(
                 f"Download — restore “{name}”",
                 "Tick which apps to INSTALL on the device(s) assigned this profile. APK installs the app; "
-                "Config restores its saved data/settings/BIOS. Apps marked “from store” install the "
-                "server’s current build. Behaviour @flags below apply on the device.",
-                prof, rows, set(), flag_specs, labels=labels)
+                "Config restores its saved data/settings/BIOS. Apps not captured in the golden (marked "
+                "“from store”) are OFF by default — tick to push the server’s current build. Config is "
+                "available only where the golden captured it. Behaviour @flags below apply on the device.",
+                prof, rows, set(), flag_specs, labels=labels, cfg_disabled=cfg_disabled)
             if res is None:
                 self.log("Download cancelled — nothing installed.")
                 return False
@@ -1571,9 +1605,12 @@ class App:
             ids = [f.id for f in FW.list_firmware(root)] if root else []
         except Exception:
             ids = []
-        self.fw_combo["values"] = ids
-        if ids and self.fw_var.get() not in ids:
-            self.fw_var.set(ids[0])
+        # Offer the bundled DEFAULT kit init_boot as a first-class, assignable choice (first in the list),
+        # so a unit with no library match can be EXPLICITLY pinned to the default boot instead of "(no match)".
+        choices = [FW.DEFAULT_FW_ID] + ids
+        self.fw_combo["values"] = choices
+        if self.fw_var.get() not in choices:
+            self.fw_var.set(choices[0])
         if not hasattr(self, "fw_lib_var"):
             return
         configured = config.load_config().get("firmware_dir")    # an explicit (e.g. NAS) override, if any
@@ -1599,12 +1636,18 @@ class App:
         if not serial:
             self.fw_status_var.set("Select a device to see its firmware suggestion.")
             return
+        self._sync_stock_field(serial)        # field reflects THIS unit's stock init_boot (default kit if none)
         r = self.fw_resolved.get(serial)
         if not r:
             self.fw_status_var.set(f"{serial}: no firmware info — click 'Refresh devices'.")
             return
         if not r.get("firmware_id"):
-            self.fw_status_var.set(f"{serial}: no match in library — pick one and 'Assign → selected'.")
+            self.fw_status_var.set(f"{serial}: no match in library — pick one and 'Assign → selected' "
+                                   f"(or assign '{FW.DEFAULT_FW_ID}' to use the bundled init_boot).")
+            return
+        if r.get("firmware_id") == FW.DEFAULT_FW_ID:
+            self.fw_status_var.set(f"{serial}: {FW.DEFAULT_FW_ID} (manual) — Root uses the bundled default "
+                                   f"init_boot.img; no library firmware is flashed.")
             return
         kind = "manual override" if r.get("manual") else "auto-suggested"
         head = f"{serial}: {r['firmware_id']}  v{r.get('version') or '?'}  ({kind})"
@@ -1635,10 +1678,30 @@ class App:
                 + "\n  ".join(serials)):
             return
         for s in serials:
-            config.set_device_firmware(s, fid, manual=True)   # sticky; always wins over the auto-match
+            FW.set_device_firmware(s, fid, manual=True)       # sticky; always wins over the auto-match
             FW.log_event(s, fid, None, "assign", True)
         self.log(f"assigned firmware '{fid}' to: {', '.join(serials)} (remembered). Re-resolving…")
         self.refresh_devices()                                # re-resolve so the column + status reflect it
+
+    def unassign_firmware(self):
+        """Clear the firmware override on the selected device row(s) so Root no longer flashes that
+        firmware's image. Resolution then falls back to the serial-prefix auto-match, and — when nothing
+        matches — Root uses the bundled DEFAULT init_boot kit (the right move when the only library match
+        is a wrong-platform image, e.g. an AYN 'boot'/qssi build on a Retroid 'init_boot'/kalama unit)."""
+        serials = list(self.dev_tree.selection())
+        if not serials:
+            messagebox.showinfo("CAS", "Select one or more device rows first (Ctrl/Shift-click).")
+            return
+        if not messagebox.askyesno(
+                "CAS — clear firmware override",
+                f"Clear the firmware override on {len(serials)} device(s)?\n  " + "\n  ".join(serials)
+                + "\n\nRoot then uses the auto-match, or the DEFAULT init_boot kit if nothing matches."):
+            return
+        for s in serials:
+            FW.set_device_firmware(s, None)                   # falsy id -> forget the override
+            FW.log_event(s, None, None, "clear", False)
+        self.log(f"cleared firmware override on: {', '.join(serials)} (re-resolving…)")
+        self.refresh_devices()
 
     def _open_apk_store(self):
         """Manage the server-side APK store (config.apk_store_dir()): list packages, Add/Update a build
@@ -1662,10 +1725,16 @@ class App:
             s = tree.selection()
             return s[0] if s else None
 
-        def _put(pkg):
-            f = filedialog.askopenfilename(title=f"Choose the APK for {pkg}",
-                                           filetypes=[("APK", "*.apk"), ("All files", "*.*")])
+        def _put(pkg, preset_file=None):
+            f = preset_file or filedialog.askopenfilename(
+                title=f"Choose the APK for {pkg}", filetypes=[("APK", "*.apk"), ("All files", "*.*")])
             if not f:
+                return
+            got = P.apk_package_id(f)                 # guard: don't upload the wrong APK under this pkg
+            if got and got != pkg and not messagebox.askyesno(
+                    "CAS — package id mismatch",
+                    f"This APK's package id is:\n    {got}\n\nbut you're updating:\n    {pkg}\n\n"
+                    "Upload it anyway?"):
                 return
             label = simpledialog.askstring("Version label", "Version label (blank = use the file name):",
                                            initialvalue=pathlib.Path(f).stem, parent=dlg) or None
@@ -1678,9 +1747,20 @@ class App:
             self._run_bg(work, label=f"Uploading {pkg} to the store")
 
         def add():
-            pkg = simpledialog.askstring("Add APK", "Package id (e.g. org.cocoon.app):", parent=dlg)
+            # Pick the APK first; read its package id straight from the file so the operator doesn't type
+            # (and mistype) it. They can still edit it — e.g. if the manifest couldn't be parsed.
+            f = filedialog.askopenfilename(title="Choose the APK to add (its package id is read from the file)",
+                                           filetypes=[("APK", "*.apk"), ("All files", "*.*")])
+            if not f:
+                return
+            detected = P.apk_package_id(f)
+            pkg = simpledialog.askstring(
+                "Add APK — package id",
+                "Package id read from the APK (edit if wrong):" if detected
+                else "Couldn't read the package id from this file — enter it (e.g. org.cocoon.app):",
+                initialvalue=detected or "", parent=dlg)
             if pkg and pkg.strip():
-                _put(pkg.strip())
+                _put(pkg.strip(), preset_file=f)
 
         def update():
             pkg = _sel()
@@ -1834,8 +1914,16 @@ class App:
             survivors = self._run_chain_core(steps, serials, save_name)
             self.win.after(0, self.refresh_devices)
             self.win.after(0, self.refresh_profiles)
-            return {s: ("done",) if s in survivors else ("fail",) for s in serials}
+            return self._chain_result(serials, survivors)
         self._run_bg(work, label=f"Running {chain} on {len(serials)} device(s)")
+
+    @staticmethod
+    def _chain_result(serials, survivors):
+        """Build the {serial: (status, detail)} dict _report (and the retry detector) expect after a
+        chain run: survivors are 'ok', everyone else 'fail'. MUST be (status, detail) 2-tuples with the
+        'ok' success token — a bare/short tuple or a 'done' token makes _report crash or mislabel."""
+        sset = set(survivors)
+        return {s: ("ok", "") if s in sset else ("fail", "") for s in serials}
 
     def release_selected(self):
         """Operator-only: un-provision the selected unit (clear the Companion's Device-Owner lockdown so it
@@ -1927,12 +2015,13 @@ class App:
         except ValueError:
             return str(p)
 
-    def _set_profile_asset(self, key, title, filetypes, var):
-        """Pick a Root image (stock init_boot / Magisk apk) and write it into the SELECTED profile's
-        profile.meta. Persists per-profile so ⓪ Root can find it; the device list isn't touched."""
-        name = self.prof_var.get()
+    def _set_profile_asset(self, key, title, filetypes, var, profile_name=None):
+        """Pick a Root image (stock init_boot / Magisk apk) and write it into a profile's profile.meta.
+        `profile_name` targets a specific profile (e.g. the SELECTED DEVICE's assigned profile); it falls
+        back to the Profile dropdown. Persists per-profile so ⓪ Root can find it; the device list isn't touched."""
+        name = profile_name or self.prof_var.get()
         if not name:
-            messagebox.showinfo("CAS", "Select a profile first.")
+            messagebox.showinfo("CAS", "Select a device (or a profile) first.")
             return
         f = filedialog.askopenfilename(title=title, filetypes=filetypes)
         if not f:
@@ -1943,8 +2032,27 @@ class App:
         self.log(f"profile '{name}': set {key} = {val}")
 
     def _browse_stock_init_boot(self):
+        # Target the SELECTED DEVICE's assigned profile (so you set the init_boot for the unit you're on),
+        # falling back to the Profile dropdown when no device row is selected.
+        serial = self._selected_serial()
+        name = self.assigned.get(serial) if serial else None
+        prof_name = name if (name and name != "(no match)") else None
         self._set_profile_asset("stock_init_boot", "Pick the device family's STOCK init_boot (.img)",
-                                [("init_boot image", "*.img"), ("all files", "*.*")], self.stock_var)
+                                [("init_boot image", "*.img"), ("all files", "*.*")], self.stock_var,
+                                profile_name=prof_name)
+
+    def _sync_stock_field(self, serial):
+        """Show the SELECTED device's assigned-profile stock init_boot in the field — the profile's own
+        override, or the bundled DEFAULT kit init_boot when it sets none — so it's clear which image Root
+        will use for this unit (when no firmware overrides). Default-to-kit answers 'firmware unknown'."""
+        name = self.assigned.get(serial)
+        if not name or name == "(no match)":
+            return
+        try:
+            prof = P.Profile(P.pathlib.Path(self.profiles_root) / name)
+            self.stock_var.set(prof.meta.get("stock_init_boot") or PV.DEFAULT_STOCK_INIT_BOOT)
+        except Exception:
+            pass
 
     def _probe_sd_media(self, serial=None):
         """AUTO-DETECT whether a device's SD carries an ES-DE folder / box art, shown inline (no button).
@@ -2032,17 +2140,22 @@ class App:
         return inner
 
     def _app_name_label(self, row, prof, pkg, label=None):
-        """Left-aligned app label carrying the app's launcher icon (real APK icon → curated logo →
-        coloured placeholder), so every Save/Download row is identifiable at a glance, not text-only.
-        `label` overrides the friendly name — used to give the launcher rows a role label (e.g.
-        'Home launcher · homescreen') instead of a raw package id."""
+        """Left-aligned app cell carrying the app's launcher icon (real APK icon → curated logo → coloured
+        placeholder) + the friendly name, plus a dim 'mini' line with the raw package id when the name
+        doesn't already reveal it — so every Save/Download row shows EXACTLY which com.xxx/xyz.xxx it is
+        (e.g. AetherSX2 = .android vs NetherSX2 = .tturnip). `label` overrides the friendly name — used to
+        give the launcher rows a role label (e.g. 'Home launcher · homescreen') or store annotations."""
         text = label or _app_label(pkg)
         icon = self._app_icon(prof, pkg) or self._placeholder_icon(text)
-        lbl = ttk.Label(row, text=f" {text}", width=28)
+        cell = ttk.Frame(row)
+        cell.pack(side="left")
+        name = ttk.Label(cell, text=f" {text}", width=28)    # width=28 keeps the APK/Config columns aligned
         if icon is not None:
-            lbl.configure(image=icon, compound="left")
-        lbl.pack(side="left")
-        return lbl
+            name.configure(image=icon, compound="left")
+        name.pack(side="top", anchor="w")
+        if pkg not in text:                                  # skip a redundant id line for store/unmapped rows
+            ttk.Label(cell, text=f"      {pkg}", foreground="#8a8a8a", font=("", 8)).pack(side="top", anchor="w")
+        return cell
 
     ICON_PX = 24                                          # uniform icon box for the app list
 

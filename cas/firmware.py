@@ -54,6 +54,14 @@ def identity(adb):
     }
 
 
+# A synthetic firmware id meaning "don't flash a library build — use the bundled DEFAULT kit init_boot".
+# Selectable in the GUI firmware dropdown and assignable like any firmware, so an operator can EXPLICITLY
+# pin a unit (e.g. a Retroid sharing the kalama image) to the default init_boot instead of leaving it as
+# an unresolved "(no match)". resolve() short-circuits it to a no-build result; root_all then keeps the
+# DEFAULT kit image (its firmware lookup yields no Firmware object).
+DEFAULT_FW_ID = "(default kit)"
+
+
 # ---------------------------------------------------------------------------
 # Task 2 (adaptation): firmware_root / get_device_firmware / set_device_firmware
 #                       in firmware.py reading/writing via the config module
@@ -434,6 +442,10 @@ def resolve(serial, identity_dict, root):
     logic_check. Returns a dict the UI/CLI render directly."""
     assigned = get_device_firmware().get(serial)
     fw, manual, suggested, pinned = None, False, None, None
+    if assigned and assigned["firmware_id"] == DEFAULT_FW_ID:
+        # Pinned to the bundled default kit: no library build to flash, no auto-match, no warning.
+        return {"firmware_id": DEFAULT_FW_ID, "version": None, "manual": assigned.get("manual", True),
+                "suggested": None, "ok": True, "warnings": [], "firmware": None}
     if assigned:
         fw = find(assigned["firmware_id"], root)
         manual = assigned["manual"]

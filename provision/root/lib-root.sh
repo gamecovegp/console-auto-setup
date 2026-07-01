@@ -2,8 +2,8 @@
 # FALLBACK default only — the golden's captured pkglist.txt is authoritative (see payload_pkgs below); this
 # static list is used solely when no payload is on hand. The emulator/frontend packages whose state we clone:
 PKGS="dev.eden.eden_emulator com.retroarch.aarch64 org.dolphinemu.dolphinemu com.flycast.emulator \
-com.github.stenzek.duckstation xyz.aethersx2.android me.magnum.melonds.nightly org.citra.emu \
-org.ppsspp.ppsspp org.mupen64plusae.v3.fzurita org.es_de.frontend gamehub.lite"
+com.github.stenzek.duckstation xyz.aethersx2.android xyz.aethersx2.tturnip me.magnum.melonds.nightly \
+org.citra.emu org.ppsspp.ppsspp org.mupen64plusae.v3.fzurita org.es_de.frontend gamehub.lite"
 # payload_pkgs [payload_dir] — the authoritative cloned package set: the golden's captured pkglist.txt
 # (one pkg per line) when present and non-empty, else the static $PKGS fallback. Pure file IO (no adb/root),
 # so it is locally testable. payload_dir defaults to the capture/restore payload location.

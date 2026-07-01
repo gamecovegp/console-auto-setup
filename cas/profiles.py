@@ -6,17 +6,92 @@ A profile is a directory under `profiles/<name>/` with:
   golden_root_payload/    the captured payload (per-app modules + internal_*.tar + grants + settings)
 """
 import re
+import struct
+import zipfile
 import pathlib
 import shutil
+
+
+def _axml_string_pool(data, pos):
+    """Decode a binary-XML (AXML) string pool chunk at `pos` -> list of strings. Handles UTF-8 and UTF-16."""
+    u32 = lambda o: struct.unpack_from("<I", data, o)[0]
+    count = u32(pos + 8); flags = u32(pos + 16); strings_start = u32(pos + 20)
+    utf8 = bool(flags & 0x100)
+
+    def _len(off):                                   # var-length string length prefix
+        if utf8:
+            n = data[off]; off += 1
+            if n & 0x80:
+                n = ((n & 0x7f) << 8) | data[off]; off += 1
+            return n, off
+        n = struct.unpack_from("<H", data, off)[0]; off += 2
+        if n & 0x8000:
+            n = ((n & 0x7fff) << 16) | struct.unpack_from("<H", data, off)[0]; off += 2
+        return n, off
+
+    out = []
+    for i in range(count):
+        sp = pos + strings_start + u32(pos + 28 + i * 4)
+        if utf8:
+            _, sp = _len(sp)                         # char count (skip)
+            blen, sp = _len(sp)                      # byte count
+            out.append(data[sp:sp + blen].decode("utf-8", "replace"))
+        else:
+            n, sp = _len(sp)
+            out.append(data[sp:sp + n * 2].decode("utf-16-le", "replace"))
+    return out
+
+
+def apk_package_id(apk_path):
+    """The `<manifest package="…">` id read straight from an APK's binary AndroidManifest.xml — a pure
+    Python AXML parse, NO aapt/external tools (so Add-APK can auto-fill the package id from the chosen
+    file). Returns the package string, or None on any problem (not an APK, no manifest, parse failure)."""
+    try:
+        with zipfile.ZipFile(apk_path) as z:
+            data = z.read("AndroidManifest.xml")
+    except Exception:
+        return None
+    try:
+        u16 = lambda o: struct.unpack_from("<H", data, o)[0]
+        u32 = lambda o: struct.unpack_from("<I", data, o)[0]
+        pos, strings = 8, None                       # skip the 8-byte file header
+        while pos + 8 <= len(data):
+            ctype, chsize = u16(pos), u32(pos + 4)
+            if chsize <= 0:
+                break
+            if ctype == 0x0001:                      # RES_STRING_POOL_TYPE
+                strings = _axml_string_pool(data, pos)
+            elif ctype == 0x0102 and strings is not None:   # RES_XML_START_ELEMENT_TYPE
+                name = u32(pos + 20)
+                if name < len(strings) and strings[name] == "manifest":
+                    astart = u16(pos + 24); asize = u16(pos + 26) or 20; acount = u16(pos + 28)
+                    ap = pos + 16 + astart
+                    for _ in range(acount):
+                        aname, raw, tdata = u32(ap + 4), u32(ap + 8), u32(ap + 16)
+                        if aname < len(strings) and strings[aname] == "package":
+                            idx = raw if raw != 0xFFFFFFFF else tdata
+                            return strings[idx] if idx < len(strings) else None
+                        ap += asize
+                    return None
+            pos += chsize
+    except Exception:
+        return None
+    return None
 
 # Emulator/frontend packages = the GAMING payload, auto-checked in the Save (capture) list.
 # Keep in sync with provision/root/lib-root.sh PKGS.
 EMULATOR_PKGS = {
     "dev.eden.eden_emulator", "com.retroarch.aarch64", "org.dolphinemu.dolphinemu",
     "com.flycast.emulator", "com.github.stenzek.duckstation", "xyz.aethersx2.android",
-    "me.magnum.melonds.nightly", "org.citra.emu", "org.ppsspp.ppsspp",
+    "xyz.aethersx2.tturnip", "me.magnum.melonds.nightly", "org.citra.emu", "org.ppsspp.ppsspp",
     "org.mupen64plusae.v3.fzurita", "org.es_de.frontend", "gamehub.lite",
 }
+
+# Apps whose APK is provided EXTERNALLY (sideloaded / a custom build), so the golden carries only their
+# config/BIOS — never the APK. Save defaults these to config-only; on Download CAS won't install the APK
+# (you sideload it). PS2 ships under either id depending on the unit: xyz.aethersx2.android (AetherSX2, or
+# GameCove's NetherSX2 repackaged under that id) and xyz.aethersx2.tturnip (NetherSX2-Turnip).
+CONFIG_ONLY_PKGS = {"xyz.aethersx2.android", "xyz.aethersx2.tturnip"}
 
 # pkg -> shared internal-storage dir it owns (mirror of lib-root.sh:internal_for). Restored only if the
 # app is in the manifest.
@@ -155,17 +230,28 @@ def resolve_app_apk(pkg, prof, store_dir, bundle_fallback=None):
     return None
 
 
-def download_rows(all_pkgs, store_pkgs, saved):
-    """Ordered {pkg: (apk_bool, cfg_bool)} for the Download app-pick modal. The profile's own apps come
-    first (each defaulting to BOTH axes), then store-only apps are appended (defaulting to (True, False) —
-    APK on, no captured config to restore). A `saved` axis for any pkg overrides the default. Pure — no I/O."""
-    rows = {}
-    for pkg in all_pkgs:
-        rows[pkg] = saved.get(pkg, (True, True))
+def download_rows(own_pkgs, store_pkgs, has_apk, has_config):
+    """Golden-driven defaults for the Download app-pick modal. Returns (rows, cfg_disabled):
+      * rows: ordered {pkg: (apk_default, cfg_default)}. A captured golden app defaults APK-ON only when the
+        golden actually bundled an APK for it (has_apk[pkg]) — a config-only capture (APK sideloaded) defaults
+        APK-OFF. Its Config defaults ON only when the golden captured config for it (has_config[pkg]) — an
+        apk-only capture defaults Config-OFF. A store-only (managed) app — NOT in the golden — defaults
+        APK-OFF (you opt in to push the store build) and has no captured config.
+      * cfg_disabled: the set of pkgs whose Config checkbox the modal must DISABLE — you can't restore
+        config that was never captured.
+    Pure — the caller derives has_apk/has_config ({pkg: bool}) from the payload (Profile.has_captured_*)."""
+    rows, cfg_disabled = {}, set()
+    for pkg in own_pkgs:
+        apk = bool(has_apk.get(pkg, True))     # default True (back-compat) if the caller didn't probe
+        cfg = bool(has_config.get(pkg))
+        rows[pkg] = (apk, cfg)
+        if not cfg:
+            cfg_disabled.add(pkg)
     for pkg in store_pkgs:
         if pkg not in rows:
-            rows[pkg] = saved.get(pkg, (True, False))
-    return rows
+            rows[pkg] = (False, False)
+            cfg_disabled.add(pkg)
+    return rows, cfg_disabled
 
 
 def _dir_bytes(path):
@@ -327,16 +413,38 @@ class Profile:
     def capture_flags(self):
         return manifest_flags(self.capture_manifest_path)
 
+    def launcher_pkg(self):
+        """The golden's HOME launcher package (a device SYSTEM app — never an installable app row; its
+        layout rides @homescreen). Resolved from profile.meta, else the captured homescreen/meta written at
+        capture time. None when no homescreen was captured. SINGLE source of truth so the app list and its
+        launcher-exclusion never disagree."""
+        return (self.meta.get("launcher_pkg")
+                or _read_meta(self.payload / "homescreen" / "meta").get("launcher_pkg")
+                or None)
+
     def all_pkgs(self):
         """Every selectable app: the captured set (pkglist.txt) plus the default launcher (a system app
         excluded by user_pkgs) when known, so it can be ticked for config. The full toggle set for the UI."""
         pl = self.payload / "pkglist.txt"
         pkgs = ([l.strip() for l in _read_text(pl).splitlines() if l.strip()]
                 if pl.exists() else self.pkgs())
-        lp = self.meta.get("launcher_pkg") or _read_meta(self.payload / "homescreen" / "meta").get("launcher_pkg")
+        lp = self.launcher_pkg()
         if lp and lp not in pkgs:
             pkgs.append(lp)
         return pkgs
+
+    def has_captured_apk(self, pkg):
+        """True if the golden bundled an installable APK for pkg (golden_root_payload/<pkg>/apk/*.apk).
+        False for store-only (managed) apps and config-only captures (APK sideloaded externally)."""
+        apkdir = self.payload / pkg / "apk"
+        return apkdir.is_dir() and any(apkdir.glob("*.apk"))
+
+    def has_captured_config(self, pkg):
+        """True if the golden captured restorable config/data for pkg — i.e. there is something for the
+        Config axis to restore. capture.sh writes data.tar / adata.tar only when config was captured, so
+        their presence is the ground truth. Store-only (managed) apps and apk-only captures have none."""
+        d = self.payload / pkg
+        return (d / "data.tar").exists() or (d / "adata.tar").exists()
 
     def has_golden(self):
         """True if a golden has been captured into this profile (payload + its global.meta both exist)."""
@@ -435,13 +543,17 @@ def match_profile(model, root="profiles", sd_gb=None):
 
 
 def default_capture_selection(device_apps, game_launcher=None, home_launcher=None):
-    """The default Save-list check state: {pkg: (apk_on, config_on)}. Emulators (EMULATOR_PKGS) -> both axes;
-    the game/HOME launcher -> config-only (APK is system firmware, but their state — emulator picks /
-    homescreen — is worth keeping, so config defaults ON); every other device app -> off."""
+    """The default Save-list check state: {pkg: (apk_on, config_on)}. Emulators (EMULATOR_PKGS) -> both axes,
+    EXCEPT CONFIG_ONLY_PKGS (APK sideloaded externally) -> config-only; the game/HOME launcher -> config-only
+    (APK is system firmware, but their state — emulator picks / homescreen — is worth keeping, so config
+    defaults ON); every other device app -> off."""
     sel = {}
     for pkg in device_apps:
-        on = pkg in EMULATOR_PKGS
-        sel[pkg] = (on, on)
+        if pkg in CONFIG_ONLY_PKGS:
+            sel[pkg] = (False, True)                 # APK is provided externally -> capture config/BIOS only
+        else:
+            on = pkg in EMULATOR_PKGS
+            sel[pkg] = (on, on)
     for lp in (game_launcher, home_launcher):
         if lp:
             sel[lp] = (False, True)                  # config-on by default (@gamelauncher / @homescreen)
@@ -453,8 +565,17 @@ def initial_capture_selection(device_apps, saved_axes, saved_flags, game_launche
     package axes, then the launcher rows seeded from the saved @gamelauncher/@homescreen flags (launcher
     selection is persisted as flags, not package lines). Pure — no I/O."""
     sel = default_capture_selection(device_apps, game_launcher, home_launcher)
+    # A saved manifest only OVERRIDES the axes of apps that are actually on this device — it never ADDS a
+    # row. Capturing into a profile whose golden came from another unit must not surface apps this device
+    # doesn't have (e.g. AetherSX2 on a Retroid that only ships NetherSX2). The scan is authoritative.
     for pkg, axes_pair in (saved_axes or {}).items():
-        sel[pkg] = axes_pair
+        if pkg in sel:
+            sel[pkg] = axes_pair
+    # Sideloaded builds: the config-only policy WINS over a stale saved manifest that had APK on — the
+    # operator never bundles their externally-installed APK (e.g. PS2) by accident. Config choice is kept.
+    for pkg in CONFIG_ONLY_PKGS:
+        if pkg in sel:
+            sel[pkg] = (False, sel[pkg][1])
     if game_launcher and game_launcher in sel:
         sel[game_launcher] = (False, (saved_flags or {}).get("gamelauncher", "on") == "on")
     if home_launcher and home_launcher in sel:

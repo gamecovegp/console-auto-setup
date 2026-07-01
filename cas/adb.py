@@ -168,16 +168,18 @@ class Adb:
                 if (self.cancel is not None and self.runner is subprocess_runner) else {})
 
     def raw(self, *args):
-        """Run `adb [-s serial] <args>` -> (rc, out, err)."""
-        return self.runner(self._base() + list(args))
+        """Run `adb [-s serial] <args>` -> (rc, out, err). Honors the cancel event (so push/install/reboot,
+        which route through here, abort mid-flight when the operator hits Cancel — e.g. the big payload
+        push during a Download)."""
+        return self.runner(self._base() + list(args), **self._runner_kw())
 
     def shell(self, cmd):
-        """Run `adb shell <cmd>` (cmd is one string)."""
-        return self.runner(self._base() + ["shell", cmd])
+        """Run `adb shell <cmd>` (cmd is one string). Honors the cancel event."""
+        return self.runner(self._base() + ["shell", cmd], **self._runner_kw())
 
     def su(self, cmd, timeout=900):
-        """Run <cmd> as root: `adb shell /debug_ramdisk/su -c <cmd>`."""
-        return self.runner(self._base() + ["shell", SU, "-c", cmd], timeout=timeout)
+        """Run <cmd> as root: `adb shell /debug_ramdisk/su -c <cmd>`. Honors the cancel event."""
+        return self.runner(self._base() + ["shell", SU, "-c", cmd], timeout=timeout, **self._runner_kw())
 
     def su_stream(self, cmd, on_line):
         """Run <cmd> as root, streaming each output line to on_line() LIVE; returns rc.
