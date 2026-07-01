@@ -2886,42 +2886,22 @@ class TestRunChainReport(unittest.TestCase):
 
 
 class TestProfileLibraryLabel(unittest.TestCase):
-    """The Profile 'Library:' status line must surface a dropped NAS mount (mirroring the firmware line),
-    not silently show the local fallback as reachable. library_root() falls back NAS->local when the share
-    is unmounted; the label must make that obvious."""
+    """The Profile 'Library:' status line must surface an unreachable library (e.g. an unplugged external
+    drive) instead of silently showing it as OK."""
 
     def setUp(self):
         from cas import gui
         self.label = gui._profile_library_label
 
-    def test_nas_default_dropped_shows_unreachable_and_fallback(self):
-        # no override + resolved to the LOCAL fallback => the NAS default mount dropped
-        nas = r"\\192.168.100.227\01 GAMECOVE\[03] SETUP\CAS Profiles"
-        local = "/home/x/data/profiles"
-        out = self.label(local, has_override=False, local_fallback=local, reachable=True, nas_default=nas)
-        self.assertIn("NAS unreachable", out)
-        self.assertIn(nas, out)              # names the intended NAS location...
-        self.assertIn(local, out)            # ...and the local dir it fell back to
-        self.assertIn("✗", out)         # ✗ marker
+    def test_library_reachable_shows_ok(self):
+        out = self.label("/mnt/ext/CAS Profiles", reachable=True)
+        self.assertEqual(out, "Library: /mnt/ext/CAS Profiles   ✓")
 
-    def test_nas_mounted_shows_reachable(self):
-        nas_mount = "/mnt/gamecove/[03] SETUP/CAS Profiles"
-        out = self.label(nas_mount, has_override=False, local_fallback="/home/x/data/profiles",
-                         reachable=True, nas_default=r"\\host\share")
-        self.assertEqual(out, f"Library: {nas_mount}   ✓")
-
-    def test_explicit_override_reachable(self):
-        out = self.label("/tmp/override", has_override=True, local_fallback="/home/x/data/profiles",
-                         reachable=True, nas_default=r"\\host\share")
-        self.assertEqual(out, "Library: /tmp/override   ✓")
-
-    def test_unreachable_non_fallback_path(self):
-        # a path that isn't the local fallback and isn't reachable -> plain not-reachable (no "falling back")
-        out = self.label("/mnt/gone", has_override=True, local_fallback="/home/x/data/profiles",
-                         reachable=False, nas_default=r"\\host\share")
-        self.assertIn("not reachable", out)
-        self.assertIn("/mnt/gone", out)
-        self.assertNotIn("falling back", out)
+    def test_library_unreachable_shows_unplugged(self):
+        out = self.label("/mnt/ext/CAS Profiles", reachable=False)
+        self.assertIn("✗", out)
+        self.assertIn("/mnt/ext/CAS Profiles", out)
+        self.assertIn("unplugged", out)
 
 
 if __name__ == "__main__":
