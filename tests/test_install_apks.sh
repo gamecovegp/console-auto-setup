@@ -9,11 +9,12 @@ export CAS_INST_DIR="$tmp/_inst"
 
 PM_LOG="$tmp/pm.log"; : > "$PM_LOG"
 PM_INSTALL_RC=0; PM_COMMIT_RC=0
+PM_CREATE_OUT="Success: created install session [77]"   # overridable to simulate a no-session create
 pm(){
   echo "$*" >> "$PM_LOG"
   case "$1" in
     install)         return "$PM_INSTALL_RC";;
-    install-create)  echo "Success: created install session [77]"; return 0;;
+    install-create)  echo "$PM_CREATE_OUT"; return 0;;
     install-write)   return 0;;
     install-commit)  return "$PM_COMMIT_RC";;
     install-abandon) return 0;;
@@ -42,5 +43,20 @@ if install_apks "$empty" "com.none" >/dev/null 2>&1; then echo "FAIL(empty: retu
 : > "$PM_LOG"; PM_INSTALL_RC=1
 if install_apks "$single" "com.single" >/dev/null 2>&1; then echo "FAIL(install-fail: returned success)"; fail=1; fi
 PM_INSTALL_RC=0
+
+# split install-create yields NO parseable session id -> rc 1, warn, NO write/commit attempted
+: > "$PM_LOG"; PM_CREATE_OUT="Error: could not create session"
+out="$(install_apks "$split" "com.split" 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] || { echo "FAIL(no-session: returned success)"; fail=1; }
+echo "$out" | grep -q 'install-create gave no session' || { echo "FAIL(no-session: missing warn)"; fail=1; }
+grep -q '^install-write '  "$PM_LOG" && { echo "FAIL(no-session: install-write should not run)"; fail=1; }
+grep -q '^install-commit ' "$PM_LOG" && { echo "FAIL(no-session: install-commit should not run)"; fail=1; }
+PM_CREATE_OUT="Success: created install session [77]"
+
+# split install-commit fails -> rc 1, and install-abandon is attempted (abandon-on-commit-fail path)
+: > "$PM_LOG"; PM_COMMIT_RC=1
+if install_apks "$split" "com.split" >/dev/null 2>&1; then echo "FAIL(commit-fail: returned success)"; fail=1; fi
+grep -q '^install-abandon 77' "$PM_LOG" || { echo "FAIL(commit-fail: no install-abandon)"; fail=1; }
+PM_COMMIT_RC=0
 
 [ "$fail" -eq 0 ] && { echo "PASS: install_apks"; exit 0; } || exit 1
