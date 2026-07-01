@@ -190,3 +190,26 @@ gl_restore(){
   fi
   warn "gamelauncher: write-back unverified (no preferences_pb) for $_gl_pkg"; return 1
 }
+# install_apks <apk_source_dir> <pkg_label> — stage the dir's *.apk to a clean tmp and install (single ->
+# pm install; splits -> install session). Returns 0 on success, non-zero on any failure. Proven gotchas
+# (wiped golden, 2026-06-16): `pm install-multiple` is "Unknown command" in this su/pm context, and
+# installing straight off the FUSE exfat SD triggers a cross-context avc denial — so ALWAYS stage first.
+# CAS_INST_DIR overrides the staging path for off-device tests (default is the on-device path, unchanged).
+install_apks(){
+  _ia_src="$1"; _ia_pkg="$2"; _ia_stage="${CAS_INST_DIR:-/data/local/tmp/_inst}"
+  set -- "$_ia_src"/*.apk
+  [ -f "$1" ] || { warn "install_apks: no APK in $_ia_src ($_ia_pkg)"; return 1; }
+  rm -rf "$_ia_stage"; mkdir -p "$_ia_stage"
+  cp "$@" "$_ia_stage/" 2>/dev/null; set -- "$_ia_stage"/*.apk
+  _ia_rc=0
+  if [ "$#" -eq 1 ]; then
+    pm install -r -g "$1" >/dev/null 2>&1 || { warn "install failed: $_ia_pkg"; _ia_rc=1; }
+  else
+    _ia_sid="$(pm install-create -r -g 2>/dev/null | sed -n 's/.*\[\([0-9]*\)\].*/\1/p')"
+    if [ -z "$_ia_sid" ]; then warn "install-create gave no session: $_ia_pkg"; rm -rf "$_ia_stage"; return 1; fi
+    _ia_i=0; for _ia_a in "$@"; do pm install-write "$_ia_sid" "s$_ia_i" "$_ia_a" >/dev/null 2>&1 || warn "install-write failed: $_ia_pkg s$_ia_i"; _ia_i=$((_ia_i+1)); done
+    pm install-commit "$_ia_sid" >/dev/null 2>&1 || { warn "split install failed: $_ia_pkg"; pm install-abandon "$_ia_sid" >/dev/null 2>&1; _ia_rc=1; }
+  fi
+  rm -rf "$_ia_stage"
+  return $_ia_rc
+}

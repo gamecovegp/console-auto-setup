@@ -65,19 +65,7 @@ for pkg in $RPKGS; do
       *) warn "no APK in payload for $pkg"; FAIL=$((FAIL+1)); continue ;;
     esac
   fi
-  rm -rf /data/local/tmp/_inst; mkdir -p /data/local/tmp/_inst
-  cp "$@" /data/local/tmp/_inst/ 2>/dev/null; set -- /data/local/tmp/_inst/*.apk
-  if [ "$#" -eq 1 ]; then
-    pm install -r -g "$1" >/dev/null 2>&1 || { warn "install failed: $pkg"; FAIL=$((FAIL+1)); }
-  else
-    SID="$(pm install-create -r -g 2>/dev/null | sed -n 's/.*\[\([0-9]*\)\].*/\1/p')"
-    if [ -z "$SID" ]; then
-      warn "install-create gave no session: $pkg"; FAIL=$((FAIL+1)); rm -rf /data/local/tmp/_inst; continue
-    fi
-    n=0; for a in "$@"; do pm install-write "$SID" "s$n" "$a" >/dev/null 2>&1 || warn "install-write failed: $pkg s$n"; n=$((n+1)); done
-    pm install-commit "$SID" >/dev/null 2>&1 || { warn "split install failed: $pkg"; pm install-abandon "$SID" >/dev/null 2>&1; FAIL=$((FAIL+1)); }
-  fi
-  rm -rf /data/local/tmp/_inst
+  install_apks "$P/$pkg/apk" "$pkg" || FAIL=$((FAIL+1))
 done
 
 # 2) per-app: restore data -> rewrite serial -> chown to THIS unit's uid -> restorecon
