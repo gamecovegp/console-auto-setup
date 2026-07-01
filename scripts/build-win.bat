@@ -54,11 +54,10 @@ echo(
 echo   The exes read profiles and adb/fastboot from the folder they live in
 echo   (APPDIR), NOT from inside the bundle. After copying dist\cas\ to the rig:
 echo(
-echo   1) profiles\      -- OPTIONAL. The library now DEFAULTS to the NAS
-echo                        (\\192.168.100.227\01 GAMECOVE\[03] SETUP\CAS Profiles):
-echo                        use Settings -^> NAS login... once and every PC shares it.
-echo                        A local profiles\ here is only the OFFLINE FALLBACK (used
-echo                        when the NAS isn't reachable). If you want one: ~7.1 GB,
+echo   1) profiles\      -- OPTIONAL. The library is a local/external "CAS Profiles"
+echo                        folder set once via Settings -^> Library folder...
+echo                        (a local profiles\ here is only the fallback when
+echo                        unset). If you want one: ~7.1 GB,
 echo                        WRITABLE (capture/new/delete operate on it). Layout:
 echo                                  dist\cas\profiles\<name>\profile.meta
 echo                                  dist\cas\profiles\<name>\manifest

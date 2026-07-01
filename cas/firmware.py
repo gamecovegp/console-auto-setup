@@ -68,9 +68,9 @@ DEFAULT_FW_ID = "(default kit)"
 # ---------------------------------------------------------------------------
 
 def firmware_root():
-    """Device-root-firmware library dir: the configured firmware_dir (e.g. the NAS CAS Profiles _firmware,
-    so the catalog is shared across benches while goldens stay on a fast local library) or, unset,
-    library_root()/_firmware. DEVICE ROOT firmware only — never emulator BIOS."""
+    """Device-root-firmware library dir: the configured firmware_dir (e.g. a shared external CAS Profiles
+    _firmware, so the catalog is shared across benches while goldens stay on a fast local library) or,
+    unset, library_root()/_firmware. DEVICE ROOT firmware only — never emulator BIOS."""
     return config.firmware_dir()
 
 
@@ -484,7 +484,8 @@ def resolve(serial, identity_dict, root):
 # ---------------------------------------------------------------------------
 
 def log_event(serial, firmware_id, version, action, manual, when=None):
-    """Append one audit line to history_dir()/firmware-history.jsonl. Best-effort (never raises)."""
+    """Append one audit line to the per-machine firmware-history.<machine>.jsonl in history_dir().
+    Best-effort (never raises)."""
     try:
         if when is None:
             import datetime

@@ -465,10 +465,11 @@ class Edl:
             '</data>\n')
 
     def _staged_exec(self, src, workdir):
-        """Return a locally-EXECUTABLE copy of a bundled tool. The firmware library lives on a CIFS/NAS
-        mount that forces file_mode=0664 (non-executable), so exec'ing QSaharaServer/fh_loader straight off
-        it fails with EACCES. Copy into the local workdir + chmod +x. Falls back to the original path if the
-        copy can't be made (e.g. a mocked test path that doesn't exist) — harmless, the runner is mocked."""
+        """Return a locally-EXECUTABLE copy of a bundled tool. The library drive may be noexec (CIFS or a
+        removable FAT/exFAT drive) and can force file_mode=0664 (non-executable), so exec'ing
+        QSaharaServer/fh_loader straight off it fails with EACCES. Copy into the local workdir + chmod +x.
+        Falls back to the original path if the copy can't be made (e.g. a mocked test path that doesn't
+        exist) — harmless, the runner is mocked."""
         try:
             dst = pathlib.Path(workdir) / pathlib.Path(src).name
             if not dst.exists():
@@ -480,12 +481,13 @@ class Edl:
 
     def flash_partition(self, port, label, image, geometry, workdir, log=print):
         """Sahara-load the programmer, then Firehose-write `image` to `label`. Returns True on success.
-        `workdir` is a writable LOCAL dir; the tools + image are staged there (the NAS mount is noexec) and
-        a rawprogram is generated so fh_loader's --search_path finds the image by basename. Success is parsed
-        from tool OUTPUT (QSaharaServer exits 0 even on a port-open failure)."""
+        `workdir` is a writable LOCAL dir; the tools + image are staged there (the library drive may be
+        noexec — CIFS or a removable FAT/exFAT drive) and a rawprogram is generated so fh_loader's
+        --search_path finds the image by basename. Success is parsed from tool OUTPUT (QSaharaServer exits
+        0 even on a port-open failure)."""
         workdir = pathlib.Path(workdir)
         workdir.mkdir(parents=True, exist_ok=True)
-        qsahara = self._staged_exec(self.qsahara, workdir)         # local + executable (CIFS is noexec)
+        qsahara = self._staged_exec(self.qsahara, workdir)         # local + executable (library drive may be noexec)
         fh = self._staged_exec(self.fh, workdir)
         img_name = pathlib.Path(image).name
         staged = workdir / img_name
@@ -514,7 +516,8 @@ class Edl:
 
     def reset(self, port, workdir):
         """Reboot the device out of EDL (Firehose <power reset>). `workdir` is a local dir to stage fh_loader
-        (the NAS copy is noexec). Best-effort — used to recover a unit so a failed flash never strands it."""
+        (the library drive may be noexec — CIFS or a removable FAT/exFAT drive). Best-effort — used to
+        recover a unit so a failed flash never strands it."""
         fh = self._staged_exec(self.fh, workdir)
         try:
             return self.runner([fh, "--port=" + port, "--reset", "--noprompt"])[0] == 0

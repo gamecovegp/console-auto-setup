@@ -563,7 +563,7 @@ def provision_all(make_adb, devices, root="profiles", log=print, profile=None, p
             return ("error", str(e))
     t0 = time.monotonic()
     results = _each_device(devices, worker, parallel)
-    _log_download_run(root, results, time.monotonic() - t0, log)   # whole-run record -> the NAS library
+    _log_download_run(root, results, time.monotonic() - t0, log)   # whole-run record -> the library's history
     return results
 
 
@@ -580,16 +580,16 @@ def _append_history(root, stem, rec, log=print, summary=""):
         with open(path, "a", encoding="utf-8") as f:        # one JSON line per event (small -> ~atomic append)
             f.write(json.dumps(rec) + "\n")
         if summary:
-            log(f"{summary}  → {path}")                      # show the exact destination (NAS vs local)
+            log(f"{summary}  → {path}")                      # show the exact destination (shared vs local)
         return True
     except OSError as e:
-        log(f"warning: could not write {path.name} to {dest} ({e}) — is the log dir / NAS reachable?")
+        log(f"warning: could not write {path.name} to {dest} ({e}) — is the log dir / library drive reachable?")
         return False
 
 
 def _log_download_run(root, results, elapsed, log=print):
-    """Append ONE whole-Download record to <library>/download-history.jsonl. Captures the run's TOTAL length
-    (bytes + seconds) and every device + its profile."""
+    """Append ONE whole-Download record to the per-machine download-history.<machine>.jsonl. Captures the
+    run's TOTAL length (bytes + seconds) and every device + its profile."""
     import datetime
     devs, total = [], 0
     for serial, (status, detail) in results.items():
@@ -703,7 +703,7 @@ def capture_to_pc(adb, name, stamp, root="profiles", log=print, dry_pull=False):
         # whose placeholder manifest has no app lines) — so the Apps tab shows the device's apps ticked
         # and Download has apps to restore. A real, operator-edited selection is preserved.
         seed_default_manifest(pdir, name)
-    if not dry_pull:                                        # log the Save to the centralized NAS history
+    if not dry_pull:                                        # log the Save to the per-machine save-history
         import datetime
         b = P.Profile(pdir).golden_size()
         _append_history(root, "save-history", {

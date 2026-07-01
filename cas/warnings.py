@@ -116,9 +116,9 @@ CATALOG = {
     # --- global ---
     "library_unreachable": {
         "title": "library folder not reachable",
-        "detail": "The profile library path isn't a reachable directory (NAS drive unmapped?). Download "
-                  "and Save can't read/write goldens.",
-        "fix": "Map the NAS drive (Settings → Library folder…) and click 'Refresh devices'.",
+        "detail": "The profile library path isn't a reachable directory (external drive unplugged?). "
+                  "Download and Save can't read/write goldens.",
+        "fix": "Set Settings → Library folder… to the drive, then click 'Refresh devices'.",
         "gates": {"download": "block", "save": "block"},
     },
     "firmware_library_empty": {

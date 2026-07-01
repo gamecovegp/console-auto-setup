@@ -12,7 +12,7 @@ REM  provision\root\firmware, windows-kit, Apps) are NOT in git; they live in TH
 REM  folder and are linked in. Apps\gamecove-companion.apk is the GameCove Companion
 REM  app installed on every unit during provisioning (install_companion).
 REM  folder and are linked into the freshly built dist\cas\. The golden library
-REM  is normally the NAS (Settings -> NAS login), so a local profiles\ is optional.
+REM  = the folder set in Settings -> Library folder (else local profiles\).
 REM
 REM  Prereqs (one-time): Python 3.14 + `py -3.14 -m pip install "pyinstaller>=6.11"`,
 REM  plus git on PATH.
@@ -54,5 +54,5 @@ if exist "data\ES-DE\downloaded_media" (
 
 echo(
 echo === DONE — updated + rebuilt.  Run:  dist\cas\cas-gui.exe ===
-echo   (golden library = NAS by default; Settings -^> NAS login if not set yet)
+echo   (golden library = the folder set in Settings -^> Library folder; else local profiles\)
 endlocal
