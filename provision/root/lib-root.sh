@@ -122,6 +122,17 @@ home_launcher(){
   cmd package resolve-activity -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null \
     | sed -n 's/.*packageName=\([^ }]*\).*/\1/p' | head -1
 }
+# The set of packages a homescreen layout REFERENCES — for self-containment, so every placed icon can
+# resolve on any unit model. Intent strings in the Launcher3-family favorites DB are stored as plaintext
+# (component=<pkg>/<cls> and package=<pkg>), so a launcher-agnostic token scan works without sqlite3 and
+# degrades to empty on an exotic binary blob. PURE: no pm/device dependency (caller filters by pm path).
+# homescreen_apps <launcher_data_dir> -> deduped pkg names on stdout (launcher itself NOT excluded here).
+homescreen_apps(){
+  _ha_dir="$1"; [ -d "$_ha_dir" ] || return 0
+  { grep -rahoE 'component=[A-Za-z0-9._]+/' "$_ha_dir" 2>/dev/null | sed 's/^component=//; s#/.*##'
+    grep -rahoE 'package=[A-Za-z0-9._]+'     "$_ha_dir" 2>/dev/null | sed 's/^package=//'
+  } | sort -u
+}
 # The GAME FRONTEND (holds per-system emulator picks) — DISTINCT from the Android HOME app (home_launcher).
 # Curated fallback list; the probe below handles OEM rebrands that keep the ES-DE-fork data shape.
 GAME_LAUNCHERS="com.handheld.launcher"
@@ -178,4 +189,62 @@ gl_restore(){
     ok "game launcher config applied: $_gl_pkg"; return 0
   fi
   warn "gamelauncher: write-back unverified (no preferences_pb) for $_gl_pkg"; return 1
+}
+# install_apks <apk_source_dir> <pkg_label> — stage the dir's *.apk to a clean tmp and install (single ->
+# pm install; splits -> install session). Returns 0 on success, non-zero on any failure. Proven gotchas
+# (wiped golden, 2026-06-16): `pm install-multiple` is "Unknown command" in this su/pm context, and
+# installing straight off the FUSE exfat SD triggers a cross-context avc denial — so ALWAYS stage first.
+# CAS_INST_DIR overrides the staging path for off-device tests (default is the on-device path, unchanged).
+install_apks(){
+  _ia_src="$1"; _ia_pkg="$2"; _ia_stage="${CAS_INST_DIR:-/data/local/tmp/_inst}"
+  set -- "$_ia_src"/*.apk
+  [ -f "$1" ] || { warn "install_apks: no APK in $_ia_src ($_ia_pkg)"; return 1; }
+  rm -rf "$_ia_stage"; mkdir -p "$_ia_stage"
+  cp "$@" "$_ia_stage/" 2>/dev/null; set -- "$_ia_stage"/*.apk
+  _ia_rc=0
+  if [ "$#" -eq 1 ]; then
+    pm install -r -g "$1" >/dev/null 2>&1 || { warn "install failed: $_ia_pkg"; _ia_rc=1; }
+  else
+    _ia_sid="$(pm install-create -r -g 2>/dev/null | sed -n 's/.*\[\([0-9]*\)\].*/\1/p')"
+    if [ -z "$_ia_sid" ]; then warn "install-create gave no session: $_ia_pkg"; rm -rf "$_ia_stage"; return 1; fi
+    _ia_i=0; for _ia_a in "$@"; do pm install-write "$_ia_sid" "s$_ia_i" "$_ia_a" >/dev/null 2>&1 || warn "install-write failed: $_ia_pkg s$_ia_i"; _ia_i=$((_ia_i+1)); done
+    pm install-commit "$_ia_sid" >/dev/null 2>&1 || { warn "split install failed: $_ia_pkg"; pm install-abandon "$_ia_sid" >/dev/null 2>&1; _ia_rc=1; }
+  fi
+  rm -rf "$_ia_stage"
+  return $_ia_rc
+}
+# homescreen_bundle_apps <launcher_data_dir> <payload_dir> <launcher_pkg> — SELF-CONTAINED LAYOUT: bundle
+# the installer for every app the layout references so each icon resolves on ANY target model. Skips the
+# launcher itself and apps the per-app loop already captured ($payload/<pkg>/apk) — no duplicate APKs.
+# Copies base+splits from `pm path`. Prints the count of bundled apps. Additive: a copy miss is silent.
+homescreen_bundle_apps(){
+  _hb_ldir="$1"; _hb_pd="$2"; _hb_lp="$3"; _hb_hsa="$_hb_pd/homescreen/apps"; _hb_n=0
+  for _hb_p in $(homescreen_apps "$_hb_ldir"); do
+    [ "$_hb_p" = "$_hb_lp" ] && continue
+    [ -d "$_hb_pd/$_hb_p/apk" ] && continue
+    _hb_paths="$(pm path "$_hb_p" 2>/dev/null | sed 's/^package://')"
+    [ -n "$_hb_paths" ] || continue
+    mkdir -p "$_hb_hsa/$_hb_p"
+    for _hb_ap in $_hb_paths; do cp "$_hb_ap" "$_hb_hsa/$_hb_p/" 2>/dev/null; done
+    if [ -n "$(ls -A "$_hb_hsa/$_hb_p" 2>/dev/null)" ]; then _hb_n=$((_hb_n+1)); else rmdir "$_hb_hsa/$_hb_p" 2>/dev/null; fi
+  done
+  echo "$_hb_n"
+}
+# homescreen_install_missing <payload_dir> — install any placed app that is ABSENT on THIS unit, so its
+# icon resolves when the favorites DB is applied (a wiped unit / different model may lack the game launcher
+# or other placed apps). Skips apps already present. Additive: a miss WARNs, never fails the restore.
+homescreen_install_missing(){
+  _hm_pd="$1"; _hm_hsa="$_hm_pd/homescreen/apps"
+  [ -d "$_hm_hsa" ] || return 0
+  for _hm_d in "$_hm_hsa"/*/; do
+    [ -d "$_hm_d" ] || continue
+    _hm_p="$(basename "$_hm_d")"
+    if pm path "$_hm_p" >/dev/null 2>&1; then
+      log "homescreen: $_hm_p already present — no install needed"
+    else
+      install_apks "$_hm_d" "$_hm_p" \
+        || warn "homescreen: could not install $_hm_p — its icon may not resolve (platform-signed system app on a foreign key?)"
+    fi
+  done
+  return 0
 }
