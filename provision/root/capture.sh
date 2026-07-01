@@ -147,7 +147,11 @@ else
     # applied). Additive — never bumps CFAIL. Only when the layout was actually captured.
     if [ -f "$HS/launcher_data.tar" ]; then
       _hs_n="$(homescreen_bundle_apps "/data/data/$LP" "$P" "$LP")"
-      [ "${_hs_n:-0}" -gt 0 ] 2>/dev/null && ok "homescreen: bundled $_hs_n placed-app installer(s) so icons resolve on any model"
+      if [ "${_hs_n:-0}" -gt 0 ] 2>/dev/null; then
+        ok "homescreen: bundled $_hs_n placed-app installer(s) ($(du -sh "$HS/apps" 2>/dev/null | cut -f1)) so icons resolve on any model"
+      else
+        log "homescreen: no placed apps derived from the layout (launcher DB had no resolvable app references) — icons rely on apps already present on the unit"
+      fi
     fi
   else
     warn "no home launcher resolved (or it has no data dir) — homescreen layout NOT captured"
