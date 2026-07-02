@@ -542,11 +542,14 @@ def match_profile(model, root="profiles", sd_gb=None):
     return None                          # ambiguous -> operator assigns (double-click / Assign button)
 
 
-def default_capture_selection(device_apps, game_launcher=None, home_launcher=None):
+def default_capture_selection(device_apps, game_launcher=None, home_launcher=None, always_install=None):
     """The default Save-list check state: {pkg: (apk_on, config_on)}. Emulators (EMULATOR_PKGS) -> both axes,
     EXCEPT CONFIG_ONLY_PKGS (APK sideloaded externally) -> config-only; the game/HOME launcher -> config-only
     (APK is system firmware, but their state — emulator picks / homescreen — is worth keeping, so config
-    defaults ON); every other device app -> off."""
+    defaults ON); every other device app -> off. Finally, any device app in `always_install` (the global
+    always-install set) has its APK bit forced ON (Config left to the above policy) — these are apps the
+    operator wants installed on every unit."""
+    ai = always_install or frozenset()
     sel = {}
     for pkg in device_apps:
         if pkg in CONFIG_ONLY_PKGS:
@@ -557,6 +560,9 @@ def default_capture_selection(device_apps, game_launcher=None, home_launcher=Non
     for lp in (game_launcher, home_launcher):
         if lp:
             sel[lp] = (False, True)                  # config-on by default (@gamelauncher / @homescreen)
+    for pkg in device_apps:                          # always-install: force APK on, keep the Config default
+        if pkg in ai and pkg in sel:
+            sel[pkg] = (True, sel[pkg][1])
     return sel
 
 

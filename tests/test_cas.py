@@ -412,6 +412,21 @@ class TestProfiles(unittest.TestCase):
         self.assertEqual(checked["com.random.note"], (False, False))
         self.assertEqual(checked["com.handheld.launcher"], (False, True))   # launcher = config-only
 
+    def test_default_capture_always_install_forces_apk_on(self):
+        from cas import profiles as P
+        apps = ["com.valvesoftware.steamlink", "com.github.stenzek.duckstation", "com.random.app"]
+        ai = frozenset({"com.valvesoftware.steamlink"})
+        sel = P.default_capture_selection(apps, always_install=ai)
+        self.assertEqual(sel["com.valvesoftware.steamlink"], (True, False))   # non-emulator member: APK on, Config policy-off
+        self.assertEqual(sel["com.github.stenzek.duckstation"], (True, True)) # emulator unchanged
+        self.assertEqual(sel["com.random.app"], (False, False))              # non-member unchanged
+        # a member that is ALSO config-only (sideloaded) still gets APK on (always-install wins)
+        sel2 = P.default_capture_selection(["xyz.aethersx2.tturnip"],
+                                           always_install=frozenset({"xyz.aethersx2.tturnip"}))
+        self.assertEqual(sel2["xyz.aethersx2.tturnip"], (True, True))
+        # back-compat: no always_install arg == today's behavior
+        self.assertEqual(P.default_capture_selection(["com.random.app"]), {"com.random.app": (False, False)})
+
     def test_store_read_accessors(self):
         with tempfile.TemporaryDirectory() as t:
             store = pathlib.Path(t) / "store"
