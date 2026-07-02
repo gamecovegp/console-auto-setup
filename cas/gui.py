@@ -1275,7 +1275,8 @@ class App:
         device_apps = self._scan_device_apps(serial)
         gl, hl = self._detect_device_launchers(serial)
         sel = P.initial_capture_selection(device_apps, prof.capture_axes(), prof.capture_flags(),
-                                          game_launcher=gl, home_launcher=hl)
+                                          game_launcher=gl, home_launcher=hl,
+                                          always_install=config.always_install_pkgs())
         # The launchers are NOT app rows — they're @gamelauncher / @homescreen behavior flags (below).
         # Pull their default Config bit out of the selection to seed those flags; leave only real apps.
         gl_on = sel.pop(gl, (False, True))[1] if gl else None
@@ -1351,7 +1352,8 @@ class App:
             # is NOT in the golden, so it's listed but un-ticked (opt in to push it).
             has_apk = {p: prof.has_captured_apk(p) for p in own_pkgs}
             has_cfg = {p: prof.has_captured_config(p) for p in own_pkgs}
-            rows, cfg_disabled = P.download_rows(own_pkgs, store_pkgs, has_apk, has_cfg)
+            rows, cfg_disabled = P.download_rows(own_pkgs, store_pkgs, has_apk, has_cfg,
+                                                 always_install=config.always_install_pkgs())
             labels = {}
             for p in store_pkgs:
                 if p not in own_pkgs:
