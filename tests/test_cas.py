@@ -709,6 +709,14 @@ class TestConfig(unittest.TestCase):
                 frozenset({"com.valvesoftware.steamlink", "com.gamecove.gamecove_companion"}))
             self.assertNotIn("always_install", C.load_config())
 
+    def test_always_install_setter_wraps_bare_string(self):
+        from cas import config as C
+        with tempfile.TemporaryDirectory() as t:
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cas-config.json")
+            # bare string is treated as a single package, not iterated into chars
+            C.set_always_install_pkgs("com.solo")
+            self.assertEqual(C.always_install_pkgs(), frozenset({"com.solo"}))
+
     def test_device_profiles_persist(self):
         from cas import config as C
         with tempfile.TemporaryDirectory() as t:
