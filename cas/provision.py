@@ -509,6 +509,11 @@ def provision(adb, profile, log=print, dry_push=False, es_media_src=None):
 MAGISK_PATCH = BUNDLE / "provision" / "root" / "magisk-patch"   # aarch64 magiskboot + Magisk's boot_patch.sh
 DEV_PATCH = "/data/local/tmp/cas_magiskpatch"                   # on-device workdir for the patch
 
+GRANT_PERSIST = BUNDLE / "provision" / "root" / "grant-persist.sh"   # permanent shell-grant writer (root)
+DEV_GRANT = "/data/local/tmp/cas_grant.sh"                           # where it lands on the device
+GRANT_PROMPT_BTN = r"grant"          # MagiskSU su-request "Grant" button (matched case-insensitively)
+MAGISK_PKG = "com.topjohnwu.magisk"  # gate taps to the Magisk prompt so we never mis-tap another app
+
 
 def patch_init_boot_on_device(adb, stock_init_boot, dest, log=print):
     """Patch a STOCK init_boot into a Magisk-patched one ON the device, then pull the result to `dest` on
@@ -909,6 +914,54 @@ def root(adb, fastboot, stock_init_boot, magisk_apk=None, log=print, wait=True, 
     log("init_boot flashed + Magisk installed, but the adb shell uid isn't granted root YET. One-time per "
         "unit: on the device open Magisk → Superuser → enable the 'Shell' / '[SharedUID] Shell' toggle, "
         "then retry. (MagiskSU gates the shell uid until you allow it.)")
+    return False
+
+
+def _persist_grant(adb, log=print):
+    """Make the just-obtained shell grant permanent (magisk policy) + set global root access, by
+    running the bundled grant-persist.sh AS ROOT. Returns True if the shell policy read-back = allow.
+    A False here means the shell is rooted NOW but may re-prompt after a reboot — not fatal."""
+    if not adb.push(str(GRANT_PERSIST), DEV_GRANT):
+        log("  ⚠ could not push grant-persist.sh — shell is rooted now but may re-prompt after reboot.")
+        return False
+    rc, out, err = adb.su(f"sh {DEV_GRANT}", timeout=30)
+    adb.shell(f"rm -f {DEV_GRANT}")
+    if "policy=2" in out:
+        log("  ✓ shell root made permanent (magisk policy: shell uid 2000 = allow).")
+        return True
+    log(f"  ⚠ persistence unconfirmed (rc={rc}): {((out or err) or '').strip()[:160]} — shell is "
+        "rooted now but may re-prompt after reboot.")
+    return False
+
+
+def grant_shell_root(adb, log=print, attempts=3, ui_timeout=15):
+    """Zero-touch: obtain + persist the MagiskSU shell grant with no human tap. Raises the on-device
+    Magisk Superuser prompt (device-side-backgrounded `su`, so the PC never blocks), auto-taps
+    'Grant' via uiautomator (gated to the Magisk app so we never mis-tap), confirms root with a short
+    re-check, then makes it permanent. Returns True once the shell holds root; on failure logs the
+    one-time manual instruction and returns False."""
+    from . import uiauto
+    from .adb import SU
+    if "uid=0" in adb.su("id", timeout=8)[1]:        # already granted (e.g. a remembered policy)
+        _persist_grant(adb, log)
+        return True
+    for i in range(attempts):
+        log(f"  auto-grant {i + 1}/{attempts}: raising the Magisk Superuser prompt…")
+        adb.shell(f"{SU} -c id >/dev/null 2>&1 &")    # device-side background: returns immediately
+        tapped = False
+        for _ in range(ui_timeout):
+            if MAGISK_PKG in uiauto.foreground(adb) and uiauto.tap(adb, GRANT_PROMPT_BTN):
+                tapped = True
+                break
+            time.sleep(1)
+        if tapped and "uid=0" in adb.su("id", timeout=8)[1]:
+            log("  ✓ shell auto-granted.")
+            _persist_grant(adb, log)
+            return True
+        log("  prompt not answered yet — retrying." if i + 1 < attempts else "  auto-grant failed.")
+    log("init_boot flashed + Magisk installed, but the shell uid could NOT be auto-granted. One-time "
+        "per unit: on the device open Magisk → Superuser → enable the 'Shell' / '[SharedUID] Shell' "
+        "toggle, then retry. (MagiskSU gates the shell uid until you allow it.)")
     return False
 
 
