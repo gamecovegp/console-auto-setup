@@ -3000,5 +3000,55 @@ class TestProfileLibraryLabel(unittest.TestCase):
         self.assertIn("unplugged", out)
 
 
+class ValidatePayloadAxes(unittest.TestCase):
+    """_validate_payload must be axis-aware: an apk-only app (axes=apk) legitimately has NO data.tar,
+    so demanding data.tar for it wrongly aborts the Download (regression: Steam Link failed with
+    'payload missing apk/data' though its apk-only capture was complete)."""
+
+    def _payload(self, tmp):
+        pay = pathlib.Path(tmp) / "golden_root_payload"
+        pay.mkdir(parents=True)
+        (pay / "global.meta").write_text("golden_serial=9C33-6BBD\n")
+        return pay
+
+    def _apk_only(self, pay, pkg):
+        (pay / pkg / "apk").mkdir(parents=True)
+        (pay / pkg / "apk" / "base.apk").write_text("x")   # apk captured, NO data.tar (axes=apk)
+
+    def _full(self, pay, pkg):
+        (pay / pkg / "apk").mkdir(parents=True)
+        (pay / pkg / "apk" / "base.apk").write_text("x")
+        (pay / pkg / "data.tar").write_text("x")
+
+    def test_apk_only_app_validates_without_data_tar(self):
+        with tempfile.TemporaryDirectory() as t:
+            pay = self._payload(t)
+            self._apk_only(pay, "com.valvesoftware.steamlink")
+            self._full(pay, "com.github.stenzek.duckstation")
+            pkgs = ["com.valvesoftware.steamlink", "com.github.stenzek.duckstation"]
+            axes = {"com.valvesoftware.steamlink": (True, False),        # apk-only
+                    "com.github.stenzek.duckstation": (True, True)}      # apk + config
+            logs = []
+            self.assertTrue(PV._validate_payload(pay, pkgs, axes, logs.append), logs)
+
+    def test_missing_apk_when_apk_axis_on_still_fails(self):
+        with tempfile.TemporaryDirectory() as t:
+            pay = self._payload(t)
+            (pay / "com.brokenapk").mkdir()             # apk axis on but no apk/*.apk => truncated
+            logs = []
+            self.assertFalse(
+                PV._validate_payload(pay, ["com.brokenapk"], {"com.brokenapk": (True, False)}, logs.append))
+            self.assertIn("com.brokenapk", " ".join(logs))
+
+    def test_missing_data_when_config_axis_on_still_fails(self):
+        with tempfile.TemporaryDirectory() as t:
+            pay = self._payload(t)
+            self._apk_only(pay, "com.wantsconfig")      # config axis on but no data.tar => incomplete
+            logs = []
+            self.assertFalse(
+                PV._validate_payload(pay, ["com.wantsconfig"], {"com.wantsconfig": (True, True)}, logs.append))
+            self.assertIn("com.wantsconfig", " ".join(logs))
+
+
 if __name__ == "__main__":
     unittest.main()
