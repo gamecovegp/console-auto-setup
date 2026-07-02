@@ -15,7 +15,7 @@
 - Device-side scripts ship **inside the bundle** under `provision/root/` and are pushed to `/data/local/tmp/…`; success is signalled by a **stdout sentinel**, never the exit code (exit codes are unreliable across these units — same pattern as `boot_patch.sh`'s `CAS_PATCH_OK`).
 - Magisk policy encoding: `policies` table columns `(uid, policy, until, logging, notification)`; **`policy=2` = allow**, `uid=2000` = adb shell. `settings` key `root_access=3` = apps + adb.
 - Shell-policy row is the **load-bearing** guarantee; global auto-allow is best-effort convenience.
-- Tests: headless, via `FakeRunner` injected as `Adb(runner=…)`; run `python3 -m pytest tests/<file> -v`. Do not add new third-party deps.
+- Tests: headless, via `FakeRunner` injected as `Adb(runner=…)`. On this machine `unittest discover` breaks (py3.14 + a `[07]` path in the tree), so run via MODULE PATHS: `python3 -m unittest tests.test_uiauto tests.test_cas tests.test_firmware tests.test_warnings`. Baseline before this feature: **265 tests, OK**. Do not add new third-party deps.
 - `is_root()` uses a 30 s timeout because a fresh-unit `su` blocks on the prompt; inside the grant flow use short (8 s) root re-checks to keep retries fast.
 
 ---
@@ -75,7 +75,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `python3 -m pytest tests/test_uiauto.py -v`
+Run: `python3 -m unittest tests.test_uiauto -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'cas.uiauto'`.
 
 - [ ] **Step 3: Write the implementation**
@@ -130,8 +130,8 @@ def foreground(adb):
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `python3 -m pytest tests/test_uiauto.py -v`
-Expected: PASS (4 passed). Note `(810, 955)`: cx=(540+1080)//2=810, cy=(900+1010)//2=955.
+Run: `python3 -m unittest tests.test_uiauto -v`
+Expected: OK (4 tests). Note `(810, 955)`: cx=(540+1080)//2=810, cy=(900+1010)//2=955.
 
 - [ ] **Step 5: Commit**
 
@@ -269,8 +269,10 @@ class GrantRunner(FakeRunner):
                     return (0, "uid=0(root)\n", "") if self.granted else (1, "", "Permission denied")
                 if cmd.startswith("sh /data/local/tmp/cas_grant.sh"):
                     return 0, "CAS_GRANT policy=2\n", ""
-                if cmd.endswith("&"):          # device-side-backgrounded prompt trigger
-                    return 0, "", ""
+        # Everything else — the prompt-raise `su -c id …&` (SU is embedded in the cmd string, so it is
+        # NOT a standalone arg and does not enter the su block above), `rm -f`, `boot_patch.sh`,
+        # `getprop`, `wait-for-device` — falls through to FakeRunner, whose shell catch-all returns
+        # (0, "", "").
         return super().__call__(args, input_text, timeout)
 
 
@@ -297,7 +299,7 @@ class GrantShellRoot(unittest.TestCase):
 
 - [ ] **Step 6: Run the Python test to verify it fails**
 
-Run: `python3 -m pytest tests/test_cas.py::GrantShellRoot -v`
+Run: `python3 -m unittest tests.test_cas.GrantShellRoot -v`
 Expected: FAIL — `AttributeError: module 'cas.provision' has no attribute 'grant_shell_root'`.
 
 - [ ] **Step 7: Implement the two functions**
@@ -355,8 +357,8 @@ def grant_shell_root(adb, log=print, attempts=3, ui_timeout=15):
 
 - [ ] **Step 8: Run both tests to verify they pass**
 
-Run: `python3 -m pytest tests/test_cas.py::GrantShellRoot -v && bash tests/test_grant_persist.sh`
-Expected: PASS (2 passed; `ok: grant-persist.sh`).
+Run: `python3 -m unittest tests.test_cas.GrantShellRoot -v && bash tests/test_grant_persist.sh`
+Expected: OK (2 tests; then `ok: grant-persist.sh`).
 
 - [ ] **Step 9: Commit**
 
@@ -398,7 +400,7 @@ Add to the `GrantShellRoot` TestCase in `tests/test_cas.py`:
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `python3 -m pytest "tests/test_cas.py::GrantShellRoot::test_config_toggle_default_on" -v`
+Run: `python3 -m unittest tests.test_cas.GrantShellRoot.test_config_toggle_default_on -v`
 Expected: FAIL — `AttributeError: module 'cas.config' has no attribute 'auto_grant_shell'`.
 
 - [ ] **Step 3: Add the config accessor**
@@ -436,30 +438,30 @@ Replace `cas/provision.py:896-902` (the `if adb.is_root(): …` / manual-message
 
 - [ ] **Step 5: Write the `root()` end-to-end test**
 
-Add to `GrantShellRoot`:
+`root()` reaches the new tail only with `wait=True` (a `wait=False` call returns at `provision.py:894`). `FakeRunner` already drives the whole flow headlessly: `boot_patch.sh` returns `CAS_PATCH_OK`, `sys.boot_completed` is `"1"` so `wait_boot()` returns immediately, and `GrantRunner` grants on the auto-tap. Pass a stub `flasher` so no real fastboot runs. Add to `GrantShellRoot`:
 
 ```python
     def test_root_autogrants_when_booted_but_ungranted(self):
-        import tempfile, os, pathlib
-        r = GrantRunner()                       # boots ungranted, grants on the auto-tap
-        adb = Adb("ABC123", runner=r)
-        fb = Fastboot("ABC123", runner=r)
+        import tempfile, pathlib
+        ra, fb = GrantRunner(), FbRunner()
         with tempfile.TemporaryDirectory() as d:
             stock = pathlib.Path(d) / "init_boot.img"
-            stock.write_bytes(b"x")             # stock image must exist on the PC
-            os.environ.pop("CAS_CONFIG", None)  # default toggle = on
-            ok = PV.root(adb, fb, stock, magisk_apk=None, log=lambda *_: None,
-                         wait=False, flasher=lambda *a, **k: True)
-        # wait=False returns True before the grant path; assert the grant path directly instead:
-        self.assertTrue(PV.grant_shell_root(adb, log=lambda *_: None, ui_timeout=2))
+            stock.write_bytes(b"x")                       # PC stock image must exist
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(d) / "absent.json")  # missing -> default toggle on
+            try:
+                ok = PV.root(Adb(runner=ra), Fastboot(runner=fb), stock, magisk_apk=None,
+                             log=lambda *_: None, wait=True,
+                             flasher=lambda adb, target, img, log: True)
+            finally:
+                os.environ.pop("CAS_CONFIG", None)
+        self.assertTrue(ok)                               # root() returns True via the auto-grant tail
+        self.assertTrue(ra.granted)                       # the auto-tap path actually ran
 ```
-
-> Note: `root()` with `wait=False` short-circuits at `:894` (no boot wait, no grant). The end-to-end grant path is exercised by `grant_shell_root` directly (above) plus the `wait=True` behaviour, which needs a booted device and is covered by the on-device bench gate (Task 4). Keep this test focused on "grant path reachable + succeeds"; do not fake `wait_boot`.
 
 - [ ] **Step 6: Run the full suite to verify pass + no regressions**
 
-Run: `python3 -m pytest tests/ -q && for t in tests/test_*.sh; do bash "$t" || exit 1; done`
-Expected: all Python tests pass (previous count + the new ones) and every shell test prints `ok:`.
+Run: `python3 -m unittest tests.test_cas tests.test_firmware tests.test_warnings && for t in tests/test_*.sh; do bash "$t" || exit 1; done`
+Expected: `OK` (265 baseline + the new tests) and every shell test prints `ok:` / `PASS`.
 
 - [ ] **Step 7: Commit**
 
