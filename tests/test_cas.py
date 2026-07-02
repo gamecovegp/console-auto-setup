@@ -427,6 +427,19 @@ class TestProfiles(unittest.TestCase):
         # back-compat: no always_install arg == today's behavior
         self.assertEqual(P.default_capture_selection(["com.random.app"]), {"com.random.app": (False, False)})
 
+    def test_initial_capture_always_install_overrides_stale_manifest(self):
+        from cas import profiles as P
+        apps = ["com.valvesoftware.steamlink", "com.random.app"]
+        saved = {"com.valvesoftware.steamlink": (False, False),   # stale: APK previously unticked
+                 "com.random.app": (True, True)}
+        ai = frozenset({"com.valvesoftware.steamlink"})
+        sel = P.initial_capture_selection(apps, saved, {}, always_install=ai)
+        self.assertEqual(sel["com.valvesoftware.steamlink"], (True, False))  # APK re-asserted on; Config from saved (False)
+        self.assertEqual(sel["com.random.app"], (True, True))               # non-member honors saved manifest
+        # back-compat: no always_install arg == today's behavior (saved manifest wins)
+        sel2 = P.initial_capture_selection(apps, saved, {})
+        self.assertEqual(sel2["com.valvesoftware.steamlink"], (False, False))
+
     def test_store_read_accessors(self):
         with tempfile.TemporaryDirectory() as t:
             store = pathlib.Path(t) / "store"

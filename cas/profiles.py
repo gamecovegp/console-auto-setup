@@ -566,11 +566,14 @@ def default_capture_selection(device_apps, game_launcher=None, home_launcher=Non
     return sel
 
 
-def initial_capture_selection(device_apps, saved_axes, saved_flags, game_launcher=None, home_launcher=None):
+def initial_capture_selection(device_apps, saved_axes, saved_flags, game_launcher=None, home_launcher=None,
+                              always_install=None):
     """The Save-list initial check state: default_capture_selection, overlaid by a saved capture-manifest's
-    package axes, then the launcher rows seeded from the saved @gamelauncher/@homescreen flags (launcher
-    selection is persisted as flags, not package lines). Pure — no I/O."""
-    sel = default_capture_selection(device_apps, game_launcher, home_launcher)
+    package axes, then the launcher rows seeded from the saved @gamelauncher/@homescreen flags. Members of
+    `always_install` have their APK bit re-asserted ON *after* the saved overlay, so a stale saved manifest
+    (APK previously unticked) can't suppress an always-install app. Pure — no I/O."""
+    ai = always_install or frozenset()
+    sel = default_capture_selection(device_apps, game_launcher, home_launcher, ai)
     # A saved manifest only OVERRIDES the axes of apps that are actually on this device — it never ADDS a
     # row. Capturing into a profile whose golden came from another unit must not surface apps this device
     # doesn't have (e.g. AetherSX2 on a Retroid that only ships NetherSX2). The scan is authoritative.
@@ -582,6 +585,10 @@ def initial_capture_selection(device_apps, saved_axes, saved_flags, game_launche
     for pkg in CONFIG_ONLY_PKGS:
         if pkg in sel:
             sel[pkg] = (False, sel[pkg][1])
+    # Always-install WINS over both the saved overlay and the config-only reassert above: force APK on.
+    for pkg in ai:
+        if pkg in sel:
+            sel[pkg] = (True, sel[pkg][1])
     if game_launcher and game_launcher in sel:
         sel[game_launcher] = (False, (saved_flags or {}).get("gamelauncher", "on") == "on")
     if home_launcher and home_launcher in sel:
