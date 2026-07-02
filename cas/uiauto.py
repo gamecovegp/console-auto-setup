@@ -3,21 +3,33 @@ external shell script. Controls are located by text/content-desc and tapped at t
 center (rotation-independent — no pixel guessing)."""
 import re
 
-_NODE = re.compile(
-    r'<node[^>]*?(?:text|content-desc)="([^"]+)"[^>]*?'
-    r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"')
+_NODE_EL = re.compile(r'<node\b[^>]*?/?>')
+_ATTR_LABEL = re.compile(r'(?:text|content-desc)="([^"]+)"')
+_ATTR_BOUNDS = re.compile(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"')
 
 
 def find_control(xml, pattern):
-    """Center (cx, cy) of the first node whose text/content-desc matches `pattern` (regex, case-
-    insensitive), or None. Pure function over a uiautomator XML dump."""
+    """Center (cx, cy) of the control whose text/content-desc matches `pattern` (regex, case-
+    insensitive). When several nodes match, a CLICKABLE one wins over non-clickable text — so a
+    dialog's 'Grant shell root access?' message never steals the tap from its 'Grant' button;
+    otherwise the first match wins. Returns None if nothing matches. Pure over a uiautomator dump."""
     rx = re.compile(pattern, re.I)
-    for m in _NODE.finditer(xml or ""):
-        label = m.group(1)
-        a, b, c, d = (int(g) for g in m.groups()[1:])
-        if label.strip() and rx.search(label):
-            return (a + c) // 2, (b + d) // 2
-    return None
+    first = None
+    for el in _NODE_EL.finditer(xml or ""):
+        node = el.group(0)
+        mb = _ATTR_BOUNDS.search(node)
+        if not mb:
+            continue
+        for label in _ATTR_LABEL.findall(node):
+            if label.strip() and rx.search(label):
+                a, b, c, d = (int(g) for g in mb.groups())
+                center = ((a + c) // 2, (b + d) // 2)
+                if 'clickable="true"' in node:
+                    return center            # a clickable match wins immediately
+                if first is None:
+                    first = center           # else remember the first match as fallback
+                break
+    return first
 
 
 def dump(adb):

@@ -916,7 +916,7 @@ def root(adb, fastboot, stock_init_boot, magisk_apk=None, log=print, wait=True, 
     if _cfg.auto_grant_shell():
         log("shell not granted yet — auto-granting via the on-device Magisk prompt (zero-touch)…")
         if grant_shell_root(adb, log=log):
-            log("✓ ROOTED — shell auto-granted and made permanent. Ready to '② Download'.")
+            log("✓ ROOTED — shell auto-granted. Ready to '② Download'.")
             return True
         return False                       # grant_shell_root already logged the manual fallback
     log("init_boot flashed + Magisk installed, but the adb shell uid isn't granted root YET. One-time per "
@@ -956,13 +956,13 @@ def grant_shell_root(adb, log=print, attempts=3, ui_timeout=15):
     for i in range(attempts):
         log(f"  auto-grant {i + 1}/{attempts}: raising the Magisk Superuser prompt…")
         adb.shell(f"{SU} -c id >/dev/null 2>&1 &")    # device-side background: returns immediately
-        tapped = False
         for _ in range(ui_timeout):
             if MAGISK_PKG in uiauto.foreground(adb) and uiauto.tap(adb, GRANT_PROMPT_BTN):
-                tapped = True
                 break
             time.sleep(1)
-        if tapped and "uid=0" in adb.su("id", timeout=8)[1]:
+        # Re-check unconditionally: a grant can land even when this iteration's tap missed the
+        # button, and a prior grant may only register now (no fresh prompt once the policy exists).
+        if "uid=0" in adb.su("id", timeout=8)[1]:
             log("  ✓ shell auto-granted.")
             _persist_grant(adb, log)
             return True

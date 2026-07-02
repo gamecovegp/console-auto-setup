@@ -29,6 +29,14 @@ class FindControl(unittest.TestCase):
         xml = '<node text="" content-desc="Grant" bounds="[540,900][1080,1010]" />'
         self.assertEqual(uiauto.find_control(xml, r"grant"), (810, 955))
 
+    def test_prefers_clickable_button_over_message_text(self):
+        xml = ('<hierarchy>'
+               '<node text="Grant shell root access?" clickable="false" bounds="[0,300][1080,420]" />'
+               '<node text="GRANT" clickable="true" bounds="[540,900][1080,1010]" />'
+               '</hierarchy>')
+        # non-clickable message contains "grant" and comes FIRST, but the clickable button must win
+        self.assertEqual(uiauto.find_control(xml, r"grant"), (810, 955))
+
 
 if __name__ == "__main__":
     unittest.main()
