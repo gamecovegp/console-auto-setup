@@ -230,26 +230,29 @@ def resolve_app_apk(pkg, prof, store_dir, bundle_fallback=None):
     return None
 
 
-def download_rows(own_pkgs, store_pkgs, has_apk, has_config):
+def download_rows(own_pkgs, store_pkgs, has_apk, has_config, always_install=None):
     """Golden-driven defaults for the Download app-pick modal. Returns (rows, cfg_disabled):
       * rows: ordered {pkg: (apk_default, cfg_default)}. A captured golden app defaults APK-ON only when the
         golden actually bundled an APK for it (has_apk[pkg]) — a config-only capture (APK sideloaded) defaults
         APK-OFF. Its Config defaults ON only when the golden captured config for it (has_config[pkg]) — an
         apk-only capture defaults Config-OFF. A store-only (managed) app — NOT in the golden — defaults
-        APK-OFF (you opt in to push the store build) and has no captured config.
+        APK-OFF (you opt in to push the store build) and has no captured config. FINALLY, any app in
+        `always_install` (the global always-install set) has its APK default forced ON — for golden apps and
+        for store-only apps alike — so operator-always-wanted apps install without re-ticking.
       * cfg_disabled: the set of pkgs whose Config checkbox the modal must DISABLE — you can't restore
         config that was never captured.
     Pure — the caller derives has_apk/has_config ({pkg: bool}) from the payload (Profile.has_captured_*)."""
+    ai = always_install or frozenset()
     rows, cfg_disabled = {}, set()
     for pkg in own_pkgs:
-        apk = bool(has_apk.get(pkg, True))     # default True (back-compat) if the caller didn't probe
+        apk = bool(has_apk.get(pkg, True)) or (pkg in ai)   # always-install forces APK on
         cfg = bool(has_config.get(pkg))
         rows[pkg] = (apk, cfg)
         if not cfg:
             cfg_disabled.add(pkg)
     for pkg in store_pkgs:
         if pkg not in rows:
-            rows[pkg] = (False, False)
+            rows[pkg] = ((pkg in ai), False)                # store-only member auto-ticks APK; else off
             cfg_disabled.add(pkg)
     return rows, cfg_disabled
 

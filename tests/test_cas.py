@@ -543,6 +543,22 @@ class TestProfiles(unittest.TestCase):
         # Config box is disabled wherever the golden captured nothing to restore.
         self.assertEqual(cfg_disabled, {"b", "store1"})
 
+    def test_download_rows_always_install_auto_ticks_apk(self):
+        from cas import profiles as P
+        own = ["com.github.stenzek.duckstation", "com.cfgonly"]
+        store = ["com.valvesoftware.steamlink"]     # store-only, not in the golden
+        has_apk = {"com.github.stenzek.duckstation": True, "com.cfgonly": False}  # cfgonly: config-only capture, no bundled apk
+        has_cfg = {"com.github.stenzek.duckstation": True, "com.cfgonly": True}
+        ai = frozenset({"com.valvesoftware.steamlink", "com.cfgonly"})
+        rows, disabled = P.download_rows(own, store, has_apk, has_cfg, always_install=ai)
+        self.assertEqual(rows["com.valvesoftware.steamlink"], (True, False))     # store member auto-ticks APK
+        self.assertIn("com.valvesoftware.steamlink", disabled)                   # no captured config -> disabled
+        self.assertEqual(rows["com.cfgonly"], (True, True))                      # golden member, has_apk False -> APK forced on
+        self.assertEqual(rows["com.github.stenzek.duckstation"], (True, True))   # non-member unchanged
+        # regression: a store-only NON-member stays OFF
+        rows2, _ = P.download_rows([], ["com.other"], {}, {}, always_install=ai)
+        self.assertEqual(rows2["com.other"], (False, False))
+
     def test_download_rows_apk_default_follows_captured_apk(self):
         # 'a' has a captured apk; 'b' is config-only (config captured, NO apk — e.g. a sideloaded emulator).
         rows, cfg_disabled = P.download_rows(["a", "b"], [],
