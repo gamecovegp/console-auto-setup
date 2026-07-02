@@ -160,6 +160,13 @@ def set_es_media_src(path):
     return es_media_src()
 
 
+def auto_grant_shell():
+    """Whether root() auto-grants + persists the MagiskSU shell grant with no human tap (default
+    True). Set "auto_grant_shell": false in cas-config.json to fall back to the manual Magisk
+    Superuser toggle."""
+    return bool(load_config().get("auto_grant_shell", True))
+
+
 # --- per-device profile memory ------------------------------------------------------------------
 # A device is identified by its adb SERIAL (the unit's stable hardware serial — survives reboot/reflash and
 # SD swaps). We remember each device's profile so it sticks across launches: the FIRST time a device is

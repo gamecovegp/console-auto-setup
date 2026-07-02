@@ -912,6 +912,13 @@ def root(adb, fastboot, stock_init_boot, magisk_apk=None, log=print, wait=True, 
     if adb.is_root():
         log("✓ ROOTED — adb shell su works. Ready to '② Download to selected device'.")
         return True
+    from . import config as _cfg
+    if _cfg.auto_grant_shell():
+        log("shell not granted yet — auto-granting via the on-device Magisk prompt (zero-touch)…")
+        if grant_shell_root(adb, log=log):
+            log("✓ ROOTED — shell auto-granted and made permanent. Ready to '② Download'.")
+            return True
+        return False                       # grant_shell_root already logged the manual fallback
     log("init_boot flashed + Magisk installed, but the adb shell uid isn't granted root YET. One-time per "
         "unit: on the device open Magisk → Superuser → enable the 'Shell' / '[SharedUID] Shell' toggle, "
         "then retry. (MagiskSU gates the shell uid until you allow it.)")

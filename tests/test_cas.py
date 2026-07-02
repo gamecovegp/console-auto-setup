@@ -182,6 +182,32 @@ class GrantShellRoot(unittest.TestCase):
         self.assertFalse(ok)
         self.assertFalse(any("input tap" in " ".join(c) for c in r.calls))
 
+    def test_config_toggle_default_on(self):
+        from cas import config
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as d:
+            os.environ["CAS_CONFIG"] = os.path.join(d, "cas-config.json")  # no file -> default
+            try:
+                self.assertTrue(config.auto_grant_shell())
+            finally:
+                del os.environ["CAS_CONFIG"]
+
+    def test_root_autogrants_when_booted_but_ungranted(self):
+        import tempfile, pathlib
+        ra, fb = GrantRunner(), FbRunner()
+        with tempfile.TemporaryDirectory() as d:
+            stock = pathlib.Path(d) / "init_boot.img"
+            stock.write_bytes(b"x")                       # PC stock image must exist
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(d) / "absent.json")  # missing -> default toggle on
+            try:
+                ok = PV.root(Adb(runner=ra), Fastboot(runner=fb), stock, magisk_apk=None,
+                             log=lambda *_: None, wait=True,
+                             flasher=lambda adb, target, img, log: True)
+            finally:
+                os.environ.pop("CAS_CONFIG", None)
+        self.assertTrue(ok)                               # root() returns True via the auto-grant tail
+        self.assertTrue(ra.granted)                       # the auto-tap path actually ran
+
 
 def make_profile(tmp, name="odin2mini", model="Odin2 ?Mini", apps=None):
     apps = apps or ["org.es_de.frontend", "dev.eden.eden_emulator", "org.citra.emu"]
