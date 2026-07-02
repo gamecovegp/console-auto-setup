@@ -2318,6 +2318,18 @@ class TestPickCapture(unittest.TestCase):
     """_pick_capture: the Save modal's behavior choices (incl. hardening) land in the capture-manifest and
     then seed the Download defaults."""
 
+    def setUp(self):
+        self._prev_cfg = os.environ.get("CAS_CONFIG")
+        self._cfgdir = tempfile.TemporaryDirectory()
+        os.environ["CAS_CONFIG"] = str(pathlib.Path(self._cfgdir.name) / "cas-config.json")
+
+    def tearDown(self):
+        if self._prev_cfg is None:
+            os.environ.pop("CAS_CONFIG", None)
+        else:
+            os.environ["CAS_CONFIG"] = self._prev_cfg
+        self._cfgdir.cleanup()
+
     def test_hardening_flows_to_capture_manifest_and_seeds_download(self):
         from cas.gui import App
         root = pathlib.Path(tempfile.mkdtemp())
@@ -2419,6 +2431,18 @@ class TestPickCapture(unittest.TestCase):
 
 class TestPickDownloads(unittest.TestCase):
     """_pick_downloads: one modal per DISTINCT assigned profile, write-after-all, cancel aborts clean."""
+
+    def setUp(self):
+        self._prev_cfg = os.environ.get("CAS_CONFIG")
+        self._cfgdir = tempfile.TemporaryDirectory()
+        os.environ["CAS_CONFIG"] = str(pathlib.Path(self._cfgdir.name) / "cas-config.json")
+
+    def tearDown(self):
+        if self._prev_cfg is None:
+            os.environ.pop("CAS_CONFIG", None)
+        else:
+            os.environ["CAS_CONFIG"] = self._prev_cfg
+        self._cfgdir.cleanup()
 
     def _profile(self, root, name, pkgs):
         d = pathlib.Path(root) / name
