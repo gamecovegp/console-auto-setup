@@ -230,26 +230,29 @@ def resolve_app_apk(pkg, prof, store_dir, bundle_fallback=None):
     return None
 
 
-def download_rows(own_pkgs, store_pkgs, has_apk, has_config):
+def download_rows(own_pkgs, store_pkgs, has_apk, has_config, always_install=None):
     """Golden-driven defaults for the Download app-pick modal. Returns (rows, cfg_disabled):
       * rows: ordered {pkg: (apk_default, cfg_default)}. A captured golden app defaults APK-ON only when the
         golden actually bundled an APK for it (has_apk[pkg]) — a config-only capture (APK sideloaded) defaults
         APK-OFF. Its Config defaults ON only when the golden captured config for it (has_config[pkg]) — an
         apk-only capture defaults Config-OFF. A store-only (managed) app — NOT in the golden — defaults
-        APK-OFF (you opt in to push the store build) and has no captured config.
+        APK-OFF (you opt in to push the store build) and has no captured config. FINALLY, any app in
+        `always_install` (the global always-install set) has its APK default forced ON — for golden apps and
+        for store-only apps alike — so operator-always-wanted apps install without re-ticking.
       * cfg_disabled: the set of pkgs whose Config checkbox the modal must DISABLE — you can't restore
         config that was never captured.
     Pure — the caller derives has_apk/has_config ({pkg: bool}) from the payload (Profile.has_captured_*)."""
+    ai = always_install or frozenset()
     rows, cfg_disabled = {}, set()
     for pkg in own_pkgs:
-        apk = bool(has_apk.get(pkg, True))     # default True (back-compat) if the caller didn't probe
+        apk = bool(has_apk.get(pkg, True)) or (pkg in ai)   # always-install forces APK on
         cfg = bool(has_config.get(pkg))
         rows[pkg] = (apk, cfg)
         if not cfg:
             cfg_disabled.add(pkg)
     for pkg in store_pkgs:
         if pkg not in rows:
-            rows[pkg] = (False, False)
+            rows[pkg] = ((pkg in ai), False)                # store-only member auto-ticks APK; else off
             cfg_disabled.add(pkg)
     return rows, cfg_disabled
 
@@ -542,11 +545,14 @@ def match_profile(model, root="profiles", sd_gb=None):
     return None                          # ambiguous -> operator assigns (double-click / Assign button)
 
 
-def default_capture_selection(device_apps, game_launcher=None, home_launcher=None):
+def default_capture_selection(device_apps, game_launcher=None, home_launcher=None, always_install=None):
     """The default Save-list check state: {pkg: (apk_on, config_on)}. Emulators (EMULATOR_PKGS) -> both axes,
     EXCEPT CONFIG_ONLY_PKGS (APK sideloaded externally) -> config-only; the game/HOME launcher -> config-only
     (APK is system firmware, but their state — emulator picks / homescreen — is worth keeping, so config
-    defaults ON); every other device app -> off."""
+    defaults ON); every other device app -> off. Finally, any device app in `always_install` (the global
+    always-install set) has its APK bit forced ON (Config left to the above policy) — these are apps the
+    operator wants installed on every unit."""
+    ai = always_install or frozenset()
     sel = {}
     for pkg in device_apps:
         if pkg in CONFIG_ONLY_PKGS:
@@ -557,14 +563,20 @@ def default_capture_selection(device_apps, game_launcher=None, home_launcher=Non
     for lp in (game_launcher, home_launcher):
         if lp:
             sel[lp] = (False, True)                  # config-on by default (@gamelauncher / @homescreen)
+    for pkg in device_apps:                          # always-install: force APK on, keep the Config default
+        if pkg in ai and pkg in sel:
+            sel[pkg] = (True, sel[pkg][1])
     return sel
 
 
-def initial_capture_selection(device_apps, saved_axes, saved_flags, game_launcher=None, home_launcher=None):
+def initial_capture_selection(device_apps, saved_axes, saved_flags, game_launcher=None, home_launcher=None,
+                              always_install=None):
     """The Save-list initial check state: default_capture_selection, overlaid by a saved capture-manifest's
-    package axes, then the launcher rows seeded from the saved @gamelauncher/@homescreen flags (launcher
-    selection is persisted as flags, not package lines). Pure — no I/O."""
-    sel = default_capture_selection(device_apps, game_launcher, home_launcher)
+    package axes, then the launcher rows seeded from the saved @gamelauncher/@homescreen flags. Members of
+    `always_install` have their APK bit re-asserted ON *after* the saved overlay, so a stale saved manifest
+    (APK previously unticked) can't suppress an always-install app. Pure — no I/O."""
+    ai = always_install or frozenset()
+    sel = default_capture_selection(device_apps, game_launcher, home_launcher, ai)
     # A saved manifest only OVERRIDES the axes of apps that are actually on this device — it never ADDS a
     # row. Capturing into a profile whose golden came from another unit must not surface apps this device
     # doesn't have (e.g. AetherSX2 on a Retroid that only ships NetherSX2). The scan is authoritative.
@@ -576,11 +588,23 @@ def initial_capture_selection(device_apps, saved_axes, saved_flags, game_launche
     for pkg in CONFIG_ONLY_PKGS:
         if pkg in sel:
             sel[pkg] = (False, sel[pkg][1])
+    # Always-install WINS over both the saved overlay and the config-only reassert above: force APK on.
+    for pkg in ai:
+        if pkg in sel:
+            sel[pkg] = (True, sel[pkg][1])
     if game_launcher and game_launcher in sel:
         sel[game_launcher] = (False, (saved_flags or {}).get("gamelauncher", "on") == "on")
     if home_launcher and home_launcher in sel:
         sel[home_launcher] = (False, (saved_flags or {}).get("homescreen", "on") == "on")
     return sel
+
+
+def merge_always_install(old, visible, ticked):
+    """Delta-merge the app-pick modal's Always choices into the global always-install set. `old` = current
+    global set; `visible` = pkgs shown in this modal (its editable scope); `ticked` = the visible pkgs the
+    operator marked Always. Members NOT visible in this modal are preserved untouched. Returns a frozenset."""
+    old, visible, ticked = frozenset(old), frozenset(visible), frozenset(ticked)
+    return (old - visible) | (ticked & visible)
 
 
 def archive_profile(profile, stamp, archive_root=None):

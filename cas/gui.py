@@ -1182,8 +1182,16 @@ class App:
     # two thin wrappers: Save scans the connected device, Download lists the golden. Each wrapper writes
     # the same manifest files the old "Save … selection" buttons did, then the chain runs.
 
+    def _persist_always_install(self, visible, ticked):
+        """Merge the app-pick modal's Always choices into the global always-install set and persist it
+        (verbatim; an empty result DISABLES rather than resurrecting defaults). No-op when unchanged."""
+        old = config.always_install_pkgs()
+        new = P.merge_always_install(old, visible, ticked)
+        if new != old:
+            config.set_always_install_pkgs(sorted(new))
+
     def _app_pick_modal(self, title, intro, prof, rows, launchers, flag_specs, labels=None,
-                        flags_caption="— behavior —", cfg_disabled=None):
+                        flags_caption="— behavior —", cfg_disabled=None, always_install=None):
         """Modal app picker. `rows` is an ordered {pkg:(apk0,cfg0)} initial tick state; `launchers` is the
         set of pkgs whose APK box is disabled (system firmware, never reinstalled); `cfg_disabled` is the
         set of pkgs whose Config box is disabled (nothing was captured to restore); `flag_specs` is an
@@ -1194,6 +1202,8 @@ class App:
         Cancel/close."""
         labels = labels or {}
         cfg_disabled = cfg_disabled or set()
+        ai = None if always_install is None else frozenset(always_install)  # None -> no Always column
+        always_vars = {}
         self._icon_refs = []                               # fresh icon refs for this modal's lifetime
         win = tk.Toplevel(self.win)
         win.title(title)
@@ -1212,17 +1222,24 @@ class App:
         def _run():
             result["axes"] = {p: (a.get(), c.get()) for p, (a, c) in pick_vars.items()}
             result["flags"] = {k: ("on" if v.get() else "off") for k, v in flag_vars.items()}
+            result["always"] = {p for p, v in always_vars.items() if v.get()}
             win.destroy()
         _tip(ttk.Button(btnrow, text="▶ Run", command=_run),
              "Save this selection and run the action.").pack(side="right")
         ttk.Button(btnrow, text="Cancel", command=win.destroy).pack(side="right", padx=(0, 6))
 
+        def _apk_locked():
+            # rows whose Always box is ticked have their APK locked-on; keep bulk Select/Deselect-all
+            # from toggling those APK vars (a disabled ttk box still honors a programmatic .set()).
+            return {p for p, v in always_vars.items() if v.get()}
+
         selrow = ttk.Frame(win, padding=(10, 0))
         selrow.pack(side="top", anchor="w")
         ttk.Button(selrow, text="Select all",
-                   command=lambda: self._set_all(pick_vars, True, launchers, cfg_disabled)).pack(side="left")
+                   command=lambda: self._set_all(pick_vars, True, launchers | _apk_locked(), cfg_disabled)) \
+            .pack(side="left")
         ttk.Button(selrow, text="Deselect all",
-                   command=lambda: self._set_all(pick_vars, False, launchers, cfg_disabled)) \
+                   command=lambda: self._set_all(pick_vars, False, launchers | _apk_locked(), cfg_disabled)) \
             .pack(side="left", padx=(4, 0))
 
         bodywrap = ttk.Frame(win, padding=(6, 4))
@@ -1250,6 +1267,21 @@ class App:
                 cfg_cb.configure(state="disabled")
                 cfg_tip = f"No captured config for {pkg} — nothing to restore."
             _tip(cfg_cb, cfg_tip).pack(side="left")
+            if ai is not None and not is_launcher:
+                # Always-install: a GLOBAL preference. When on, APK is forced on + locked (the app is,
+                # by definition, always installed). Unticking releases APK back to normal.
+                always_v = tk.BooleanVar(value=(pkg in ai))
+                always_vars[pkg] = always_v
+
+                def _lock(av=always_v, ap=apk_v, cb=apk_cb):
+                    if av.get():
+                        ap.set(True); cb.configure(state="disabled")
+                    else:
+                        cb.configure(state="normal")
+                acb = ttk.Checkbutton(row, text="Always", variable=always_v, command=_lock)
+                _lock()                                    # apply initial lock state for current members
+                _tip(acb, f"Always install {pkg} on every unit (adds it to the global always-install "
+                          "set; APK stays on).").pack(side="left")
         if flag_specs:
             ttk.Label(listf, text=flags_caption).pack(anchor="w", pady=(6, 0))
             for key, label, tip, init in flag_specs:
@@ -1260,7 +1292,7 @@ class App:
         win.wait_window()
         if "axes" not in result:
             return None
-        return result["axes"], result["flags"]
+        return result["axes"], result["flags"], result.get("always", set())
 
     def _row_model(self, serial):
         """The model-column text for a device row (for nicer modal titles), or the serial as fallback."""
@@ -1277,7 +1309,8 @@ class App:
         device_apps = self._scan_device_apps(serial)
         gl, hl = self._detect_device_launchers(serial)
         sel = P.initial_capture_selection(device_apps, prof.capture_axes(), prof.capture_flags(),
-                                          game_launcher=gl, home_launcher=hl)
+                                          game_launcher=gl, home_launcher=hl,
+                                          always_install=config.always_install_pkgs())
         # The launchers are NOT app rows — they're @gamelauncher / @homescreen behavior flags (below).
         # Pull their default Config bit out of the selection to seed those flags; leave only real apps.
         gl_on = sel.pop(gl, (False, True))[1] if gl else None
@@ -1322,11 +1355,13 @@ class App:
             "bundles its data/settings/BIOS. The behaviour items below are saved with the golden and "
             "become its defaults on Download.",
             prof, rows, set(), flag_specs=flag_specs,
-            flags_caption="— behavior (saved with the golden; default on Download) —")
+            flags_caption="— behavior (saved with the golden; default on Download) —",
+            always_install=config.always_install_pkgs())
         if res is None:
             self.log("Save cancelled — nothing captured.")
             return False
-        axes, modal_flags = res
+        axes, modal_flags, always_ticked = res
+        self._persist_always_install(set(rows), always_ticked)
         flags = dict(cf); flags.update(modal_flags)        # all five @flags come straight from the modal
         pkgs, axes_sub = _manifest_from_axes(axes)         # real apps only (launchers are flags, not pkgs)
         P.save_manifest(prof.capture_manifest_path, pkgs, flags,
@@ -1356,7 +1391,8 @@ class App:
             # is NOT in the golden, so it's listed but un-ticked (opt in to push it).
             has_apk = {p: prof.has_captured_apk(p) for p in own_pkgs}
             has_cfg = {p: prof.has_captured_config(p) for p in own_pkgs}
-            rows, cfg_disabled = P.download_rows(own_pkgs, store_pkgs, has_apk, has_cfg)
+            rows, cfg_disabled = P.download_rows(own_pkgs, store_pkgs, has_apk, has_cfg,
+                                                 always_install=config.always_install_pkgs())
             labels = {}
             for p in store_pkgs:
                 if p not in own_pkgs:
@@ -1370,11 +1406,13 @@ class App:
                 "Config restores its saved data/settings/BIOS. Apps not captured in the golden (marked "
                 "“from store”) are OFF by default — tick to push the server’s current build. Config is "
                 "available only where the golden captured it. Behaviour @flags below apply on the device.",
-                prof, rows, set(), flag_specs, labels=labels, cfg_disabled=cfg_disabled)
+                prof, rows, set(), flag_specs, labels=labels, cfg_disabled=cfg_disabled,
+                always_install=config.always_install_pkgs())
             if res is None:
                 self.log("Download cancelled — nothing installed.")
                 return False
-            axes, fl = res
+            axes, fl, always_ticked = res
+            self._persist_always_install(set(rows), always_ticked)
             pkgs, axes_sub = _manifest_from_axes(axes)
             pending.append((prof.manifest_path, pkgs, fl, axes_sub, name))
         for mpath, pkgs, fl, axes_sub, name in pending:

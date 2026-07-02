@@ -412,6 +412,46 @@ class TestProfiles(unittest.TestCase):
         self.assertEqual(checked["com.random.note"], (False, False))
         self.assertEqual(checked["com.handheld.launcher"], (False, True))   # launcher = config-only
 
+    def test_default_capture_always_install_forces_apk_on(self):
+        from cas import profiles as P
+        apps = ["com.valvesoftware.steamlink", "com.github.stenzek.duckstation", "com.random.app"]
+        ai = frozenset({"com.valvesoftware.steamlink"})
+        sel = P.default_capture_selection(apps, always_install=ai)
+        self.assertEqual(sel["com.valvesoftware.steamlink"], (True, False))   # non-emulator member: APK on, Config policy-off
+        self.assertEqual(sel["com.github.stenzek.duckstation"], (True, True)) # emulator unchanged
+        self.assertEqual(sel["com.random.app"], (False, False))              # non-member unchanged
+        # a member that is ALSO config-only (sideloaded) still gets APK on (always-install wins)
+        sel2 = P.default_capture_selection(["xyz.aethersx2.tturnip"],
+                                           always_install=frozenset({"xyz.aethersx2.tturnip"}))
+        self.assertEqual(sel2["xyz.aethersx2.tturnip"], (True, True))
+        # back-compat: no always_install arg == today's behavior
+        self.assertEqual(P.default_capture_selection(["com.random.app"]), {"com.random.app": (False, False)})
+
+    def test_initial_capture_always_install_overrides_stale_manifest(self):
+        from cas import profiles as P
+        apps = ["com.valvesoftware.steamlink", "com.random.app"]
+        saved = {"com.valvesoftware.steamlink": (False, False),   # stale: APK previously unticked
+                 "com.random.app": (True, True)}
+        ai = frozenset({"com.valvesoftware.steamlink"})
+        sel = P.initial_capture_selection(apps, saved, {}, always_install=ai)
+        self.assertEqual(sel["com.valvesoftware.steamlink"], (True, False))  # APK re-asserted on; Config from saved (False)
+        self.assertEqual(sel["com.random.app"], (True, True))               # non-member honors saved manifest
+        # back-compat: no always_install arg == today's behavior (saved manifest wins)
+        sel2 = P.initial_capture_selection(apps, saved, {})
+        self.assertEqual(sel2["com.valvesoftware.steamlink"], (False, False))
+
+    def test_merge_always_install(self):
+        from cas import profiles as P
+        old = frozenset({"a", "b", "offscreen"})     # 'offscreen' is a member NOT shown in this modal
+        visible = {"a", "b", "c"}
+        ticked = {"b", "c"}                           # untick a, keep b, add c
+        self.assertEqual(P.merge_always_install(old, visible, ticked),
+                         frozenset({"b", "c", "offscreen"}))   # a removed, c added, offscreen preserved
+        # unticking all visible members with no offscreen member -> empty (disable)
+        self.assertEqual(P.merge_always_install({"a", "b"}, {"a", "b"}, set()), frozenset())
+        # ticked outside visible is ignored
+        self.assertEqual(P.merge_always_install(set(), {"a"}, {"a", "x"}), frozenset({"a"}))
+
     def test_store_read_accessors(self):
         with tempfile.TemporaryDirectory() as t:
             store = pathlib.Path(t) / "store"
@@ -514,6 +554,22 @@ class TestProfiles(unittest.TestCase):
                                 "store1": (False, False)}) # store-only -> APK OFF (opt-in), no config
         # Config box is disabled wherever the golden captured nothing to restore.
         self.assertEqual(cfg_disabled, {"b", "store1"})
+
+    def test_download_rows_always_install_auto_ticks_apk(self):
+        from cas import profiles as P
+        own = ["com.github.stenzek.duckstation", "com.cfgonly"]
+        store = ["com.valvesoftware.steamlink"]     # store-only, not in the golden
+        has_apk = {"com.github.stenzek.duckstation": True, "com.cfgonly": False}  # cfgonly: config-only capture, no bundled apk
+        has_cfg = {"com.github.stenzek.duckstation": True, "com.cfgonly": True}
+        ai = frozenset({"com.valvesoftware.steamlink", "com.cfgonly"})
+        rows, disabled = P.download_rows(own, store, has_apk, has_cfg, always_install=ai)
+        self.assertEqual(rows["com.valvesoftware.steamlink"], (True, False))     # store member auto-ticks APK
+        self.assertIn("com.valvesoftware.steamlink", disabled)                   # no captured config -> disabled
+        self.assertEqual(rows["com.cfgonly"], (True, True))                      # golden member, has_apk False -> APK forced on
+        self.assertEqual(rows["com.github.stenzek.duckstation"], (True, True))   # non-member unchanged
+        # regression: a store-only NON-member stays OFF
+        rows2, _ = P.download_rows([], ["com.other"], {}, {}, always_install=ai)
+        self.assertEqual(rows2["com.other"], (False, False))
 
     def test_download_rows_apk_default_follows_captured_apk(self):
         # 'a' has a captured apk; 'b' is config-only (config captured, NO apk — e.g. a sideloaded emulator).
@@ -643,6 +699,50 @@ class TestConfig(unittest.TestCase):
             self.assertEqual(pathlib.Path(C.set_library("/mnt/nas/CAS Profiles")),
                              pathlib.Path("/mnt/nas/CAS Profiles"))
             self.assertEqual(C.load_config().get("library"), "/mnt/nas/CAS Profiles")
+
+    def test_always_install_default_override_and_clear(self):
+        from cas import config as C
+        with tempfile.TemporaryDirectory() as t:
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cas-config.json")
+            # key absent -> default set
+            self.assertEqual(
+                C.always_install_pkgs(),
+                frozenset({"com.valvesoftware.steamlink", "com.gamecove.gamecove_companion"}))
+            # explicit override wins and is persisted sorted
+            self.assertEqual(C.set_always_install_pkgs(["com.foo", "com.bar"]),
+                             frozenset({"com.foo", "com.bar"}))
+            self.assertEqual(C.load_config().get("always_install"), ["com.bar", "com.foo"])
+            # a stored empty list DISABLES the feature (getter honors [])
+            C.save_config({"always_install": []})
+            self.assertEqual(C.always_install_pkgs(), frozenset())
+            # setter with a falsy value CLEARS the override -> back to default (mirrors set_library)
+            self.assertEqual(
+                C.set_always_install_pkgs(None),
+                frozenset({"com.valvesoftware.steamlink", "com.gamecove.gamecove_companion"}))
+            self.assertNotIn("always_install", C.load_config())
+
+    def test_always_install_setter_wraps_bare_string(self):
+        from cas import config as C
+        with tempfile.TemporaryDirectory() as t:
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cas-config.json")
+            # bare string is treated as a single package, not iterated into chars
+            C.set_always_install_pkgs("com.solo")
+            self.assertEqual(C.always_install_pkgs(), frozenset({"com.solo"}))
+
+    def test_always_install_setter_none_clears_empty_disables(self):
+        from cas import config as C
+        with tempfile.TemporaryDirectory() as t:
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cas-config.json")
+            C.set_always_install_pkgs(["com.a", "com.b"])
+            # empty list STORES [] -> disabled (getter returns empty, NOT the default set)
+            self.assertEqual(C.set_always_install_pkgs([]), frozenset())
+            self.assertEqual(C.load_config().get("always_install"), [])
+            self.assertEqual(C.always_install_pkgs(), frozenset())
+            # None CLEARS the override -> default set returns
+            self.assertEqual(
+                C.set_always_install_pkgs(None),
+                frozenset({"com.valvesoftware.steamlink", "com.gamecove.gamecove_companion"}))
+            self.assertNotIn("always_install", C.load_config())
 
     def test_device_profiles_persist(self):
         from cas import config as C
@@ -2276,6 +2376,18 @@ class TestPickCapture(unittest.TestCase):
     """_pick_capture: the Save modal's behavior choices (incl. hardening) land in the capture-manifest and
     then seed the Download defaults."""
 
+    def setUp(self):
+        self._prev_cfg = os.environ.get("CAS_CONFIG")
+        self._cfgdir = tempfile.TemporaryDirectory()
+        os.environ["CAS_CONFIG"] = str(pathlib.Path(self._cfgdir.name) / "cas-config.json")
+
+    def tearDown(self):
+        if self._prev_cfg is None:
+            os.environ.pop("CAS_CONFIG", None)
+        else:
+            os.environ["CAS_CONFIG"] = self._prev_cfg
+        self._cfgdir.cleanup()
+
     def test_hardening_flows_to_capture_manifest_and_seeds_download(self):
         from cas.gui import App
         root = pathlib.Path(tempfile.mkdtemp())
@@ -2290,10 +2402,11 @@ class TestPickCapture(unittest.TestCase):
         app._detect_device_launchers = lambda s: (None, None)
         app._row_model = lambda s: "AIR X"
         seen = {}
-        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, flags_caption="—"):
+        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, flags_caption="—",
+                       always_install=None):
             seen["flag_keys"] = [f[0] for f in flag_specs]
             # operator unticks hardening at Save
-            return ({}, {"settings": "on", "hardening": "off", "grants": "on"})
+            return ({}, {"settings": "on", "hardening": "off", "grants": "on"}, set())
         app._app_pick_modal = fake_modal
         self.assertTrue(app._pick_capture("S1", "prof"))
         # the Save modal offered settings/hardening/grants (the optimization stuff is THERE)
@@ -2320,11 +2433,12 @@ class TestPickCapture(unittest.TestCase):
         app._detect_device_launchers = lambda s: ("com.handheld.launcher", "com.android.launcher3")
         app._row_model = lambda s: "AIR X"
         seen = {}
-        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, flags_caption="—"):
+        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, flags_caption="—",
+                       always_install=None):
             seen["row_pkgs"] = list(rows.keys())
             seen["flag_keys"] = [f[0] for f in flag_specs]
             return ({p: (True, True) for p in rows}, {"settings": "on", "hardening": "on", "grants": "on",
-                                                      "homescreen": "off", "gamelauncher": "on"})
+                                                      "homescreen": "off", "gamelauncher": "on"}, set())
         app._app_pick_modal = fake_modal
         self.assertTrue(app._pick_capture("S1", "prof"))
         # launchers are NOT app rows…
@@ -2356,9 +2470,10 @@ class TestPickCapture(unittest.TestCase):
         app._scan_device_apps = lambda s: []
         app._row_model = lambda s: "AIR X"
         keys = {}
-        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, flags_caption="—"):
+        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, flags_caption="—",
+                       always_install=None):
             keys["k"] = [f[0] for f in flag_specs]
-            return ({}, {})
+            return ({}, {}, set())
         app._app_pick_modal = fake_modal
         # NO launcher detected at all → homescreen still shown, gamelauncher hidden
         app._detect_device_launchers = lambda s: (None, None)
@@ -2374,6 +2489,18 @@ class TestPickCapture(unittest.TestCase):
 
 class TestPickDownloads(unittest.TestCase):
     """_pick_downloads: one modal per DISTINCT assigned profile, write-after-all, cancel aborts clean."""
+
+    def setUp(self):
+        self._prev_cfg = os.environ.get("CAS_CONFIG")
+        self._cfgdir = tempfile.TemporaryDirectory()
+        os.environ["CAS_CONFIG"] = str(pathlib.Path(self._cfgdir.name) / "cas-config.json")
+
+    def tearDown(self):
+        if self._prev_cfg is None:
+            os.environ.pop("CAS_CONFIG", None)
+        else:
+            os.environ["CAS_CONFIG"] = self._prev_cfg
+        self._cfgdir.cleanup()
 
     def _profile(self, root, name, pkgs):
         d = pathlib.Path(root) / name
@@ -2399,9 +2526,10 @@ class TestPickDownloads(unittest.TestCase):
             app = self._app(root)
             app.assigned = {"S1": "p", "S2": "p"}              # two devices, one shared profile
             calls = []
-            def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, cfg_disabled=None):
+            def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, cfg_disabled=None,
+                          always_install=None):
                 calls.append(title)
-                return ({pk: (True, False) for pk in rows}, {"settings": "on"})
+                return ({pk: (True, False) for pk in rows}, {"settings": "on"}, set())
             app._app_pick_modal = fake_modal
             self.assertTrue(app._pick_downloads(["S1", "S2"]))
             self.assertEqual(len(calls), 1)                    # ONE modal for the shared profile
@@ -2418,9 +2546,10 @@ class TestPickDownloads(unittest.TestCase):
         app = self._app(root)
         app.assigned = {"S1": "p1", "S2": "p2"}            # two distinct profiles
         seen = []
-        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, cfg_disabled=None):
+        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, cfg_disabled=None,
+                       always_install=None):
             seen.append(title)
-            return None if len(seen) == 2 else ({pk: (True, True) for pk in rows}, {})
+            return None if len(seen) == 2 else ({pk: (True, True) for pk in rows}, {}, set())
         app._app_pick_modal = fake_modal
         self.assertFalse(app._pick_downloads(["S1", "S2"]))   # cancel on the 2nd modal
         # write-after-all: a late cancel leaves NEITHER profile's manifest written
@@ -2433,9 +2562,10 @@ class TestPickDownloads(unittest.TestCase):
         app = self._app(root)
         app.assigned = {"S1": "p", "S2": "(no match)"}     # S3 has no entry at all
         calls = []
-        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, cfg_disabled=None):
+        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, cfg_disabled=None,
+                       always_install=None):
             calls.append(title)
-            return ({pk: (True, True) for pk in rows}, {})
+            return ({pk: (True, True) for pk in rows}, {}, set())
         app._app_pick_modal = fake_modal
         self.assertTrue(app._pick_downloads(["S1", "S2", "S3"]))
         self.assertEqual(len(calls), 1)                    # only the real profile prompts
@@ -2459,9 +2589,10 @@ class TestPickDownloads(unittest.TestCase):
             app = self._app(root)
             app.assigned = {"S1": "p"}
             seen = {}
-            def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, cfg_disabled=None):
+            def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, cfg_disabled=None,
+                          always_install=None):
                 seen["rows"], seen["cfg_disabled"] = rows, cfg_disabled
-                return ({pk: rows[pk] for pk in rows}, {})         # accept the proposed defaults
+                return ({pk: rows[pk] for pk in rows}, {}, set())  # accept the proposed defaults
             app._app_pick_modal = fake_modal
             self.assertTrue(app._pick_downloads(["S1"]))
             self.assertEqual(seen["rows"]["com.withcfg"], (True, True))
