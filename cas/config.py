@@ -56,6 +56,31 @@ def set_library(path):
     return library_root()
 
 
+_DEFAULT_ALWAYS_INSTALL = ("com.valvesoftware.steamlink", "com.gamecove.gamecove_companion")
+
+
+def always_install_pkgs():
+    """The global 'always-install' package set (frozenset) — apps pre-ticked APK-on in the Save dialog
+    and auto-ticked APK-on in the Download dialog for every profile. An explicit 'always_install' list in
+    cas-config.json overrides the default; a stored empty list disables the feature."""
+    v = load_config().get("always_install")
+    if isinstance(v, list):
+        return frozenset(str(p) for p in v)
+    return frozenset(_DEFAULT_ALWAYS_INSTALL)
+
+
+def set_always_install_pkgs(pkgs):
+    """Persist the always-install set (iterable of pkg ids, stored sorted), or clear the override with a
+    falsy value so it falls back to the default set (mirrors set_library). Returns always_install_pkgs()."""
+    cfg = load_config()
+    if pkgs:
+        cfg["always_install"] = sorted({str(p) for p in pkgs})
+    else:
+        cfg.pop("always_install", None)
+    save_config(cfg)
+    return always_install_pkgs()
+
+
 def history_dir(default=None):
     """Where the run-history .jsonl logs (download-history / save-history) are written:
       1. the shared 'log_dir' from cas-config.json   — IF set AND currently reachable (e.g. a shared folder,
