@@ -512,7 +512,8 @@ DEV_PATCH = "/data/local/tmp/cas_magiskpatch"                   # on-device work
 GRANT_PERSIST = BUNDLE / "provision" / "root" / "grant-persist.sh"   # permanent shell-grant writer (root)
 DEV_GRANT = "/data/local/tmp/cas_grant.sh"                           # where it lands on the device
 GRANT_PROMPT_BTN = r"grant"          # MagiskSU su-request "Grant" button (matched case-insensitively)
-MAGISK_PKG = "com.topjohnwu.magisk"  # gate taps to the Magisk prompt so we never mis-tap another app
+# NOTE: MAGISK_PKG ("com.topjohnwu.magisk") is defined at the top of this module; grant_shell_root's
+# tap gate reuses it to fence taps to the Magisk prompt so we never mis-tap another app.
 
 
 def patch_init_boot_on_device(adb, stock_init_boot, dest, log=print):
@@ -926,7 +927,7 @@ def _persist_grant(adb, log=print):
         return False
     rc, out, err = adb.su(f"sh {DEV_GRANT}", timeout=30)
     adb.shell(f"rm -f {DEV_GRANT}")
-    if "policy=2" in out:
+    if "CAS_GRANT policy=2" in out:
         log("  ✓ shell root made permanent (magisk policy: shell uid 2000 = allow).")
         return True
     log(f"  ⚠ persistence unconfirmed (rc={rc}): {((out or err) or '').strip()[:160]} — shell is "

@@ -119,10 +119,11 @@ class GrantRunner(FakeRunner):
     grants root; thereafter `su id` reports uid=0. `never_grants=True` models a prompt that never
     resolves (auto-tap fails -> manual fallback)."""
 
-    def __init__(self, never_grants=False, **kw):
+    def __init__(self, never_grants=False, wrong_foreground=False, **kw):
         super().__init__(root=False, su_blocked=False, **kw)
         self.granted = False
         self.never_grants = never_grants
+        self.wrong_foreground = wrong_foreground
 
     def __call__(self, args, input_text=None, timeout=900):
         self.calls.append(list(args))
@@ -133,6 +134,8 @@ class GrantRunner(FakeRunner):
             if tail.startswith("cat /sdcard/cas_ui.xml"):
                 return 0, GRANT_XML, ""
             if "topResumedActivity" in tail:
+                if self.wrong_foreground:
+                    return 0, "  topResumedActivity: ActivityRecord{u0 com.android.launcher3/.Launcher t1}\n", ""
                 return 0, "  topResumedActivity: ActivityRecord{u0 com.topjohnwu.magisk/.SuRequestActivity}\n", ""
             if tail.startswith("input tap"):
                 if not self.never_grants:
@@ -170,6 +173,14 @@ class GrantShellRoot(unittest.TestCase):
         ok = PV.grant_shell_root(self._adb(r), log=logs.append, attempts=2, ui_timeout=1)
         self.assertFalse(ok)
         self.assertTrue(any("open Magisk" in m for m in logs))   # manual fallback surfaced
+
+    def test_no_tap_when_foreground_is_not_magisk(self):
+        # Safety gate: if the foreground app is NOT Magisk, we must never tap 'Grant' (could hit
+        # another app's button). Regression guard for the `MAGISK_PKG in foreground(...)` fence.
+        r = GrantRunner(wrong_foreground=True)
+        ok = PV.grant_shell_root(self._adb(r), log=lambda *_: None, attempts=1, ui_timeout=1)
+        self.assertFalse(ok)
+        self.assertFalse(any("input tap" in " ".join(c) for c in r.calls))
 
 
 def make_profile(tmp, name="odin2mini", model="Odin2 ?Mini", apps=None):
