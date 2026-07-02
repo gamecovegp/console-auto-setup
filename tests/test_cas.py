@@ -440,6 +440,18 @@ class TestProfiles(unittest.TestCase):
         sel2 = P.initial_capture_selection(apps, saved, {})
         self.assertEqual(sel2["com.valvesoftware.steamlink"], (False, False))
 
+    def test_merge_always_install(self):
+        from cas import profiles as P
+        old = frozenset({"a", "b", "offscreen"})     # 'offscreen' is a member NOT shown in this modal
+        visible = {"a", "b", "c"}
+        ticked = {"b", "c"}                           # untick a, keep b, add c
+        self.assertEqual(P.merge_always_install(old, visible, ticked),
+                         frozenset({"b", "c", "offscreen"}))   # a removed, c added, offscreen preserved
+        # unticking all visible members with no offscreen member -> empty (disable)
+        self.assertEqual(P.merge_always_install({"a", "b"}, {"a", "b"}, set()), frozenset())
+        # ticked outside visible is ignored
+        self.assertEqual(P.merge_always_install(set(), {"a"}, {"a", "x"}), frozenset({"a"}))
+
     def test_store_read_accessors(self):
         with tempfile.TemporaryDirectory() as t:
             store = pathlib.Path(t) / "store"

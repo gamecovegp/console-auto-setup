@@ -599,6 +599,14 @@ def initial_capture_selection(device_apps, saved_axes, saved_flags, game_launche
     return sel
 
 
+def merge_always_install(old, visible, ticked):
+    """Delta-merge the app-pick modal's Always choices into the global always-install set. `old` = current
+    global set; `visible` = pkgs shown in this modal (its editable scope); `ticked` = the visible pkgs the
+    operator marked Always. Members NOT visible in this modal are preserved untouched. Returns a frozenset."""
+    old, visible, ticked = frozenset(old), frozenset(visible), frozenset(ticked)
+    return (old - visible) | (ticked & visible)
+
+
 def archive_profile(profile, stamp, archive_root=None):
     """Soft-delete: MOVE the profile dir to profiles/_archive/<name>_<stamp>. Never rm. Returns dest."""
     src = pathlib.Path(profile.path)
