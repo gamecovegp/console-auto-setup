@@ -2332,10 +2332,11 @@ class TestPickCapture(unittest.TestCase):
         app._detect_device_launchers = lambda s: (None, None)
         app._row_model = lambda s: "AIR X"
         seen = {}
-        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, flags_caption="—"):
+        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, flags_caption="—",
+                       always_install=None):
             seen["flag_keys"] = [f[0] for f in flag_specs]
             # operator unticks hardening at Save
-            return ({}, {"settings": "on", "hardening": "off", "grants": "on"})
+            return ({}, {"settings": "on", "hardening": "off", "grants": "on"}, set())
         app._app_pick_modal = fake_modal
         self.assertTrue(app._pick_capture("S1", "prof"))
         # the Save modal offered settings/hardening/grants (the optimization stuff is THERE)
@@ -2362,11 +2363,12 @@ class TestPickCapture(unittest.TestCase):
         app._detect_device_launchers = lambda s: ("com.handheld.launcher", "com.android.launcher3")
         app._row_model = lambda s: "AIR X"
         seen = {}
-        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, flags_caption="—"):
+        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, flags_caption="—",
+                       always_install=None):
             seen["row_pkgs"] = list(rows.keys())
             seen["flag_keys"] = [f[0] for f in flag_specs]
             return ({p: (True, True) for p in rows}, {"settings": "on", "hardening": "on", "grants": "on",
-                                                      "homescreen": "off", "gamelauncher": "on"})
+                                                      "homescreen": "off", "gamelauncher": "on"}, set())
         app._app_pick_modal = fake_modal
         self.assertTrue(app._pick_capture("S1", "prof"))
         # launchers are NOT app rows…
@@ -2398,9 +2400,10 @@ class TestPickCapture(unittest.TestCase):
         app._scan_device_apps = lambda s: []
         app._row_model = lambda s: "AIR X"
         keys = {}
-        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, flags_caption="—"):
+        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, flags_caption="—",
+                       always_install=None):
             keys["k"] = [f[0] for f in flag_specs]
-            return ({}, {})
+            return ({}, {}, set())
         app._app_pick_modal = fake_modal
         # NO launcher detected at all → homescreen still shown, gamelauncher hidden
         app._detect_device_launchers = lambda s: (None, None)
@@ -2441,9 +2444,10 @@ class TestPickDownloads(unittest.TestCase):
             app = self._app(root)
             app.assigned = {"S1": "p", "S2": "p"}              # two devices, one shared profile
             calls = []
-            def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, cfg_disabled=None):
+            def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, cfg_disabled=None,
+                          always_install=None):
                 calls.append(title)
-                return ({pk: (True, False) for pk in rows}, {"settings": "on"})
+                return ({pk: (True, False) for pk in rows}, {"settings": "on"}, set())
             app._app_pick_modal = fake_modal
             self.assertTrue(app._pick_downloads(["S1", "S2"]))
             self.assertEqual(len(calls), 1)                    # ONE modal for the shared profile
@@ -2460,9 +2464,10 @@ class TestPickDownloads(unittest.TestCase):
         app = self._app(root)
         app.assigned = {"S1": "p1", "S2": "p2"}            # two distinct profiles
         seen = []
-        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, cfg_disabled=None):
+        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, cfg_disabled=None,
+                       always_install=None):
             seen.append(title)
-            return None if len(seen) == 2 else ({pk: (True, True) for pk in rows}, {})
+            return None if len(seen) == 2 else ({pk: (True, True) for pk in rows}, {}, set())
         app._app_pick_modal = fake_modal
         self.assertFalse(app._pick_downloads(["S1", "S2"]))   # cancel on the 2nd modal
         # write-after-all: a late cancel leaves NEITHER profile's manifest written
@@ -2475,9 +2480,10 @@ class TestPickDownloads(unittest.TestCase):
         app = self._app(root)
         app.assigned = {"S1": "p", "S2": "(no match)"}     # S3 has no entry at all
         calls = []
-        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, cfg_disabled=None):
+        def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, cfg_disabled=None,
+                       always_install=None):
             calls.append(title)
-            return ({pk: (True, True) for pk in rows}, {})
+            return ({pk: (True, True) for pk in rows}, {}, set())
         app._app_pick_modal = fake_modal
         self.assertTrue(app._pick_downloads(["S1", "S2", "S3"]))
         self.assertEqual(len(calls), 1)                    # only the real profile prompts
@@ -2501,9 +2507,10 @@ class TestPickDownloads(unittest.TestCase):
             app = self._app(root)
             app.assigned = {"S1": "p"}
             seen = {}
-            def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, cfg_disabled=None):
+            def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, cfg_disabled=None,
+                          always_install=None):
                 seen["rows"], seen["cfg_disabled"] = rows, cfg_disabled
-                return ({pk: rows[pk] for pk in rows}, {})         # accept the proposed defaults
+                return ({pk: rows[pk] for pk in rows}, {}, set())  # accept the proposed defaults
             app._app_pick_modal = fake_modal
             self.assertTrue(app._pick_downloads(["S1"]))
             self.assertEqual(seen["rows"]["com.withcfg"], (True, True))
