@@ -1226,12 +1226,18 @@ class App:
              "Save this selection and run the action.").pack(side="right")
         ttk.Button(btnrow, text="Cancel", command=win.destroy).pack(side="right", padx=(0, 6))
 
+        def _apk_locked():
+            # rows whose Always box is ticked have their APK locked-on; keep bulk Select/Deselect-all
+            # from toggling those APK vars (a disabled ttk box still honors a programmatic .set()).
+            return {p for p, v in always_vars.items() if v.get()}
+
         selrow = ttk.Frame(win, padding=(10, 0))
         selrow.pack(side="top", anchor="w")
         ttk.Button(selrow, text="Select all",
-                   command=lambda: self._set_all(pick_vars, True, launchers, cfg_disabled)).pack(side="left")
+                   command=lambda: self._set_all(pick_vars, True, launchers | _apk_locked(), cfg_disabled)) \
+            .pack(side="left")
         ttk.Button(selrow, text="Deselect all",
-                   command=lambda: self._set_all(pick_vars, False, launchers, cfg_disabled)) \
+                   command=lambda: self._set_all(pick_vars, False, launchers | _apk_locked(), cfg_disabled)) \
             .pack(side="left", padx=(4, 0))
 
         bodywrap = ttk.Frame(win, padding=(6, 4))
