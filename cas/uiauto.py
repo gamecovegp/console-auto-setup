@@ -4,7 +4,7 @@ center (rotation-independent — no pixel guessing)."""
 import re
 
 _NODE = re.compile(
-    r'<node[^>]*?(?:text|content-desc)="([^"]*)"[^>]*?'
+    r'<node[^>]*?(?:text|content-desc)="([^"]+)"[^>]*?'
     r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"')
 
 
@@ -23,7 +23,7 @@ def find_control(xml, pattern):
 def dump(adb):
     """uiautomator XML of the current screen ('' on failure)."""
     adb.shell("uiautomator dump /sdcard/cas_ui.xml")
-    return adb.shell("cat /sdcard/cas_ui.xml")[1]
+    return adb.shell("cat /sdcard/cas_ui.xml")[1].replace("\r", "")
 
 
 def has(adb, pattern):
@@ -40,5 +40,6 @@ def tap(adb, pattern):
 
 
 def foreground(adb):
-    """Top resumed activity string, e.g. 'com.topjohnwu.magisk/.core.su.SuRequestActivity'."""
+    """Raw `topResumedActivity=…` line from dumpsys (callers substring-match the package, e.g.
+    `MAGISK_PKG in foreground(adb)`)."""
     return adb.shell("dumpsys activity activities | grep -m1 topResumedActivity")[1].strip()

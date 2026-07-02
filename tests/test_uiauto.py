@@ -25,6 +25,10 @@ class FindControl(unittest.TestCase):
     def test_empty_xml_returns_none(self):
         self.assertIsNone(uiauto.find_control("", r"grant"))
 
+    def test_matches_content_desc_when_text_empty(self):
+        xml = '<node text="" content-desc="Grant" bounds="[540,900][1080,1010]" />'
+        self.assertEqual(uiauto.find_control(xml, r"grant"), (810, 955))
+
 
 if __name__ == "__main__":
     unittest.main()
