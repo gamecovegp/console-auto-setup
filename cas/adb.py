@@ -419,7 +419,9 @@ class Edl:
     """Flash a partition via Qualcomm EDL / Firehose (Sahara loads a programmer, fh_loader writes). For
     devices whose BOOTLOADER fastboot can't flash (e.g. MANGMI: `Writing… FAILED (remote: 'unknown
     command')`). The device must already be in EDL (`adb reboot edl`) — it then appears as /dev/ttyUSB*,
-    which needs read/write access (the `dialout` group, or run CAS via sudo). The two tools + the Firehose
+    which needs read/write access. CAS auto-elevates the flasher via pkexec when the operator lacks that
+    access (see `_launcher`), so no manual udev/group setup or running all of CAS as root is required —
+    keeping EDL flashing working universally. The two tools + the Firehose
     programmer come from the device's firmware build. Runner is injectable for tests; success is detected
     from OUTPUT, not return code (QSaharaServer exits 0 even when it can't open the port).
 
@@ -438,6 +440,24 @@ class Edl:
     def _runner_kw(self):
         return ({"cancel": self.cancel}
                 if (self.cancel is not None and self.runner is subprocess_runner) else {})
+
+    def _launcher(self, port):
+        """Privilege-escalation prefix for the EDL tools, so flashing works UNIVERSALLY without per-bench
+        setup. On a real Linux bench the operator often can't open the 9008 serial port (it comes up
+        root:uucp with no ACL — the distro's android rules cover adb/fastboot but not the EDL serial port).
+        Rather than force a manual udev/group step or run all of CAS as root, escalate JUST the flasher via
+        pkexec (a GUI polkit prompt — the Linux analog of Windows UAC), falling back to sudo. Returns []
+        (run as-is) when: the runner is mocked (unit tests); we're already root; non-POSIX (Windows relies
+        on the QDLoader driver + its own UAC elevation); the port is already accessible; or the port node
+        doesn't exist. polkit caches the auth, so the QSahara+fh_loader pair prompts at most once."""
+        if self.runner is not subprocess_runner:            # mocked test runner — never escalate
+            return []
+        if os.name != "posix" or not hasattr(os, "geteuid") or os.geteuid() == 0:
+            return []
+        if not port or not os.path.exists(port) or os.access(port, os.R_OK | os.W_OK):
+            return []
+        exe = shutil.which("pkexec") or shutil.which("sudo")
+        return [exe] if exe else []
 
     def find_port(self, timeout=60, on_tick=None, pattern="/dev/ttyUSB*"):
         """Poll for the EDL serial port (created when the device enters EDL). Returns the path or None."""
@@ -497,15 +517,19 @@ class Edl:
         xml.write_text(self.rawprogram_xml(label, img_name, geometry))
 
         log(f"EDL: loading Firehose programmer via Sahara on {port}...")
-        rc, out, err = self.runner([qsahara, "-p", port, "-s", "13:" + self.programmer],
+        launch = self._launcher(port)          # [] normally; [pkexec]/[sudo] when the port needs elevation
+        rc, out, err = self.runner(launch + [qsahara, "-p", port, "-s", "13:" + os.path.abspath(self.programmer)],
                                    **self._runner_kw())
         blob = (out or "") + (err or "")
         if "Could not connect" in blob or "Sahara protocol completed" not in blob:
-            log(f"EDL: Sahara failed (port permission? add user to 'dialout' or run as root). {err.strip()}")
+            log("EDL: Sahara couldn't open the 9008 port. CAS auto-elevates via pkexec when the port "
+                "isn't directly accessible — if you cancelled that prompt (or pkexec/polkit is absent, "
+                "e.g. headless/SSH), approve it on retry, or set up access once with: "
+                f"bash scripts/setup-linux.sh (installs the udev rule). {err.strip()}")
             return False
 
         log(f"EDL: Firehose writing {label}...")
-        rc, out, err = self.runner([fh, "--port=" + port, "--sendxml=" + xml.name,
+        rc, out, err = self.runner(launch + [fh, "--port=" + port, "--sendxml=" + xml.name,
                                     "--search_path=" + str(workdir), "--memoryname=" + self.memoryname,
                                     "--noprompt", "--showpercentagecomplete"], **self._runner_kw())
         blob = (out or "") + (err or "")
@@ -520,6 +544,6 @@ class Edl:
         recover a unit so a failed flash never strands it."""
         fh = self._staged_exec(self.fh, workdir)
         try:
-            return self.runner([fh, "--port=" + port, "--reset", "--noprompt"])[0] == 0
+            return self.runner(self._launcher(port) + [fh, "--port=" + port, "--reset", "--noprompt"])[0] == 0
         except OSError:
             return False

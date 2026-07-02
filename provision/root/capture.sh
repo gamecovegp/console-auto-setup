@@ -181,8 +181,15 @@ else
   GL="$(game_launcher "$OVLC")"
   if [ -n "$GL" ]; then gl_capture "$P" "$GL"; else warn "game launcher: none detected — nothing to capture"; fi
 fi
-# NOTE: WiFi is intentionally NOT captured/restored — units ship offline (SD + local emulators), and the
-# OOBE WiFi prompt is dismissed by the device_provisioned flag in restore.sh step 7. Nothing to grab here.
+# WiFi — clone the golden's saved network so fresh units come up ONLINE during provisioning (to pull app /
+# emulator updates). restore.sh clones it; Lock (scrub.sh) then STRIPS it so no unit ever ships carrying the
+# shop's network/PSK. Gated by @wifi (DEFAULT ON); "@wifi off" keeps the old ship-offline behavior.
+FWIFI=on; [ -n "${CAS_MANIFEST:-}" ] && [ -f "$CAS_MANIFEST" ] && { v="$(manifest_flag "$CAS_MANIFEST" wifi)"; [ -n "$v" ] && FWIFI="$v"; }
+if [ "$FWIFI" = off ]; then
+  log "wifi: capture skipped (@wifi off)"
+else
+  capture_wifi "$P" || true          # additive: no saved network / encrypted PSK -> WARN, never fail the golden
+fi
 # Make the whole payload world-readable so a NON-root `adb pull` (runs as the shell uid) can retrieve EVERY
 # entry. urigrants.xml is cloned 0600 root; a single unreadable file makes `adb pull` abort the rest of the
 # recursive copy (yet still exit 0 — a silent partial capture). Staging is transient (/data/local/tmp,

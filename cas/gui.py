@@ -99,10 +99,10 @@ _ESDE_PKG = "org.es_de.frontend"
 # Behavior @flags shown (as the behavior section) in BOTH app-pick modals — the game frontend's emulator
 # picks (@gamelauncher) and the homescreen layout (@homescreen) are behaviors, NOT app rows; the launcher
 # packages are system firmware. restore.sh honors each @flag on the device.
-_DL_FLAGS = ("settings", "hardening", "grants", "homescreen", "gamelauncher")
+_DL_FLAGS = ("settings", "hardening", "grants", "homescreen", "gamelauncher", "wifi")
 _DL_FLAG_LABELS = {"settings": "Display & system settings", "hardening": "Performance & update lock",
                    "grants": "Folder permissions", "homescreen": "Homescreen layout",
-                   "gamelauncher": "Game launcher emulator picks"}
+                   "gamelauncher": "Game launcher emulator picks", "wifi": "WiFi auto-join"}
 _DL_FLAG_TIPS = {
     "settings": "Apply the saved display/brightness/animation/screen-timeout preferences.",
     "hardening": "Keep emulators awake (exempt from battery optimization so they're never killed) "
@@ -114,6 +114,8 @@ _DL_FLAG_TIPS = {
                   "installed first so every icon resolves.",
     "gamelauncher": "Save the game frontend's per-system emulator choices (PSX→DuckStation, "
                     "PSP→PPSSPP) and auto-apply them on Download — no manual setup per unit.",
+    "wifi": "Clone the golden's saved WiFi so the unit joins it during provisioning (to pull app "
+            "and emulator updates). Automatically stripped at Lock, so it ships with no saved network.",
 }
 
 
@@ -1302,10 +1304,13 @@ class App:
                           "icon resolves on any unit model — into the golden (restored by default on Download).",
             "gamelauncher": "Capture the game frontend's per-system emulator picks (PSX→DuckStation, …) "
                             "into the golden (and apply them by default on Download).",
+            "wifi": "Capture the golden's saved WiFi so fresh units auto-join it on Download (to pull "
+                    "updates). ALWAYS stripped at Lock — no unit ever ships with the network/PSK.",
         }
         inits = {"settings": cf.get("settings", "on") == "on",
                  "hardening": cf.get("hardening", "on") == "on",
                  "grants": cf.get("grants", "on") == "on",
+                 "wifi": cf.get("wifi", "on") == "on",
                  # ALWAYS shown: seed from a detected HOME launcher, else the saved/default flag.
                  "homescreen": hl_on if hl else (cf.get("homescreen", "on") == "on")}
         if gl:
@@ -1828,14 +1833,16 @@ class App:
         self._run_bg(work, label=f"{label} {len(serials)} device(s)"
                                  f"{' (retry)' if devices is not None else ''}")
 
-    def _stage(self, step, serials, pm, force, cev):
-        """Run ONE unit stage across serials via the matching PV.*_all; return its {serial:(status,…)} dict."""
+    def _stage(self, step, serials, pm, force, cev, wait_boot=False):
+        """Run ONE unit stage across serials via the matching PV.*_all; return its {serial:(status,…)} dict.
+        wait_boot (Download only): block on each unit's post-Download reboot so a following Lock stage never
+        starts on a rebooting device."""
         devs = [(s, "device") for s in serials]
         mk_adb = lambda s: Adb(serial=s, adb=self.adb_bin, cancel=cev)
         mk_fb = lambda s: Fastboot(serial=s, fastboot=self.fb_bin, cancel=cev)
         if step == "download":
             return PV.provision_all(mk_adb, devs, root=self.profiles_root, log=self.log,
-                                    profile_map=pm, es_media_src=config.es_media_src())
+                                    profile_map=pm, es_media_src=config.es_media_src(), wait_boot=wait_boot)
         if step == "root":
             return PV.root_all(mk_adb, mk_fb, devs, profiles_root=self.profiles_root, appdir=APPDIR,
                                log=self.log, profile_map=pm, force_serials=force,
@@ -1851,7 +1858,7 @@ class App:
         cev = self.cancel_event
         pm, force = self._profile_map(serials)
         survivors = list(serials)
-        for step in steps:
+        for i, step in enumerate(steps):
             if cev.is_set():
                 break
             if step == "save":
@@ -1862,7 +1869,11 @@ class App:
                                       root=self.profiles_root, log=self.log)
                 survivors = survivors if ok else []
             else:
-                res = self._stage(step, survivors, pm, force, cev)
+                # Download reboots WITHOUT waiting; if any step follows (Lock), make the Download stage block
+                # on each unit's reboot so the next stage never touches an offline/rebooting device. Root and
+                # Lock already wait for their own reboots internally.
+                wb = step == "download" and bool(steps[i + 1:])
+                res = self._stage(step, survivors, pm, force, cev, wait_boot=wb)
                 survivors = [s for s in survivors if res.get(s, ("error",))[0] not in ("fail", "error")]
             self.log(f"chain: after {step} — {len(survivors)}/{len(serials)} still ok")
         return survivors

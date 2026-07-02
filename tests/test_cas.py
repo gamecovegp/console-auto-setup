@@ -966,6 +966,25 @@ class TestProvision(unittest.TestCase):
             res = PV.provision_all(boom, [("ABC123", "device")], root=t, log=lambda m: None)
             self.assertEqual(res["ABC123"][0], "error")                # isolated, not raised
 
+    def test_provision_all_wait_boot_fails_a_unit_that_never_reboots(self):
+        # In a Download->Lock chain (wait_boot=True) each worker blocks on the post-Download reboot: a unit
+        # that comes back is ok; one that never boots back is FAILED so Lock never starts on an offline unit.
+        from unittest.mock import patch
+        prof = type("P", (), {"name": "p"})()
+
+        class FakeAdb:
+            def __init__(self, serial, back):
+                self.serial = serial; self.cancel = None; self._back = back
+            def wait_boot(self, on_tick=None, timeout=180):
+                return self._back
+        with tempfile.TemporaryDirectory() as t, patch.object(PV, "provision", lambda *a, **k: True):
+            res = PV.provision_all(lambda s: FakeAdb(s, back=(s == "BACK")),
+                                   [("BACK", "device"), ("STUCK", "device")], root=t, log=lambda m: None,
+                                   profile_map={"BACK": prof, "STUCK": prof}, wait_boot=True)
+        self.assertEqual(res["BACK"][0], "ok")
+        self.assertEqual(res["STUCK"][0], "fail")
+        self.assertIn("did not boot back", res["STUCK"][1])
+
     def test_batch_auto_matches_and_skips_unauthorized(self):
         with tempfile.TemporaryDirectory() as t:
             make_profile(t, "odin2mini", "Odin2 ?Mini")
@@ -1785,6 +1804,39 @@ class TestEdl(unittest.TestCase):
             self.assertEqual(pathlib.Path(out).parent, wd)        # staged into the local workdir
             self.assertTrue(os.access(out, os.X_OK))              # and now executable
 
+    def test_launcher_noop_with_mocked_runner(self):
+        # Auto-escalation must never fire under a mocked runner (tests / non-real flows), whatever the port.
+        from cas.adb import Edl
+        runner, _ = self._runner()
+        self.assertEqual(Edl("/x/q", "/x/f", "/x/p", runner=runner)._launcher("/dev/ttyUSB0"), [])
+
+    def test_launcher_noop_when_port_absent_or_empty(self):
+        # Real runner but no such port node (also covers root / non-POSIX) -> escalate nothing.
+        from cas.adb import Edl, subprocess_runner
+        edl = Edl("/x/q", "/x/f", "/x/p", runner=subprocess_runner)
+        self.assertEqual(edl._launcher("/dev/cas-nonexistent-port"), [])
+        self.assertEqual(edl._launcher(""), [])
+
+
+class TestUiAuto(unittest.TestCase):
+    def test_ui_find_xy_center_of_first_matching_node(self):
+        from cas.provision import _ui_find_xy
+        xml = ('<hierarchy>'
+               '<node text="Cancel" bounds="[10,20][110,80]"/>'
+               '<node text="Grant" bounds="[100,1000][680,1120]"/>'
+               '</hierarchy>')
+        self.assertEqual(_ui_find_xy(xml, r"\b(grant|allow)\b"), ((100 + 680) // 2, (1000 + 1120) // 2))
+
+    def test_ui_find_xy_content_desc_and_case_insensitive(self):
+        from cas.provision import _ui_find_xy
+        self.assertEqual(_ui_find_xy('<node content-desc="ALLOW" bounds="[0,0][100,100]"/>', r"allow"),
+                         (50, 50))
+
+    def test_ui_find_xy_none_when_no_match_or_empty(self):
+        from cas.provision import _ui_find_xy
+        self.assertIsNone(_ui_find_xy('<node text="Deny" bounds="[0,0][10,10]"/>', r"\bgrant\b"))
+        self.assertIsNone(_ui_find_xy("", r"grant"))
+
 
 class TestFlashers(unittest.TestCase):
     def test_fastboot_flasher_success_and_failure(self):
@@ -2129,8 +2181,8 @@ class TestRunChain(unittest.TestCase):
         app.log = lambda m: None                          # required by _run_chain_core logging
         app.cancel_event = type("E", (), {"is_set": lambda self: False})()
         app._stage_calls = []
-        def fake_stage(step, serials, pm, force, cev):
-            app._stage_calls.append((step, list(serials)))
+        def fake_stage(step, serials, pm, force, cev, wait_boot=False):
+            app._stage_calls.append((step, list(serials), wait_boot))
             # S1 fails 'root'; everything else ok
             return {s: (("fail" if (step == "root" and s == "S1") else "ok"),) for s in serials}
         app._stage = fake_stage
@@ -2139,10 +2191,16 @@ class TestRunChain(unittest.TestCase):
     def test_failed_root_drops_from_download(self):
         app = self._app()
         survivors = app._run_chain_core(["root", "download", "lock"], ["S1", "S2"], None)
-        # stages run in order; download/lock only see S2 (S1 dropped after failing root)
+        # stages run in order; download/lock only see S2 (S1 dropped after failing root). Download gets
+        # wait_boot=True because Lock follows it (so seal never starts on a still-rebooting unit).
         self.assertEqual(app._stage_calls,
-                         [("root", ["S1", "S2"]), ("download", ["S2"]), ("lock", ["S2"])])
+                         [("root", ["S1", "S2"], False), ("download", ["S2"], True), ("lock", ["S2"], False)])
         self.assertEqual(survivors, ["S2"])
+
+    def test_download_as_last_step_does_not_wait_for_boot(self):
+        app = self._app()
+        app._run_chain_core(["root", "download"], ["S2"], None)   # S2 passes root; download is last
+        self.assertEqual(app._stage_calls, [("root", ["S2"], False), ("download", ["S2"], False)])
 
     def test_save_step_root_fails_no_indexerror(self):
         """Bug-repro (fix #1): survivors==[] after root failure must NOT raise IndexError on survivors[0]."""
@@ -2150,7 +2208,7 @@ class TestRunChain(unittest.TestCase):
         import cas.provision as PV_mod
         app = self._app()
         # override _stage so root ALWAYS fails for S1 (our only device)
-        def fake_stage_all_fail(step, serials, pm, force, cev):
+        def fake_stage_all_fail(step, serials, pm, force, cev, wait_boot=False):
             app._stage_calls.append((step, list(serials)))
             return {s: ("fail",) for s in serials}
         app._stage = fake_stage_all_fail
@@ -2167,7 +2225,7 @@ class TestRunChain(unittest.TestCase):
         import cas.provision as PV_mod
         app = self._app()
         # override _stage so root SUCCEEDS for S1
-        def fake_stage_ok(step, serials, pm, force, cev):
+        def fake_stage_ok(step, serials, pm, force, cev, wait_boot=False):
             app._stage_calls.append((step, list(serials)))
             return {s: ("ok",) for s in serials}
         app._stage = fake_stage_ok

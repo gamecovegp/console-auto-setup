@@ -165,7 +165,17 @@ gl_capture(){
       --exclude='files/datastore/*-shm' --exclude='files/datastore/*.tmp' \
       files/datastore shared_prefs 2>/dev/null )
   if tar -tf "$_gl_gld/config.tar" 2>/dev/null | grep -q .; then
-    ok "captured game launcher config: $_gl_pkg"; return 0
+    ok "captured game launcher config: $_gl_pkg"
+    # Also bundle the launcher's INSTALLER, so a fresh unit runs the GOLDEN's launcher version instead of
+    # the stock /product build (updating the launcher was otherwise a manual per-unit sideload). It overlays
+    # the system app on restore (same OEM signature). Best-effort — a copy miss just keeps the stock build.
+    _gl_ap="$(pm path "$_gl_pkg" 2>/dev/null | sed 's/^package://')"
+    if [ -n "$_gl_ap" ]; then
+      mkdir -p "$_gl_gld/apk"
+      for _gl_a in $_gl_ap; do cp "$_gl_a" "$_gl_gld/apk/" 2>/dev/null; done
+      ls "$_gl_gld/apk/"*.apk >/dev/null 2>&1 && ok "captured launcher APK: $_gl_pkg" || rmdir "$_gl_gld/apk" 2>/dev/null
+    fi
+    return 0
   fi
   warn "gamelauncher: no portable config for $_gl_pkg (no datastore/shared_prefs?) — skip"
   rm -rf "$_gl_out/gamelauncher"; return 1
@@ -175,6 +185,14 @@ gl_capture(){
 gl_restore(){
   _gl_pd="$1"; _gl_pkg="$2"; _gl_dr="${DATA_ROOT:-/data/data}"; _gl_tgt="$_gl_dr/$_gl_pkg"
   tar -tf "$_gl_pd/gamelauncher/config.tar" >/dev/null 2>&1 || { warn "gamelauncher: config.tar missing/corrupt — skip"; return 1; }
+  # First bring the launcher to the GOLDEN's version if its APK was captured (overlays the stock /product
+  # build; needs the same OEM signature). Additive — a miss keeps the unit's current build. This is what
+  # makes the launcher auto-update on Download instead of a manual per-unit sideload.
+  if ls "$_gl_pd/gamelauncher/apk/"*.apk >/dev/null 2>&1; then
+    install_apks "$_gl_pd/gamelauncher/apk" "$_gl_pkg" \
+      && ok "launcher updated to golden version: $_gl_pkg" \
+      || warn "launcher: golden APK not installed (older than installed / signature mismatch?) — keeping current build"
+  fi
   [ -d "$_gl_tgt" ] || { warn "gamelauncher: $_gl_pkg not installed here — skip"; return 1; }
   am force-stop "$_gl_pkg" 2>/dev/null
   mkdir -p "$_gl_tgt/files/datastore"
@@ -247,4 +265,69 @@ homescreen_install_missing(){
     fi
   done
   return 0
+}
+# ---- WiFi provisioning (gated by @wifi, DEFAULT ON) --------------------------------------------------
+# Clone the golden's saved WiFi so a fresh unit is ONLINE during provisioning (to pull app/emulator
+# updates), then STRIP it at Lock so no unit ever ships carrying the shop's network/PSK. On these OEM
+# builds the PreSharedKey is stored PLAINTEXT, so the store is portable across identical units; an
+# encrypted build (EncryptedData/IV tags) would need a re-add instead — capture_wifi flags that case.
+# The store moved to the APEX data dir on Android 12+; older builds keep it under /data/misc/wifi.
+# WIFI_ROOT is prepended to every path so the whole set is testable off-device.
+wifi_store_path(){
+  for _wp in "${WIFI_ROOT:-}/data/misc/apexdata/com.android.wifi/WifiConfigStore.xml" \
+             "${WIFI_ROOT:-}/data/misc/wifi/WifiConfigStore.xml"; do
+    [ -f "$_wp" ] && { echo "$_wp"; return 0; }
+  done
+  echo "${WIFI_ROOT:-}/data/misc/apexdata/com.android.wifi/WifiConfigStore.xml"   # default target (may not exist yet)
+}
+# capture_wifi <out_dir> — copy the golden's saved-network store into <out_dir>/wifi/. rc 1 (WARN, never
+# fatal) when there is no store or no saved network. Flags an encrypted-PSK build (won't clone portably).
+capture_wifi(){
+  _cw_src="$(wifi_store_path)"
+  [ -f "$_cw_src" ] || { warn "wifi: no WifiConfigStore.xml on the golden — nothing to capture"; return 1; }
+  grep -q 'name="SSID"' "$_cw_src" 2>/dev/null || { warn "wifi: golden has no saved network — skip"; return 1; }
+  if grep -q 'name="EncryptedData"' "$_cw_src" 2>/dev/null; then
+    warn "wifi: golden PSK is ENCRYPTED (device-bound key) — cloning it won't connect on another unit; skip"
+    return 1
+  fi
+  mkdir -p "$1/wifi"
+  cp "$_cw_src" "$1/wifi/WifiConfigStore.xml" 2>/dev/null || { warn "wifi: capture copy failed"; return 1; }
+  ok "captured wifi ($(grep -c 'name="SSID"' "$_cw_src" 2>/dev/null) saved network(s))"
+}
+# restore_wifi <payload_dir> — clone the golden's store onto THIS unit (system:system 0600 + SELinux) so it
+# auto-joins on the NEXT reboot (the framework only reads the store at boot; the provision flow reboots
+# after restore). rc 1 (WARN) when the payload carries no wifi or the target apex dir is missing.
+restore_wifi(){
+  _rw_src="$1/wifi/WifiConfigStore.xml"
+  [ -f "$_rw_src" ] || { log "wifi: no wifi in payload — skip"; return 1; }
+  _rw_dst="$(wifi_store_path)"; _rw_dir="$(dirname "$_rw_dst")"
+  [ -d "$_rw_dir" ] || { warn "wifi: target dir $_rw_dir missing (wifi apex not initialized?) — skip"; return 1; }
+  cp "$_rw_src" "$_rw_dst" 2>/dev/null || { warn "wifi: restore copy failed"; return 1; }
+  chown system:system "$_rw_dst" 2>/dev/null
+  chmod 600 "$_rw_dst" 2>/dev/null
+  restorecon "$_rw_dst" 2>/dev/null || warn "wifi: restorecon failed (verify on an enforcing unit)"
+  ok "wifi cloned from golden — auto-joins on the next reboot"
+}
+# strip_wifi — Lock-time: leave NO saved network on a shipped unit. forget-network clears the framework's
+# IN-MEMORY config first (so the shutdown flush can't rewrite the network back), THEN the on-disk store is
+# deleted. Verify via the framework view when `cmd` exists, else by store absence. rc 1 (WARN) if anything
+# remains. Always safe to run (a no-op when no wifi was provisioned).
+strip_wifi(){
+  _sw_apex="${WIFI_ROOT:-}/data/misc/apexdata/com.android.wifi/WifiConfigStore.xml"
+  _sw_misc="${WIFI_ROOT:-}/data/misc/wifi/WifiConfigStore.xml"
+  if command -v cmd >/dev/null 2>&1; then
+    for _sw_id in $(cmd wifi list-networks 2>/dev/null | awk 'NR>1 && $1 ~ /^[0-9]+$/ {print $1}'); do
+      cmd wifi forget-network "$_sw_id" >/dev/null 2>&1
+    done
+  fi
+  rm -f "$_sw_apex" "$_sw_misc" 2>/dev/null
+  if command -v cmd >/dev/null 2>&1; then
+    _sw_left="$(cmd wifi list-networks 2>/dev/null | awk 'NR>1 && $1 ~ /^[0-9]+$/' | grep -c .)"
+  else
+    { [ -f "$_sw_apex" ] || [ -f "$_sw_misc" ]; } && _sw_left=1 || _sw_left=0
+  fi
+  if [ "${_sw_left:-0}" -gt 0 ] 2>/dev/null; then
+    warn "wifi: saved network(s) still present after strip — unit may ship with wifi!"; return 1
+  fi
+  ok "wifi stripped — unit ships with no saved network"
 }

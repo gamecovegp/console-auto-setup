@@ -533,10 +533,12 @@ def patch_init_boot_on_device(adb, stock_init_boot, dest, log=print):
 
 
 def provision_all(make_adb, devices, root="profiles", log=print, profile=None, profile_map=None,
-                  parallel=True, es_media_src=None):
+                  parallel=True, es_media_src=None, wait_boot=False):
     """Batch DOWNLOAD: provision every connected 'device'-state unit, in PARALLEL by default (all units
     push + restore at once). Profile resolution per device: profile_map[serial] (explicit per-device) >
-    `profile` (one for all) > auto-match by model. Returns {serial: (status, detail)}; failures isolated."""
+    `profile` (one for all) > auto-match by model. Returns {serial: (status, detail)}; failures isolated.
+    wait_boot=True blocks each worker on the post-Download reboot (parallel across the batch) so a
+    following stage (Lock) never starts on an offline/rebooting unit; a unit that never returns is FAILED."""
     def worker(serial, state):
         if state != "device":
             log(f"[{serial}] skip (state={state})")
@@ -564,6 +566,16 @@ def provision_all(make_adb, devices, root="profiles", log=print, profile=None, p
                 msgs.append(m)
                 log(f"[{s}] {m}")
             ok = provision(adb, prof, log=_wlog, es_media_src=es_media_src)
+            if ok and wait_boot:
+                # A later chain step (Lock) will touch this unit — block on the fire-and-forget reboot
+                # provision() just issued so seal() never starts on an offline/rebooting device. wait_boot
+                # re-attaches after the reboot (adb wait-for-device) then confirms sys.boot_completed, so the
+                # chain CONTINUES across the reboot. A unit that never returns is FAILED, not carried to Lock.
+                _wlog("waiting for the post-download reboot before the next step (Lock)…")
+                if not adb.wait_boot(on_tick=lambda s: _wlog(f"  …still booting ({s}s)")):
+                    if adb.cancel is not None and adb.cancel.is_set():
+                        return ("cancelled", prof.name)
+                    return ("fail", "did not boot back after the Download reboot (Lock skipped)")
             if ok:
                 return ("ok", prof.name)
             if adb.cancel is not None and adb.cancel.is_set():
@@ -643,7 +655,7 @@ def seed_default_manifest(pdir, name):
     apps = [a.strip() for a in pl.read_text().splitlines() if a.strip()] if pl.exists() else []
     cap = P.manifest_flags(pdir / "capture-manifest")   # the Save modal's behavior choices (if any)
     flags = {fl: cap.get(fl, "on")
-             for fl in ("settings", "hardening", "grants", "homescreen", "gamelauncher")}
+             for fl in ("settings", "hardening", "grants", "homescreen", "gamelauncher", "wifi")}
     P.save_manifest(man, apps, flags, header=f"# {name} default manifest")
 
 
@@ -809,6 +821,73 @@ def flasher_for_firmware(firmware, fastboot, slot, version=None, runner=None, on
     return edl_flasher(edl, geom, on_critical=on_critical), None
 
 
+# ---------------------------------------------------------------------------
+# Hands-off MagiskSU shell grant (uiautomator) — so ROOT needs no on-device tap
+# ---------------------------------------------------------------------------
+_UI_NODE_RE = re.compile(
+    r'<node[^>]*?(?:text|content-desc)="([^"]*)"[^>]*?bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"')
+
+
+def _ui_find_xy(xml, pattern):
+    """PURE: center (cx, cy) of the FIRST uiautomator node whose text/content-desc matches `pattern`
+    (regex, case-insensitive), else None. Mirrors scripts/uiauto.sh's parser so this behaves exactly like
+    the proven SAF-grant automation. Off-device testable."""
+    if not xml:
+        return None
+    rx = re.compile(pattern, re.I)
+    for m in _UI_NODE_RE.finditer(xml):
+        t = m.group(1)
+        a, b, c, d = map(int, m.groups()[1:])
+        if t.strip() and rx.search(t):
+            return ((a + c) // 2, (b + d) // 2)
+    return None
+
+
+def _ui_tap(adb, pattern):
+    """uiautomator: dump the screen and tap the first control matching `pattern` (regex). Returns True if a
+    match was found + tapped. PC-side (drives via adb), so it works during root() before the unit has su."""
+    adb.shell("uiautomator dump /sdcard/ui.xml")
+    xml = adb.shell("cat /sdcard/ui.xml")[1] or ""
+    xy = _ui_find_xy(xml.replace("\r", ""), pattern)
+    if not xy:
+        return False
+    adb.shell(f"input tap {xy[0]} {xy[1]}")
+    return True
+
+
+# MagiskSU request-dialog affirmative button. Text varies by Magisk version/locale — matched loosely.
+_MAGISK_GRANT_RE = r"\b(grant|allow)\b"
+
+
+def magisk_grant_shell(adb, log=print, tries=4):
+    """Auto-grant MagiskSU to the adb SHELL uid so ROOT is HANDS-OFF — no manual 'enable Shell' tap. Fires
+    an su request (which pops MagiskSU's Grant dialog) in the background and taps Grant via uiautomator,
+    exactly like the SAF-folder grant; once granted, MagiskSU remembers the shell uid and every later su is
+    silent. Returns True once adb-shell root works.
+    [VERIFY on device]: Magisk's dialog text/layout varies by version — if the tap misses, widen
+    _MAGISK_GRANT_RE (or add a Superuser-access → 'Apps and ADB' step) on a fresh root."""
+    import threading
+    for attempt in range(1, tries + 1):
+        log(f"MagiskSU shell grant: firing the su request + tapping Grant (attempt {attempt}/{tries})…")
+        # su BLOCKS on the on-screen dialog until answered — fire it in the background (self-terminating
+        # timeout), tap Grant, then it returns granted. daemon so a missed tap never strands the process.
+        threading.Thread(target=lambda: adb.su("id", timeout=20), daemon=True).start()
+        time.sleep(2)                                       # let MagiskSU raise the dialog
+        tapped = False
+        for _ in range(8):                                  # poll for the dialog at dump cadence
+            if _ui_tap(adb, _MAGISK_GRANT_RE):
+                tapped = True
+                break
+            time.sleep(1)
+        if tapped:
+            log("tapped MagiskSU Grant.")
+            if adb.is_root():                               # granted -> returns fast (no new dialog)
+                log("✓ MagiskSU granted the shell uid automatically — root is hands-off.")
+                return True
+        # dialog not found / tap missed this round — retry (fire the su request again)
+    return False
+
+
 def root(adb, fastboot, stock_init_boot, magisk_apk=None, log=print, wait=True, model_match=None,
          force=False, flasher=None):
     """Root a FRESH unit — Magisk-FIRST, everything sourced from the PC (run BEFORE provision). Inverse of
@@ -896,9 +975,15 @@ def root(adb, fastboot, stock_init_boot, magisk_apk=None, log=print, wait=True, 
     if adb.is_root():
         log("✓ ROOTED — adb shell su works. Ready to '② Download to selected device'.")
         return True
-    log("init_boot flashed + Magisk installed, but the adb shell uid isn't granted root YET. One-time per "
-        "unit: on the device open Magisk → Superuser → enable the 'Shell' / '[SharedUID] Shell' toggle, "
-        "then retry. (MagiskSU gates the shell uid until you allow it.)")
+    # HANDS-OFF: MagiskSU gates the shell uid until granted. Rather than make the operator tap it, auto-fire
+    # the su request and tap MagiskSU's Grant dialog via uiautomator (same mechanism as the SAF grants), so
+    # ROOT completes with no on-device interaction.
+    log("adb shell uid not granted root yet — auto-granting MagiskSU (hands-off)…")
+    if magisk_grant_shell(adb, log=log):
+        return True
+    log("init_boot flashed + Magisk installed, but the adb shell uid isn't granted root YET (auto-grant "
+        "missed — the Magisk UI may differ on this build). One-time per unit: on the device open Magisk → "
+        "Superuser → enable the 'Shell' / '[SharedUID] Shell' toggle, then retry.")
     return False
 
 

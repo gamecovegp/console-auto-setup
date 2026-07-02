@@ -257,9 +257,10 @@ if [ "$FHARDENING" = on ]; then
 else log "hardening: skipped (@hardening off)"; fi
 
 # 7) OOBE skip + first-boot experience — replaces the manual WiFi/timezone/language setup wizard.
-#    The wizard asks 3 things; we skip ALL of them — WiFi is NOT provisioned here (not needed for setup;
-#    the unit runs off the SD + local emulators, so it ships offline and WiFi is joined later if ever):
-#      • WiFi      -> simply skipped. Marking the device provisioned dismisses the prompt; no network saved.
+#    The wizard asks 3 things; we skip ALL of them so a fresh unit boots straight to the launcher:
+#      • WiFi      -> the wizard PROMPT is dismissed here (device_provisioned). The network itself is
+#                     provisioned separately in step 9 when @wifi is on (default), then stripped at Lock,
+#                     so units provision online but ship offline with no saved network.
 #      • language  -> golden ROM is already en-US (ro.product.locale); skipping the wizard keeps it.
 #      • timezone  -> pinned via prop below (offline-safe); auto_time_zone refines it later if WiFi is added.
 # Mark the device provisioned + user setup complete so a fresh unit boots straight to the launcher.
@@ -360,6 +361,19 @@ else
   else
     gl_restore "$P" "$TGL" || true        # additive: a write-back miss must not fail the restore
   fi
+fi
+
+# 9) WiFi — clone the golden's saved network (DEFAULT ON via @wifi) so the unit comes up ONLINE after the
+#    post-restore reboot and can pull app/emulator updates during provisioning. Lock (scrub.sh) STRIPS this
+#    before the unit ships, so no shop PSK ever leaves the bench. ADDITIVE — a miss WARNs, never fails the
+#    restore. "@wifi off" keeps the ship-offline default (nothing cloned). Loads on the reboot the provision
+#    flow performs after restore (the framework only reads WifiConfigStore.xml at boot).
+FWIFI=on
+if [ -n "${CAS_MANIFEST:-}" ] && [ -f "$CAS_MANIFEST" ]; then v="$(manifest_flag "$CAS_MANIFEST" wifi)"; [ -n "$v" ] && FWIFI="$v"; fi
+if [ "$FWIFI" = off ]; then
+  log "wifi: restore skipped (@wifi off — ships offline)"
+else
+  restore_wifi "$P" || true
 fi
 
 fi   # ---- end GLOBAL steps ----

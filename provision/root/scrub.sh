@@ -6,6 +6,10 @@
 DIR="$(cd "$(dirname "$0")" && pwd)"; . "$DIR/lib-root.sh"
 is_root || { echo "scrub: not root — skipping (a seal must never be blocked by the scrub)"; exit 0; }
 scrub_traces
+# WiFi — leave NO saved network on a shipped unit (units may provision ONLINE via @wifi, but must ship
+# offline with no shop PSK). ALWAYS run, independent of @wifi: a unit that never got wifi is a harmless
+# no-op. Additive — WARN only, never blocks the seal.
+strip_wifi || warn "scrub: wifi strip reported networks still present — verify this unit ships with no saved wifi"
 # launcher last-played: null out lastOpenedTimestamp in GAME_INFO (whichever app currently owns HOME).
 LP="$(home_launcher)"; DB="/data/data/$LP/databases/GAME_INFO"
 if [ -n "$LP" ] && [ -f "$DB" ] && command -v sqlite3 >/dev/null 2>&1; then

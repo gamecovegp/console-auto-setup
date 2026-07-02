@@ -1,0 +1,19 @@
+# CAS (console-auto-setup) — USB access for on-device flashing.
+#
+# The distro's stock 51-android.rules already covers adb + fastboot, so fastboot-flashing handhelds
+# (e.g. Retroid Pocket 6) root fine. It does NOT cover the Qualcomm EDL / Firehose 9008 SERIAL port
+# that QSaharaServer + fh_loader open for MANGMI (AIR X / Pocket Max) and AYN units — that port comes
+# up as root:uucp 0660 with no ACL for the operator, so EDL flashing dies with:
+#   "EDL: Sahara failed (port permission? ...)"
+#
+# These lines grant the active local desktop session (TAG+="uaccess", via systemd-logind ACLs) and the
+# 'uucp' group (for headless/SSH benches) read/write to the 9008 port. Applies to the current device on
+# `udevadm trigger`, so no re-plug is needed for a unit already sitting in EDL.
+#
+# Install:  sudo install -m0644 99-cas-flashing.rules /etc/udev/rules.d/  (or run scripts/setup-linux.sh)
+# then:     sudo udevadm control --reload-rules && sudo udevadm trigger
+
+# The 9008 serial device (what QSaharaServer/fh_loader actually open):
+SUBSYSTEM=="tty", SUBSYSTEMS=="usb", ATTRS{idVendor}=="05c6", ATTRS{idProduct}=="9008", TAG+="uaccess", GROUP="uucp", MODE="0660", SYMLINK+="cas-edl"
+# The raw USB node (belt-and-suspenders for tools that open the device directly):
+SUBSYSTEM=="usb", ATTR{idVendor}=="05c6", ATTR{idProduct}=="9008", TAG+="uaccess", GROUP="uucp", MODE="0660"
