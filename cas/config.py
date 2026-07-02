@@ -70,17 +70,16 @@ def always_install_pkgs():
 
 
 def set_always_install_pkgs(pkgs):
-    """Persist the always-install set (iterable of pkg ids, stored sorted), or clear the override with a
-    falsy value so it falls back to the default set (mirrors set_library). Returns always_install_pkgs().
-    Note: a falsy value here CLEARS the override (→ default set); to DISABLE the feature (empty set),
-    a stored `[]` is honored by the getter — write it via save_config, not this setter."""
-    if isinstance(pkgs, str):
-        pkgs = [pkgs]
+    """Persist the always-install set. `pkgs is None` CLEARS the override (getter falls back to the default
+    set). A list/iterable — INCLUDING an empty one — is stored verbatim (sorted, deduped): an empty list
+    DISABLES the feature. A bare string is treated as a single pkg id. Returns always_install_pkgs()."""
     cfg = load_config()
-    if pkgs:
-        cfg["always_install"] = sorted({str(p) for p in pkgs})
-    else:
+    if pkgs is None:
         cfg.pop("always_install", None)
+    else:
+        if isinstance(pkgs, str):
+            pkgs = [pkgs]
+        cfg["always_install"] = sorted({str(p) for p in pkgs})
     save_config(cfg)
     return always_install_pkgs()
 

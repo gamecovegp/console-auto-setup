@@ -729,6 +729,21 @@ class TestConfig(unittest.TestCase):
             C.set_always_install_pkgs("com.solo")
             self.assertEqual(C.always_install_pkgs(), frozenset({"com.solo"}))
 
+    def test_always_install_setter_none_clears_empty_disables(self):
+        from cas import config as C
+        with tempfile.TemporaryDirectory() as t:
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cas-config.json")
+            C.set_always_install_pkgs(["com.a", "com.b"])
+            # empty list STORES [] -> disabled (getter returns empty, NOT the default set)
+            self.assertEqual(C.set_always_install_pkgs([]), frozenset())
+            self.assertEqual(C.load_config().get("always_install"), [])
+            self.assertEqual(C.always_install_pkgs(), frozenset())
+            # None CLEARS the override -> default set returns
+            self.assertEqual(
+                C.set_always_install_pkgs(None),
+                frozenset({"com.valvesoftware.steamlink", "com.gamecove.gamecove_companion"}))
+            self.assertNotIn("always_install", C.load_config())
+
     def test_device_profiles_persist(self):
         from cas import config as C
         with tempfile.TemporaryDirectory() as t:
