@@ -66,8 +66,13 @@ LIBROOT = BUNDLE / "provision" / "root" / "lib-root.sh"
 SCRUB = BUNDLE / "provision" / "root" / "scrub.sh"          # Lock-time ship-clean scrub (usage + saves)
 
 
-def _validate_payload(pay, pkgs, log):
-    """A corrupt/incomplete payload must NOT reach the destructive restore. Returns True if OK."""
+def _validate_payload(pay, pkgs, axes, log):
+    """A corrupt/incomplete payload must NOT reach the destructive restore. Returns True if OK.
+
+    AXIS-AWARE: an app requires apk/*.apk only when its apk axis is on, and data.tar only when its
+    config axis is on. An apk-only capture (axes=apk, e.g. Steam Link) legitimately carries NO data.tar
+    — restore.sh skips the data phase for it — so demanding data.tar there would wrongly abort the whole
+    Download. `axes` maps pkg -> (want_apk, want_config); a package absent from the map defaults to both."""
     gm = pay / "global.meta"
     if not gm.exists() or "golden_serial=" not in gm.read_text(errors="ignore"):
         log(f"payload invalid: missing/empty global.meta at {gm}")
@@ -75,8 +80,13 @@ def _validate_payload(pay, pkgs, log):
     if not pkgs:
         log("manifest selects no apps — nothing to provision")
         return False
-    missing = [p for p in pkgs
-               if not (list((pay / p / "apk").glob("*.apk")) and (pay / p / "data.tar").exists())]
+    missing = []
+    for p in pkgs:
+        want_apk, want_cfg = axes.get(p, (True, True))
+        has_apk = bool(list((pay / p / "apk").glob("*.apk")))
+        has_data = (pay / p / "data.tar").exists()
+        if (want_apk and not has_apk) or (want_cfg and not has_data):
+            missing.append(p)
     if missing:
         log(f"payload missing apk/data for: {', '.join(missing)}")
         return False
@@ -383,7 +393,7 @@ def provision(adb, profile, log=print, dry_push=False, es_media_src=None):
             "payload — a Download restores a golden payload, so there is nothing to provision. Tick at "
             "least one captured app to Download.")
         return False
-    if not _validate_payload(pay, pay_pkgs, log):
+    if not _validate_payload(pay, pay_pkgs, axes, log):
         return False
 
     # RetroArch cores come from the PC (CORES_SRC), not the SD. (The app's own cores also ride data.tar;
