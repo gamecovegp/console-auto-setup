@@ -573,17 +573,15 @@ class TestProfiles(unittest.TestCase):
         sel2 = P.initial_capture_selection(apps, saved, {})
         self.assertEqual(sel2["com.valvesoftware.steamlink"], (False, False))
 
-    def test_merge_always_install(self):
+    def test_toggle_always_member(self):
         from cas import profiles as P
-        old = frozenset({"a", "b", "offscreen"})     # 'offscreen' is a member NOT shown in this modal
-        visible = {"a", "b", "c"}
-        ticked = {"b", "c"}                           # untick a, keep b, add c
-        self.assertEqual(P.merge_always_install(old, visible, ticked),
-                         frozenset({"b", "c", "offscreen"}))   # a removed, c added, offscreen preserved
-        # unticking all visible members with no offscreen member -> empty (disable)
-        self.assertEqual(P.merge_always_install({"a", "b"}, {"a", "b"}, set()), frozenset())
-        # ticked outside visible is ignored
-        self.assertEqual(P.merge_always_install(set(), {"a"}, {"a", "x"}), frozenset({"a"}))
+        # absent -> added; present -> removed; other members preserved
+        self.assertEqual(P.toggle_always_member({"a", "b"}, "c"), frozenset({"a", "b", "c"}))
+        self.assertEqual(P.toggle_always_member({"a", "b"}, "a"), frozenset({"b"}))
+        # toggling the last member off -> empty (which set_always_install_pkgs treats as "disable")
+        self.assertEqual(P.toggle_always_member({"a"}, "a"), frozenset())
+        # None/empty current -> just the added pkg
+        self.assertEqual(P.toggle_always_member(None, "x"), frozenset({"x"}))
 
     def test_store_read_accessors(self):
         with tempfile.TemporaryDirectory() as t:
@@ -876,6 +874,19 @@ class TestConfig(unittest.TestCase):
                 C.set_always_install_pkgs(None),
                 frozenset({"com.valvesoftware.steamlink", "com.gamecove.gamecove_companion"}))
             self.assertNotIn("always_install", C.load_config())
+
+    def test_store_window_toggle_roundtrip(self):
+        # Mirrors the Managed APKs window's toggle_always: P.toggle_always_member ->
+        # config.set_always_install_pkgs. Toggling a pkg ON then OFF is reflected by the getter.
+        from cas import config as C
+        from cas import profiles as P
+        with tempfile.TemporaryDirectory() as t:
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cas-config.json")
+            C.set_always_install_pkgs(["com.a"])                      # known starting set
+            C.set_always_install_pkgs(sorted(P.toggle_always_member(C.always_install_pkgs(), "com.b")))
+            self.assertEqual(C.always_install_pkgs(), frozenset({"com.a", "com.b"}))   # com.b added
+            C.set_always_install_pkgs(sorted(P.toggle_always_member(C.always_install_pkgs(), "com.b")))
+            self.assertEqual(C.always_install_pkgs(), frozenset({"com.a"}))            # com.b removed
 
     def test_device_profiles_persist(self):
         from cas import config as C
@@ -2596,10 +2607,10 @@ class TestPickCapture(unittest.TestCase):
         app._row_model = lambda s: "AIR X"
         seen = {}
         def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, flags_caption="—",
-                       always_install=None):
+                       apk_locked=None):
             seen["flag_keys"] = [f[0] for f in flag_specs]
             # operator unticks hardening at Save
-            return ({}, {"settings": "on", "hardening": "off", "grants": "on"}, set())
+            return ({}, {"settings": "on", "hardening": "off", "grants": "on"})
         app._app_pick_modal = fake_modal
         self.assertTrue(app._pick_capture("S1", "prof"))
         # the Save modal offered settings/hardening/grants (the optimization stuff is THERE)
@@ -2627,11 +2638,11 @@ class TestPickCapture(unittest.TestCase):
         app._row_model = lambda s: "AIR X"
         seen = {}
         def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, flags_caption="—",
-                       always_install=None):
+                       apk_locked=None):
             seen["row_pkgs"] = list(rows.keys())
             seen["flag_keys"] = [f[0] for f in flag_specs]
             return ({p: (True, True) for p in rows}, {"settings": "on", "hardening": "on", "grants": "on",
-                                                      "homescreen": "off", "gamelauncher": "on"}, set())
+                                                      "homescreen": "off", "gamelauncher": "on"})
         app._app_pick_modal = fake_modal
         self.assertTrue(app._pick_capture("S1", "prof"))
         # launchers are NOT app rows…
@@ -2664,9 +2675,9 @@ class TestPickCapture(unittest.TestCase):
         app._row_model = lambda s: "AIR X"
         keys = {}
         def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, flags_caption="—",
-                       always_install=None):
+                       apk_locked=None):
             keys["k"] = [f[0] for f in flag_specs]
-            return ({}, {}, set())
+            return ({}, {})
         app._app_pick_modal = fake_modal
         # NO launcher detected at all → homescreen still shown, gamelauncher hidden
         app._detect_device_launchers = lambda s: (None, None)
@@ -2720,9 +2731,9 @@ class TestPickDownloads(unittest.TestCase):
             app.assigned = {"S1": "p", "S2": "p"}              # two devices, one shared profile
             calls = []
             def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, cfg_disabled=None,
-                          always_install=None):
+                          apk_locked=None):
                 calls.append(title)
-                return ({pk: (True, False) for pk in rows}, {"settings": "on"}, set())
+                return ({pk: (True, False) for pk in rows}, {"settings": "on"})
             app._app_pick_modal = fake_modal
             self.assertTrue(app._pick_downloads(["S1", "S2"]))
             self.assertEqual(len(calls), 1)                    # ONE modal for the shared profile
@@ -2740,9 +2751,9 @@ class TestPickDownloads(unittest.TestCase):
         app.assigned = {"S1": "p1", "S2": "p2"}            # two distinct profiles
         seen = []
         def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, cfg_disabled=None,
-                       always_install=None):
+                       apk_locked=None):
             seen.append(title)
-            return None if len(seen) == 2 else ({pk: (True, True) for pk in rows}, {}, set())
+            return None if len(seen) == 2 else ({pk: (True, True) for pk in rows}, {})
         app._app_pick_modal = fake_modal
         self.assertFalse(app._pick_downloads(["S1", "S2"]))   # cancel on the 2nd modal
         # write-after-all: a late cancel leaves NEITHER profile's manifest written
@@ -2756,9 +2767,9 @@ class TestPickDownloads(unittest.TestCase):
         app.assigned = {"S1": "p", "S2": "(no match)"}     # S3 has no entry at all
         calls = []
         def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, cfg_disabled=None,
-                       always_install=None):
+                       apk_locked=None):
             calls.append(title)
-            return ({pk: (True, True) for pk in rows}, {}, set())
+            return ({pk: (True, True) for pk in rows}, {})
         app._app_pick_modal = fake_modal
         self.assertTrue(app._pick_downloads(["S1", "S2", "S3"]))
         self.assertEqual(len(calls), 1)                    # only the real profile prompts
@@ -2783,9 +2794,9 @@ class TestPickDownloads(unittest.TestCase):
             app.assigned = {"S1": "p"}
             seen = {}
             def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, cfg_disabled=None,
-                          always_install=None):
+                          apk_locked=None):
                 seen["rows"], seen["cfg_disabled"] = rows, cfg_disabled
-                return ({pk: rows[pk] for pk in rows}, {}, set())  # accept the proposed defaults
+                return ({pk: rows[pk] for pk in rows}, {})  # accept the proposed defaults
             app._app_pick_modal = fake_modal
             self.assertTrue(app._pick_downloads(["S1"]))
             self.assertEqual(seen["rows"]["com.withcfg"], (True, True))
@@ -2794,6 +2805,32 @@ class TestPickDownloads(unittest.TestCase):
             self.assertEqual(seen["cfg_disabled"], {"com.apkonly", "com.storeonly"})
             # accepting the defaults installs only the golden apps; the store-only app is NOT written
             self.assertEqual(sorted(P.manifest_pkgs(d / "manifest")), ["com.apkonly", "com.withcfg"])
+        finally:
+            for _k, _v in _saved.items():
+                os.environ.pop(_k, None) if _v is None else os.environ.__setitem__(_k, _v)
+
+    def test_always_install_app_passed_to_modal_as_apk_locked(self):
+        # An always-install app that IS a row must reach the modal as apk_locked (APK forced-on + not
+        # untickable / not cleared by Deselect-all) — the guarantee survives moving the checkbox out.
+        root = pathlib.Path(tempfile.mkdtemp())
+        _saved = {k: os.environ.get(k) for k in ("CAS_CONFIG", "CAS_PROFILES")}
+        os.environ["CAS_CONFIG"] = str(root / "cfg.json")
+        os.environ["CAS_PROFILES"] = str(root)
+        try:
+            from cas import config as C
+            self._profile(root, "p", ["com.foo", "com.always"])
+            C.set_always_install_pkgs(["com.always"])
+            app = self._app(root)
+            app.assigned = {"S1": "p"}
+            seen = {}
+            def fake_modal(title, intro, prof, rows, launchers, flag_specs, labels=None, cfg_disabled=None,
+                           apk_locked=None):
+                seen["apk_locked"] = apk_locked
+                return ({pk: (True, True) for pk in rows}, {})
+            app._app_pick_modal = fake_modal
+            self.assertTrue(app._pick_downloads(["S1"]))
+            self.assertIn("com.always", seen["apk_locked"])
+            self.assertNotIn("com.foo", seen["apk_locked"])
         finally:
             for _k, _v in _saved.items():
                 os.environ.pop(_k, None) if _v is None else os.environ.__setitem__(_k, _v)

@@ -599,12 +599,13 @@ def initial_capture_selection(device_apps, saved_axes, saved_flags, game_launche
     return sel
 
 
-def merge_always_install(old, visible, ticked):
-    """Delta-merge the app-pick modal's Always choices into the global always-install set. `old` = current
-    global set; `visible` = pkgs shown in this modal (its editable scope); `ticked` = the visible pkgs the
-    operator marked Always. Members NOT visible in this modal are preserved untouched. Returns a frozenset."""
-    old, visible, ticked = frozenset(old), frozenset(visible), frozenset(ticked)
-    return (old - visible) | (ticked & visible)
+def toggle_always_member(current, pkg):
+    """Toggle `pkg`'s membership in the global always-install set `current` (present -> removed, absent
+    -> added); other members untouched. Returns a frozenset. Used by the Managed APKs window, which is
+    where always-install membership is edited (per store-managed APK)."""
+    s = set(current or ())
+    s.discard(pkg) if pkg in s else s.add(pkg)
+    return frozenset(s)
 
 
 def archive_profile(profile, stamp, archive_root=None):
