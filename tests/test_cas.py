@@ -106,6 +106,109 @@ class FakeRunner:
         return [" ".join(c) for c in self.calls]
 
 
+GRANT_XML = (
+    "<hierarchy rotation=\"0\">"
+    "<node text=\"Superuser Request\" bounds=\"[0,100][1080,220]\" />"
+    "<node text=\"Deny\" bounds=\"[0,900][540,1010]\" />"
+    "<node text=\"Grant\" bounds=\"[540,900][1080,1010]\" />"
+    "</hierarchy>")
+
+
+class GrantRunner(FakeRunner):
+    """Models the causal chain: raising the prompt shows a Magisk 'Grant' dialog; an `input tap`
+    grants root; thereafter `su id` reports uid=0. `never_grants=True` models a prompt that never
+    resolves (auto-tap fails -> manual fallback)."""
+
+    def __init__(self, never_grants=False, wrong_foreground=False, **kw):
+        super().__init__(root=False, su_blocked=False, **kw)
+        self.granted = False
+        self.never_grants = never_grants
+        self.wrong_foreground = wrong_foreground
+
+    def __call__(self, args, input_text=None, timeout=900):
+        self.calls.append(list(args))
+        if "shell" in args:
+            tail = args[-1]
+            if tail.startswith("uiautomator dump"):
+                return 0, "", ""
+            if tail.startswith("cat /sdcard/cas_ui.xml"):
+                return 0, GRANT_XML, ""
+            if "topResumedActivity" in tail:
+                if self.wrong_foreground:
+                    return 0, "  topResumedActivity: ActivityRecord{u0 com.android.launcher3/.Launcher t1}\n", ""
+                return 0, "  topResumedActivity: ActivityRecord{u0 com.topjohnwu.magisk/.SuRequestActivity}\n", ""
+            if tail.startswith("input tap"):
+                if not self.never_grants:
+                    self.granted = True
+                return 0, "", ""
+            if "/debug_ramdisk/su" in args:
+                cmd = args[-1]
+                if cmd == "id":
+                    return (0, "uid=0(root)\n", "") if self.granted else (1, "", "Permission denied")
+                if cmd.startswith("sh /data/local/tmp/cas_grant.sh"):
+                    return 0, "CAS_GRANT policy=2\n", ""
+        # Everything else — the prompt-raise `su -c id …&` (SU is embedded in the cmd string, so it is
+        # NOT a standalone arg and does not enter the su block above), `rm -f`, `boot_patch.sh`,
+        # `getprop`, `wait-for-device` — falls through to FakeRunner, whose shell catch-all returns
+        # (0, "", "").
+        return super().__call__(args, input_text, timeout)
+
+
+class GrantShellRoot(unittest.TestCase):
+    def _adb(self, runner):
+        return Adb("ABC123", runner=runner)
+
+    def test_zero_touch_grant_succeeds_and_persists(self):
+        r = GrantRunner()
+        ok = PV.grant_shell_root(self._adb(r), log=lambda *_: None, ui_timeout=3)
+        self.assertTrue(ok)
+        # the permanent-policy script was pushed and run as root
+        self.assertTrue(any("push" in c and PV.DEV_GRANT in c for c in r.calls))
+        self.assertTrue(any("/debug_ramdisk/su" in c and c[-1].startswith("sh " + PV.DEV_GRANT)
+                            for c in r.calls))
+
+    def test_failed_autotap_falls_back(self):
+        logs = []
+        r = GrantRunner(never_grants=True)
+        ok = PV.grant_shell_root(self._adb(r), log=logs.append, attempts=2, ui_timeout=1)
+        self.assertFalse(ok)
+        self.assertTrue(any("open Magisk" in m for m in logs))   # manual fallback surfaced
+
+    def test_no_tap_when_foreground_is_not_magisk(self):
+        # Safety gate: if the foreground app is NOT Magisk, we must never tap 'Grant' (could hit
+        # another app's button). Regression guard for the `MAGISK_PKG in foreground(...)` fence.
+        r = GrantRunner(wrong_foreground=True)
+        ok = PV.grant_shell_root(self._adb(r), log=lambda *_: None, attempts=1, ui_timeout=1)
+        self.assertFalse(ok)
+        self.assertFalse(any("input tap" in " ".join(c) for c in r.calls))
+
+    def test_config_toggle_default_on(self):
+        from cas import config
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as d:
+            os.environ["CAS_CONFIG"] = os.path.join(d, "cas-config.json")  # no file -> default
+            try:
+                self.assertTrue(config.auto_grant_shell())
+            finally:
+                del os.environ["CAS_CONFIG"]
+
+    def test_root_autogrants_when_booted_but_ungranted(self):
+        import tempfile, pathlib
+        ra, fb = GrantRunner(), FbRunner()
+        with tempfile.TemporaryDirectory() as d:
+            stock = pathlib.Path(d) / "init_boot.img"
+            stock.write_bytes(b"x")                       # PC stock image must exist
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(d) / "absent.json")  # missing -> default toggle on
+            try:
+                ok = PV.root(Adb(runner=ra), Fastboot(runner=fb), stock, magisk_apk=None,
+                             log=lambda *_: None, wait=True,
+                             flasher=lambda adb, target, img, log: True)
+            finally:
+                os.environ.pop("CAS_CONFIG", None)
+        self.assertTrue(ok)                               # root() returns True via the auto-grant tail
+        self.assertTrue(ra.granted)                       # the auto-tap path actually ran
+
+
 def make_profile(tmp, name="odin2mini", model="Odin2 ?Mini", apps=None):
     apps = apps or ["org.es_de.frontend", "dev.eden.eden_emulator", "org.citra.emu"]
     d = pathlib.Path(tmp) / name
@@ -1916,26 +2019,6 @@ class TestEdl(unittest.TestCase):
         edl = Edl("/x/q", "/x/f", "/x/p", runner=subprocess_runner)
         self.assertEqual(edl._launcher("/dev/cas-nonexistent-port"), [])
         self.assertEqual(edl._launcher(""), [])
-
-
-class TestUiAuto(unittest.TestCase):
-    def test_ui_find_xy_center_of_first_matching_node(self):
-        from cas.provision import _ui_find_xy
-        xml = ('<hierarchy>'
-               '<node text="Cancel" bounds="[10,20][110,80]"/>'
-               '<node text="Grant" bounds="[100,1000][680,1120]"/>'
-               '</hierarchy>')
-        self.assertEqual(_ui_find_xy(xml, r"\b(grant|allow)\b"), ((100 + 680) // 2, (1000 + 1120) // 2))
-
-    def test_ui_find_xy_content_desc_and_case_insensitive(self):
-        from cas.provision import _ui_find_xy
-        self.assertEqual(_ui_find_xy('<node content-desc="ALLOW" bounds="[0,0][100,100]"/>', r"allow"),
-                         (50, 50))
-
-    def test_ui_find_xy_none_when_no_match_or_empty(self):
-        from cas.provision import _ui_find_xy
-        self.assertIsNone(_ui_find_xy('<node text="Deny" bounds="[0,0][10,10]"/>', r"\bgrant\b"))
-        self.assertIsNone(_ui_find_xy("", r"grant"))
 
 
 class TestFlashers(unittest.TestCase):
