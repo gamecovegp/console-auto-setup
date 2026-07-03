@@ -3133,5 +3133,22 @@ class ValidatePayloadAxes(unittest.TestCase):
             self.assertIn("com.wantsconfig", " ".join(logs))
 
 
+class TestLibWatch(unittest.TestCase):
+    def test_lib_watch_action_edges(self):
+        from cas.gui import _lib_watch_action as act
+        # no change → None, regardless of busy
+        self.assertIsNone(act(True, True, False))
+        self.assertIsNone(act(True, True, True))
+        self.assertIsNone(act(False, False, False))
+        self.assertIsNone(act(False, False, True))
+        # unreachable → reachable while idle → full reconnect
+        self.assertEqual(act(False, True, False), "reconnect")
+        # unreachable → reachable while a job runs → defer (retry next tick)
+        self.assertEqual(act(False, True, True), "defer")
+        # reachable → unreachable → relabel, regardless of busy
+        self.assertEqual(act(True, False, False), "disconnect")
+        self.assertEqual(act(True, False, True), "disconnect")
+
+
 if __name__ == "__main__":
     unittest.main()

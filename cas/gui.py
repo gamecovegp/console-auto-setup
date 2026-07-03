@@ -40,6 +40,19 @@ def _profile_library_label(root, reachable):
     return f"Library: {root}   ✓"
 
 
+def _lib_watch_action(was, now, busy):
+    """Edge decision for the idle library-drive watcher. Given the previously-seen
+    reachability (`was`), the current reachability (`now`), and whether a job is running
+    (`busy`), return the action to take: 'reconnect' (drive came back — full refresh),
+    'disconnect' (drive removed — relabel), 'defer' (came back mid-job — retry later),
+    or None (no change)."""
+    if now == was:
+        return None
+    if now:                                  # unreachable → reachable
+        return "defer" if busy else "reconnect"
+    return "disconnect"                       # reachable → unreachable
+
+
 class _Tooltip:
     """Minimal hover tooltip (no external deps): a yellow popup on <Enter>, gone on <Leave>."""
     def __init__(self, widget, text):
