@@ -409,17 +409,30 @@ def provision(adb, profile, log=print, dry_push=False, es_media_src=None):
         def push(src, dst, tries=3):
             # Retry transient push failures: parallel Download saturates the shared USB bus, and a large
             # transfer can glitch out under contention (succeeds fine on its own). A retry recovers it.
+            # On each failure we log adb's actual reason (device offline / no space / read error) so a
+            # dead push is diagnosable — not a blind "PUSH FAILED". And if the device DROPPED (offline/
+            # rebooted) we wait for it to come back before retrying, since an offline device fails
+            # instantly and would otherwise burn all tries in a couple of seconds against a gone unit.
+            name = pathlib.Path(str(src)).name
+            why = ""
             for i in range(1, tries + 1):
-                if adb.push(src, dst):
+                ok, why = adb.push_msg(src, dst)
+                if ok:
                     return True
                 if adb.cancel is not None and adb.cancel.is_set():
-                    log(f"⏹ cancelled — stopping the push of {pathlib.Path(str(src)).name}.")
+                    log(f"⏹ cancelled — stopping the push of {name}.")
                     return False                           # operator cancelled: abort NOW, don't retry
+                why = why or "no error text from adb"
                 if i < tries:
-                    log(f"push glitch ({i}/{tries}) on {pathlib.Path(str(src)).name} — retrying "
+                    log(f"push glitch ({i}/{tries}) on {name}: {why} — retrying "
                         "(parallel transfers can saturate USB)...")
-                    time.sleep(2)
-            log(f"PUSH FAILED after {tries} tries: {src} — aborting (a partial push would ship a broken clone).")
+                    if not adb.is_online():                # device dropped/rebooting, not mere contention
+                        log("  device stopped responding — waiting for it to reconnect…")
+                        adb.await_online(120, on_tick=lambda s: log(f"  …waiting for device to return ({s}s)"))
+                    else:
+                        time.sleep(2)
+            log(f"PUSH FAILED after {tries} tries: {src} — {why} — aborting "
+                "(a partial push would ship a broken clone).")
             return False
 
         for i, pkg in enumerate(pay_pkgs, 1):              # only the payload (captured) app modules

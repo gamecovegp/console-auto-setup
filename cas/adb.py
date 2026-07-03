@@ -254,7 +254,14 @@ class Adb:
         return self.shell("getprop " + key)[1].strip()
 
     def push(self, src, dst):
-        return self.raw("push", str(src), str(dst))[0] == 0
+        return self.push_msg(src, dst)[0]
+
+    def push_msg(self, src, dst):
+        """adb push -> (ok, message). On failure `message` carries adb's stderr/stdout (e.g. 'device
+        offline', 'No space left on device', a source read error) so the caller can log WHY the push
+        died instead of a blind False. Honors cancel (routes through raw)."""
+        rc, out, err = self.raw("push", str(src), str(dst))
+        return rc == 0, (err or out or "").strip()
 
     def pull(self, src, dst):
         return self.raw("pull", str(src), str(dst))[0] == 0
@@ -334,6 +341,26 @@ class Adb:
                     size = f[1]
                 break
         return serial + (f" · {size}" if size else "")
+
+    def is_online(self):
+        """True iff the device is attached AND in the 'device' state (not offline/rebooting/absent).
+        A fast reachability probe used to tell a transient push glitch apart from a device that dropped."""
+        rc, out, _ = self.raw("get-state")
+        return rc == 0 and out.strip() == "device"
+
+    def await_online(self, timeout=120, on_tick=None):
+        """Poll until the device is reachable again (back from offline/reboot), up to `timeout` seconds.
+        Cancel-aware and BOUNDED (never the open-ended `wait-for-device`, which could block for the full
+        runner timeout). Returns True if the device came back online."""
+        for s in range(0, max(1, timeout), 2):
+            if self.cancel is not None and self.cancel.is_set():
+                return False
+            if self.is_online():
+                return True
+            if on_tick and s and s % 10 == 0:
+                on_tick(s)
+            time.sleep(2)
+        return self.is_online()
 
     def wait_boot(self, timeout=180, on_tick=None):
         """Wait for the device to reconnect and finish booting. Returns True if booted.

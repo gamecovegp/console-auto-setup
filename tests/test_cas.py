@@ -46,6 +46,8 @@ class FakeRunner:
             return 0, "List of devices attached\nABC123\tdevice\nDEF456\tunauthorized\n", ""
         if args[-1] == "reboot":
             return 0, "", ""
+        if args[-1] == "get-state":                 # a connected device -> reachable
+            return 0, "device\n", ""
         if "push" in args:
             return (0 if self.push_ok else 1), "", ""
         if "pull" in args:
@@ -249,6 +251,34 @@ class TestAdb(unittest.TestCase):
 
     def test_not_root(self):
         self.assertFalse(Adb(runner=FakeRunner(root=False)).is_root())
+
+    def test_push_msg_surfaces_adb_error(self):
+        # push_msg must hand back adb's error text on failure so a caller can log WHY a push died
+        # (device offline / no space / read error) instead of a blind False.
+        def runner(args, input_text=None, timeout=900):
+            if "push" in args:
+                return 1, "", "adb: error: failed to read: device offline"
+            return 0, "", ""
+        ok, why = Adb(runner=runner).push_msg("/src", "/dst")
+        self.assertFalse(ok)
+        self.assertIn("device offline", why)
+
+    def test_push_msg_ok_is_quiet(self):
+        ok, why = Adb(runner=FakeRunner(push_ok=True)).push_msg("/src", "/dst")
+        self.assertTrue(ok)
+        self.assertEqual(why, "")
+
+    def test_is_online(self):
+        def state(val):
+            return lambda args, input_text=None, timeout=900: (
+                (0, val + "\n", "") if args[-1] == "get-state" else (0, "", ""))
+        self.assertTrue(Adb(runner=state("device")).is_online())
+        self.assertFalse(Adb(runner=state("offline")).is_online())
+
+    def test_is_online_false_when_no_device(self):
+        # no device attached -> `adb get-state` exits nonzero
+        runner = lambda args, input_text=None, timeout=900: (1, "", "error: no devices/emulators found")
+        self.assertFalse(Adb(runner=runner).is_online())
 
     def test_boot_flash_target_init_boot_ab(self):
         # A unit launched on Android 13+ (first_api>=33) is A/B -> flash 'init_boot_<active slot>'.
@@ -1016,6 +1046,26 @@ class TestProvision(unittest.TestCase):
             self.assertIn("restore.sh", joined)
             self.assertIn("CAS_MANIFEST", joined)
             self.assertTrue(any(c[-1] == "reboot" for c in r.calls))
+
+    def test_provision_push_failure_logs_adb_reason(self):
+        # When a payload push fails, the abort must carry adb's actual error text (e.g. 'device
+        # offline') so the operator sees WHY — not a blind 'PUSH FAILED'. Regression for the run
+        # where com.retroarch.aarch64 died 3x with no reason surfaced.
+        class OfflineOnPush(FakeRunner):
+            def __call__(self, args, input_text=None, timeout=900):
+                if "push" in args:
+                    return 1, "", "adb: error: failed to read: device offline"
+                return super().__call__(args, input_text, timeout)
+        logs = []
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t)
+            from unittest import mock
+            with mock.patch("time.sleep", lambda *a, **k: None):
+                ok = PV.provision(Adb(runner=OfflineOnPush()), prof, log=logs.append, dry_push=False)
+        self.assertFalse(ok)
+        blob = "\n".join(logs)
+        self.assertIn("device offline", blob)       # the real reason is surfaced...
+        self.assertIn("PUSH FAILED", blob)           # ...alongside the abort
 
     def test_provision_sd_media_is_default(self):
         # no es_media_src => 'sd' mode: restore gets CAS_ES_MEDIA=sd and NO box-art push happens.
