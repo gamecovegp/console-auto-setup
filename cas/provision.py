@@ -1133,8 +1133,16 @@ def root_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
             flasher = None
             try:
                 from . import firmware as FW
-                fwres = FW.resolve(serial, FW.identity(adb), FW.firmware_root())
+                idn = FW.identity(adb)
+                fwres = FW.resolve(serial, idn, FW.firmware_root())
                 fw = fwres.get("firmware")
+                if fw is None and fwres.get("firmware_id") != FW.DEFAULT_FW_ID and FW.edl_only_device(idn):
+                    # EDL-only unit (MANGMI): fastboot can't write init_boot, so a fallback flash is doomed.
+                    # Fail-fast with the fix instead of rebooting to a bootloader flash that can only fail.
+                    msg = ("EDL-only unit (e.g. MANGMI) but no firmware build resolved — add its build under "
+                           "_firmware/. Not attempting a fastboot flash the bootloader can't perform.")
+                    log(f"[{serial}] {msg}")
+                    return ("fail", msg)
                 if fw is not None:
                     sb = fw.stock_boot_image(fwres.get("version"))
                     if sb:
@@ -1211,8 +1219,16 @@ def seal_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
             flasher = None
             try:
                 from . import firmware as FW
-                fwres = FW.resolve(serial, FW.identity(adb), FW.firmware_root())
+                idn = FW.identity(adb)
+                fwres = FW.resolve(serial, idn, FW.firmware_root())
                 fw = fwres.get("firmware")
+                if fw is None and fwres.get("firmware_id") != FW.DEFAULT_FW_ID and FW.edl_only_device(idn):
+                    # EDL-only unit (MANGMI): fastboot can't write init_boot, so a fallback flash is doomed.
+                    # Fail-fast with the fix instead of rebooting to a bootloader flash that can only fail.
+                    msg = ("EDL-only unit (e.g. MANGMI) but no firmware build resolved — add its build under "
+                           "_firmware/. Not attempting a fastboot flash the bootloader can't perform.")
+                    log(f"[{serial}] {msg}")
+                    return ("fail", msg)
                 if fw is not None:
                     sb = fw.stock_boot_image(fwres.get("version"))
                     if sb:

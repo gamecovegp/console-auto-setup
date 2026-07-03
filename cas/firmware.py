@@ -54,6 +54,15 @@ def identity(adb):
     }
 
 
+def edl_only_device(identity):
+    """True when a LIVE device is EDL-only — its bootloader fastboot can't write init_boot (e.g. MANGMI),
+    so it MUST flash via EDL/Firehose from a firmware build. EDL-ness is otherwise a property of the
+    firmware BUILD (QSaharaServer+fh_loader present), unreadable over adb; here we detect the DEVICE as
+    MANGMI via ro.mangmi.dev.code (identity['dev_code'], present on MANGMI, absent elsewhere). Used by
+    root_all/seal_all to fail-fast when no build resolves, instead of a doomed fastboot flash."""
+    return bool(str((identity or {}).get("dev_code") or "").strip())
+
+
 # A synthetic firmware id meaning "don't flash a library build — use the bundled DEFAULT kit init_boot".
 # Selectable in the GUI firmware dropdown and assignable like any firmware, so an operator can EXPLICITLY
 # pin a unit (e.g. a Retroid sharing the kalama image) to the default init_boot instead of leaving it as

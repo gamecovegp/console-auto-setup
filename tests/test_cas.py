@@ -21,9 +21,11 @@ class FakeRunner:
     def __init__(self, model="Odin2 Mini", golden=False, root=True, boot="1", sd=True,
                  push_ok=True, pull_ok=True, su_blocked=False, slot="_a", first_api="33",
                  device_owner=False, do_set_ok=True, do_restrict=True, release_clears=True,
-                 restrict_in="device_policy", do_set_err=None):
+                 restrict_in="device_policy", do_set_err=None, dev_code=""):
         self.calls = []
         self.model, self.golden, self.root, self.boot, self.sd = model, golden, root, boot, sd
+        # dev_code = ro.mangmi.dev.code — present ("" default = absent) only on MANGMI (EDL-only) units.
+        self.dev_code = dev_code
         self.push_ok, self.pull_ok = push_ok, pull_ok
         # su_blocked models a real device whose MagiskSU grant prompt was never tapped: EVERY `su` call
         # hangs until the runner's timeout fires, which subprocess_runner reports as (124, "", "timeout…").
@@ -97,6 +99,7 @@ class FakeRunner:
                 key = tail.split()[-1]
                 val = {"ro.product.model": self.model, "sys.boot_completed": self.boot,
                        "ro.boot.slot_suffix": self.slot,
+                       "ro.mangmi.dev.code": self.dev_code,
                        "ro.product.first_api_level": self.first_api}.get(key, "")
                 return 0, val + "\n", ""
             if "CAS_XOK" in tail:                       # box-art tar unpack confirmation sentinel
@@ -2412,6 +2415,70 @@ class TestSealScrub(unittest.TestCase):
         # scrub runs BEFORE the Magisk uninstall, which itself precedes the un-root flash
         self.assertLess(scrub_i, magisk_i, "scrub must run before the un-root steps")
         self.assertIn("flash init_boot", "\n".join(fb.cmds()))
+
+
+class TestEdlFailFast(unittest.TestCase):
+    """root_all/seal_all must fail-fast (no doomed fastboot flash) when an EDL-only unit (MANGMI,
+    detected via ro.mangmi.dev.code) resolves to NO firmware build — unless it's explicitly pinned
+    to the default kit. Non-EDL units keep the bundled-default fastboot fallback (covered elsewhere)."""
+
+    NO_FW = {"firmware_id": None, "version": None, "manual": False,
+             "suggested": None, "ok": False, "warnings": [], "firmware": None}
+
+    def _pin_default(self):
+        from cas import firmware as FW
+        return {"firmware_id": FW.DEFAULT_FW_ID, "version": None, "manual": True,
+                "suggested": None, "ok": True, "warnings": [], "firmware": None}
+
+    def _prof(self, t):
+        prof = make_profile(t, "p", "AIR X")
+        (prof.path / "profile.meta").write_text("model_match=AIR X\n")   # default-kit stock, no override
+        return prof
+
+    def _edl_adb(self, s):
+        return Adb(serial=s, runner=FakeRunner(model="AIR X", root=True, dev_code="MQ66"))
+
+    def test_edl_only_device_helper(self):
+        from cas import firmware as FW
+        self.assertTrue(FW.edl_only_device({"dev_code": "MQ66"}))
+        self.assertFalse(FW.edl_only_device({"dev_code": ""}))
+        self.assertFalse(FW.edl_only_device({"dev_code": "   "}))
+        self.assertFalse(FW.edl_only_device({}))
+        self.assertFalse(FW.edl_only_device(None))
+
+    def test_root_all_fails_fast_on_edl_unit_without_firmware(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as t:
+            prof = self._prof(t)
+            with mock.patch("cas.firmware.resolve", return_value=self.NO_FW):
+                res = PV.root_all(
+                    self._edl_adb, lambda s: Fastboot(serial=s, runner=FbRunner()),
+                    [("MQ66X", "device")], profiles_root=t, appdir=t, log=lambda m: None, profile=prof)
+            # Guard fires before root(): without it, root=True would return ("ok", …).
+            self.assertEqual(res["MQ66X"][0], "fail")
+            self.assertIn("firmware", res["MQ66X"][1].lower())
+
+    def test_seal_all_fails_fast_on_edl_unit_without_firmware(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as t:
+            prof = self._prof(t)
+            with mock.patch("cas.firmware.resolve", return_value=self.NO_FW):
+                res = PV.seal_all(
+                    self._edl_adb, lambda s: Fastboot(serial=s, runner=FbRunner()),
+                    [("MQ66X", "device")], profiles_root=t, appdir=t, log=lambda m: None, profile=prof)
+            self.assertEqual(res["MQ66X"][0], "fail")
+            self.assertIn("firmware", res["MQ66X"][1].lower())
+
+    def test_root_all_default_kit_pin_bypasses_edl_guard(self):
+        # An operator who EXPLICITLY pinned the bundled default kit must NOT be blocked — respect the pin.
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as t:
+            prof = self._prof(t)
+            with mock.patch("cas.firmware.resolve", return_value=self._pin_default()):
+                res = PV.root_all(
+                    self._edl_adb, lambda s: Fastboot(serial=s, runner=FbRunner()),
+                    [("MQ66X", "device")], profiles_root=t, appdir=t, log=lambda m: None, profile=prof)
+            self.assertEqual(res["MQ66X"][0], "ok")   # default-kit pin → fastboot path → already-rooted 'ok'
 
 
 class TestRunChain(unittest.TestCase):
