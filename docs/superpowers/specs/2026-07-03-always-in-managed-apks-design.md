@@ -25,12 +25,16 @@ to change set membership moves.
 
 ## Design
 
-### 1. Pick modals — remove the Always column
+### 1. Pick modals — remove the Always column, KEEP the lock
 
-- `_app_pick_modal`: drop the `always_install` parameter and everything it drives — `ai`,
-  `always_vars`, `_apk_locked`, the per-row "Always" `Checkbutton` + `_lock` closure, and
-  `result["always"]`. The Select/Deselect-all buttons drop the `_apk_locked()` union (no more locked
-  rows). Return value becomes **`(axes, flags)`** (was `(axes, flags, always)`).
+- `_app_pick_modal`: drop the `always_install` parameter, the per-row **"Always" `Checkbutton`**,
+  `always_vars`, and `result["always"]`; return becomes **`(axes, flags)`** (was `(axes, flags,
+  always)`).
+- BUT preserve the always-install **APK lock** so the guarantee survives the checkbox move: add an
+  `apk_locked` param (a set of pkgs) that force-ticks APK ON + disables the box + excludes those rows
+  from Select/**Deselect-all**, with a tooltip pointing to Managed APKs. Without it, "Deselect all"
+  (or a manual untick) would silently skip installing an always-install app. Both callers pass
+  `apk_locked=set(rows) & set(config.always_install_pkgs())`.
 - `_pick_capture` (Save): remove `always_install=config.always_install_pkgs()` from the
   `_app_pick_modal(...)` call (KEEP it on `initial_capture_selection`); change
   `axes, modal_flags, always_ticked = res` → `axes, modal_flags = res`; delete the

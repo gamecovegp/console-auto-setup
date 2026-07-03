@@ -1183,7 +1183,7 @@ class App:
     # the same manifest files the old "Save … selection" buttons did, then the chain runs.
 
     def _app_pick_modal(self, title, intro, prof, rows, launchers, flag_specs, labels=None,
-                        flags_caption="— behavior —", cfg_disabled=None):
+                        flags_caption="— behavior —", cfg_disabled=None, apk_locked=None):
         """Modal app picker. `rows` is an ordered {pkg:(apk0,cfg0)} initial tick state; `launchers` is the
         set of pkgs whose APK box is disabled (system firmware, never reinstalled); `cfg_disabled` is the
         set of pkgs whose Config box is disabled (nothing was captured to restore); `flag_specs` is an
@@ -1194,6 +1194,7 @@ class App:
         Cancel/close."""
         labels = labels or {}
         cfg_disabled = cfg_disabled or set()
+        apk_locked = apk_locked or set()                   # always-install pkgs: APK forced-on + disabled
         self._icon_refs = []                               # fresh icon refs for this modal's lifetime
         win = tk.Toplevel(self.win)
         win.title(title)
@@ -1220,10 +1221,10 @@ class App:
         selrow = ttk.Frame(win, padding=(10, 0))
         selrow.pack(side="top", anchor="w")
         ttk.Button(selrow, text="Select all",
-                   command=lambda: self._set_all(pick_vars, True, launchers, cfg_disabled)) \
+                   command=lambda: self._set_all(pick_vars, True, launchers | apk_locked, cfg_disabled)) \
             .pack(side="left")
         ttk.Button(selrow, text="Deselect all",
-                   command=lambda: self._set_all(pick_vars, False, launchers, cfg_disabled)) \
+                   command=lambda: self._set_all(pick_vars, False, launchers | apk_locked, cfg_disabled)) \
             .pack(side="left", padx=(4, 0))
 
         bodywrap = ttk.Frame(win, padding=(6, 4))
@@ -1242,10 +1243,14 @@ class App:
             self._app_name_label(row, prof, pkg, label=labels.get(pkg))
             apk_cb = ttk.Checkbutton(row, text="APK", variable=apk_v)
             cfg_tip = f"Bundle {pkg}'s data/settings/BIOS (whole data dir for the launcher)"
+            apk_tip = f"Bundle {pkg}'s installer (off = clean install / system launcher)"
             if is_launcher:
                 apk_cb.configure(state="disabled")
                 cfg_tip = f"Capture {pkg}'s state — its homescreen layout / emulator picks"
-            _tip(apk_cb, f"Bundle {pkg}'s installer (off = clean install / system launcher)").pack(side="left")
+            elif pkg in apk_locked:
+                apk_v.set(True); apk_cb.configure(state="disabled")   # always-install: APK locked ON
+                apk_tip = f"{pkg} is always-installed (locked on) — manage it in Settings → Managed APKs."
+            _tip(apk_cb, apk_tip).pack(side="left")
             cfg_cb = ttk.Checkbutton(row, text="Config", variable=cfg_v)
             if cfg_off:
                 cfg_cb.configure(state="disabled")
@@ -1324,7 +1329,8 @@ class App:
             "bundles its data/settings/BIOS. The behaviour items below are saved with the golden and "
             "become its defaults on Download.",
             prof, rows, set(), flag_specs=flag_specs,
-            flags_caption="— behavior (saved with the golden; default on Download) —")
+            flags_caption="— behavior (saved with the golden; default on Download) —",
+            apk_locked=set(rows) & set(config.always_install_pkgs()))
         if res is None:
             self.log("Save cancelled — nothing captured.")
             return False
@@ -1373,7 +1379,8 @@ class App:
                 "Config restores its saved data/settings/BIOS. Apps not captured in the golden (marked "
                 "“from store”) are OFF by default — tick to push the server’s current build. Config is "
                 "available only where the golden captured it. Behaviour @flags below apply on the device.",
-                prof, rows, set(), flag_specs, labels=labels, cfg_disabled=cfg_disabled)
+                prof, rows, set(), flag_specs, labels=labels, cfg_disabled=cfg_disabled,
+                apk_locked=set(rows) & set(config.always_install_pkgs()))
             if res is None:
                 self.log("Download cancelled — nothing installed.")
                 return False
