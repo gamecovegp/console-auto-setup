@@ -197,6 +197,8 @@ class App:
         self.refresh_profiles()
         self.refresh_devices()
         self._check_updates(manual=False)        # silent startup check; prompts only if newer exists
+        self._lib_last_reachable = self._lib_reachable()   # seed the drive-watcher baseline
+        self._lib_watch()                                  # idle poll: auto-refresh when the library drive (re)appears
 
     # ---------- menu bar ----------
     def _build_menu(self):
@@ -405,6 +407,7 @@ class App:
         default. Re-resolves profiles, firmware and devices after."""
         def _applied():
             self.profiles_root = str(library_root())
+            self._lib_last_reachable = self._lib_reachable()   # re-baseline: a path change is not a drive edge
             self._update_lib_label()
             self.refresh_profiles()
             self.refresh_firmware()
@@ -1980,6 +1983,32 @@ class App:
 
     def _update_lib_label(self):
         self.lib_var.set(_profile_library_label(self.profiles_root, self._lib_reachable()))
+
+    def _lib_watch(self):
+        """Idle poll (every 2s): when the library drive (re)appears, self-heal the UI so
+        the operator need not click Refresh. On the unreachable→reachable edge (while idle)
+        re-resolve profiles, firmware and devices; if a job is running, defer to the next
+        tick. On removal, relabel honestly WITHOUT calling refresh_profiles, so a transient
+        USB drop does not wipe the operator's Profile selection. Reschedules itself; stops
+        quietly once the window is destroyed."""
+        try:
+            now = self._lib_reachable()
+            action = _lib_watch_action(self._lib_last_reachable, now, self.busy)
+            if action == "reconnect":
+                self._lib_last_reachable = True
+                self.log("library drive detected — refreshed")
+                self.refresh_profiles()
+                self.refresh_firmware()
+                self.refresh_devices()
+            elif action == "disconnect":
+                self._lib_last_reachable = False
+                self.log("library drive removed")
+                self._update_lib_label()
+                self.refresh_firmware()
+            # action in (None, "defer") → leave the baseline untouched
+        except tk.TclError:
+            return                            # window gone — stop rescheduling
+        self.win.after(2000, self._lib_watch)
 
     def _update_golden_status(self):
         """Show the selected profile's golden: none saved, or its size + an estimated download time

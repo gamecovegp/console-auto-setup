@@ -3149,6 +3149,54 @@ class TestLibWatch(unittest.TestCase):
         self.assertEqual(act(True, False, False), "disconnect")
         self.assertEqual(act(True, False, True), "disconnect")
 
+    def _watch_app(self, was, now, busy):
+        from cas.gui import App
+        app = App.__new__(App)                 # bypass Tk __init__
+        app._lib_last_reachable = was
+        app.busy = busy
+        app._lib_reachable = lambda: now
+        calls = []
+        for name in ("refresh_profiles", "refresh_firmware",
+                     "refresh_devices", "_update_lib_label"):
+            setattr(app, name, lambda n=name: calls.append(n))
+        app.log = lambda m: None
+        after = []
+        app.win = type("W", (), {"after": lambda self, ms, fn: after.append(ms)})()
+        app._calls, app._after = calls, after
+        return app
+
+    def test_watch_reconnect_idle_full_refresh(self):
+        app = self._watch_app(was=False, now=True, busy=False)
+        app._lib_watch()
+        self.assertTrue(app._lib_last_reachable)
+        self.assertIn("refresh_profiles", app._calls)
+        self.assertIn("refresh_firmware", app._calls)
+        self.assertIn("refresh_devices", app._calls)
+        self.assertEqual(app._after, [2000])           # rescheduled once
+
+    def test_watch_reconnect_busy_defers(self):
+        app = self._watch_app(was=False, now=True, busy=True)
+        app._lib_watch()
+        self.assertFalse(app._lib_last_reachable)      # baseline unchanged
+        self.assertNotIn("refresh_profiles", app._calls)
+        self.assertNotIn("refresh_devices", app._calls)
+        self.assertEqual(app._after, [2000])           # still rescheduled
+
+    def test_watch_disconnect_relabels_keeps_profiles(self):
+        app = self._watch_app(was=True, now=False, busy=False)
+        app._lib_watch()
+        self.assertFalse(app._lib_last_reachable)
+        self.assertIn("_update_lib_label", app._calls)
+        self.assertIn("refresh_firmware", app._calls)
+        self.assertNotIn("refresh_profiles", app._calls)   # selection preserved
+        self.assertEqual(app._after, [2000])
+
+    def test_watch_no_change_noop(self):
+        app = self._watch_app(was=True, now=True, busy=False)
+        app._lib_watch()
+        self.assertEqual(app._calls, [])               # nothing but the reschedule
+        self.assertEqual(app._after, [2000])
+
 
 if __name__ == "__main__":
     unittest.main()
