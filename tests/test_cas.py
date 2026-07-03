@@ -2422,6 +2422,66 @@ class TestRunChain(unittest.TestCase):
         self.assertEqual(captured_serials, ["S1"])
 
 
+class TestSealSelected(unittest.TestCase):
+    """Settings ▸ 'Seal selected unit' — single-device slice of ③ Lock via PV.seal_all."""
+
+    def _app(self, serial="S1"):
+        from cas.gui import App
+        app = App.__new__(App)                    # bypass Tk __init__
+        app.adb_bin = app.fb_bin = None
+        app.profiles_root = "."
+        app.assigned = {"S1": "p"}
+        app.assigned_manual = set()               # S1 not hand-assigned → force stays empty
+        app.cancel_event = None
+        app.log = lambda m: None
+        app._on_flash_critical = lambda active: None
+        app.refresh_devices = lambda: None
+        # win.after(0, cb) must invoke cb (work() calls self.win.after(0, self.refresh_devices))
+        app.win = type("W", (), {"after": lambda self, ms, cb=None: (cb() if cb else None)})()
+        app._selected_serial = lambda: serial
+        # _run_bg: run the work fn synchronously so the seal_all call happens in-test
+        app._bg = []
+        app._run_bg = lambda fn, label=None: app._bg.append((label, fn()))
+        return app
+
+    def test_no_selection_shows_info_and_does_not_seal(self):
+        from unittest import mock
+        import cas.gui as G
+        app = self._app(serial=None)
+        with mock.patch.object(G.messagebox, "showinfo") as info, \
+             mock.patch.object(G.PV, "seal_all") as seal:
+            app.seal_selected()
+        info.assert_called_once()
+        seal.assert_not_called()
+
+    def test_confirm_no_does_not_seal(self):
+        from unittest import mock
+        import cas.gui as G
+        app = self._app()
+        with mock.patch.object(G.messagebox, "askyesno", return_value=False), \
+             mock.patch.object(G.PV, "seal_all") as seal:
+            app.seal_selected()
+        seal.assert_not_called()
+
+    def test_confirm_yes_seals_the_one_selected_unit(self):
+        from unittest import mock
+        import cas.gui as G
+        app = self._app()
+        rec = {}
+        def fake_seal_all(mk_adb, mk_fb, devices, **kw):
+            rec["devices"] = list(devices)
+            rec["profile_map"] = kw.get("profile_map")
+            rec["force"] = kw.get("force_serials")
+            return {"S1": ("ok", "p")}
+        with mock.patch.object(G.messagebox, "askyesno", return_value=True), \
+             mock.patch.object(G.PV, "seal_all", side_effect=fake_seal_all):
+            app.seal_selected()
+        self.assertEqual(rec["devices"], [("S1", "device")])   # only the selected unit
+        self.assertIn("S1", rec["profile_map"])                # resolved via _profile_map
+        self.assertEqual(rec["force"], set())                  # S1 not hand-assigned
+        self.assertEqual(app._bg[0][1], {"S1": ("ok", "p")})   # work() returns the report dict
+
+
 class TestResolveChain(unittest.TestCase):
     def _r(self, **t):
         from cas.gui import App                          # the main window class

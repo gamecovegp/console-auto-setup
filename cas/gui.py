@@ -202,6 +202,7 @@ class App:
         setm.add_command(label="Firmware folder…", command=self.choose_firmware_dir)
         setm.add_command(label="Managed APKs…", command=self._open_apk_store)
         setm.add_separator()
+        setm.add_command(label="Seal selected unit (retail lock)…", command=self.seal_selected)
         setm.add_command(label="Release selected unit (un-provision)…", command=self.release_selected)
         bar.add_cascade(label="Settings", menu=setm)
 
@@ -1939,6 +1940,34 @@ class App:
         'ok' success token — a bare/short tuple or a 'done' token makes _report crash or mislabel."""
         sset = set(survivors)
         return {s: ("ok", "") if s in sset else ("fail", "") for s in serials}
+
+    def seal_selected(self):
+        """Operator-only: retail-SEAL the one selected unit on demand (the single-device slice of ③ Lock),
+        paired with 'Release selected unit'. Runs the full seal via PV.seal_all([one device]) so firmware /
+        EDL flasher / model-match brick-guard / golden-guard all behave exactly as the batch Lock."""
+        serial = self._selected_serial()
+        if not serial:
+            messagebox.showinfo("CAS", "Select ONE device in the list first.")
+            return
+        if not messagebox.askyesno(
+                "CAS — seal (retail-lock) unit?",
+                f"Retail-seal {serial}?\n\n"
+                "This un-roots the unit (flashes stock init_boot, ~2-3 min), hides Developer options, "
+                "and disables USB debugging — adb WILL disconnect. The golden is skipped.\n\n"
+                "Use for a one-off / re-seal outside the ③ Lock batch. Assumes the unit is VERIFIED."):
+            return
+        pm, force = self._profile_map([serial])
+        def work():
+            cev = self.cancel_event
+            res = PV.seal_all(
+                lambda s: Adb(serial=s, adb=self.adb_bin, cancel=cev),
+                lambda s: Fastboot(serial=s, fastboot=self.fb_bin, cancel=cev),
+                [(serial, "device")],
+                profiles_root=self.profiles_root, appdir=APPDIR, log=self.log,
+                profile_map=pm, force_serials=force, on_critical=self._on_flash_critical)
+            self.win.after(0, self.refresh_devices)
+            return res
+        self._run_bg(work, label=f"Sealing {serial}")
 
     def release_selected(self):
         """Operator-only: un-provision the selected unit (clear the Companion's Device-Owner lockdown so it
