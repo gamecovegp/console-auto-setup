@@ -64,8 +64,10 @@ any pre-existing entries and continues to force APK-on in the modals.
 ### Non-goals
 
 - No change to enforcement (always-apps still pre-tick APK in the modals via the row-computation).
-- No change to `config.always_install_pkgs`/`set_always_install_pkgs`, `P.merge_always_install`, or any
-  provision-side behavior.
+- No change to `config.always_install_pkgs`/`set_always_install_pkgs` or any provision-side behavior.
+  (`P.merge_always_install` — the old modal-edit delta-merge — was the *only* consumer of the removed
+  `_persist_always_install`; it is replaced by `P.toggle_always_member(current, pkg)`, the store-window
+  single-package toggle.)
 
 ## Testing
 
