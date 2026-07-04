@@ -159,6 +159,17 @@ jobs:
           done
           [ "$fail" = 0 ] || { echo "::error::frozen bundle is missing required device-side resources"; exit 1; }
 
+      - name: Bundle Windows operator helpers (fastboot driver setup)
+        # Ship the .bat helpers INSIDE the Windows kit (dist/cas) so the operator can fix the fastboot
+        # bootloader-driver gap that blocks ⓪ Root on Windows: adb works, but fastboot needs its OWN WinUSB
+        # driver (Linux gets it free via udev). The in-app "device did not enter fastboot" message points at
+        # setup-windows.bat, so it must be present. Windows-only; no-op on the other runners.
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cp scripts/setup-windows.bat scripts/fastboot-check.bat dist/cas/
+          ls -1 dist/cas/*.bat
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

@@ -587,25 +587,14 @@ class App:
         ttk.Label(media_tab, textvariable=self.sd_media_var, foreground="#555",
                   wraplength=440, justify="left").pack(anchor="w", pady=(10, 0))
 
-        # ── Tab 2: Root images (for ⓪ Root) — one bundled kit; stock init_boot is the per-family override ──
+        # ── Tab 2: Root images (for ⓪ Root) — the init_boot to Magisk-patch per unit comes from the FIRMWARE
+        #    LIBRARY: assign the device's build (uses its OWN init_boot) or "(default kit)" for the bundled
+        #    image. The old per-profile "Stock init_boot" field was removed — it just duplicated "(default kit)". ──
         root_tab = ttk.Frame(nb, padding=8)
         nb.add(root_tab, text="Root images")
-        self.stock_var = tk.StringVar()
-        srow = ttk.Frame(root_tab)
-        srow.pack(fill="x")
-        ttk.Label(srow, text="Stock init_boot:").pack(side="left")
-        ttk.Entry(srow, textvariable=self.stock_var, state="readonly", width=28).pack(side="left", padx=(4, 0))
-        _tip(ttk.Button(srow, text="Browse…", command=self._browse_stock_init_boot),
-             "Override this profile's STOCK init_boot. Blank = the bundled default kit image. ⓪ Root patches "
-             "it with Magisk ON the device and flashes it. Use the unit's OWN firmware image; a different "
-             "model's / SPL's init_boot can bootloop (recoverable on an unlocked unit).").pack(side="left", padx=4)
-        ttk.Label(root_tab, text=f"Default kit (all profiles): {P.pathlib.Path(PV.DEFAULT_STOCK_INIT_BOOT).name}"
-                                 f" + {P.pathlib.Path(PV.DEFAULT_MAGISK_APK).name}",
-                  foreground="#555", wraplength=440, justify="left").pack(anchor="w", pady=(10, 0))
 
         # ── Firmware library (DEVICE ROOT firmware: the full OS/boot build per device; library-only —
         #    CAS stores + suggests it, it does NOT flash. Distinct from emulator BIOS.) ──
-        ttk.Separator(root_tab, orient="horizontal").pack(fill="x", pady=(12, 8))
         ttk.Label(root_tab, text="Firmware library (device root firmware)",
                   font=("", 9, "bold")).pack(anchor="w")
         # Where the firmware catalog resolves + reachability (mirrors the profile Library line above), so an
@@ -900,10 +889,6 @@ class App:
         if not name:
             self._sync_media_tab()                         # no profile -> no golden -> hide the box-art tab
             return
-        prof = P.Profile(P.pathlib.Path(self.profiles_root) / name)
-        # Show the effective stock init_boot: the profile's own override, or the bundled DEFAULT kit image
-        # when none is set (so it's never blank/ambiguous — it's clear Root falls back to the kit init_boot).
-        self.stock_var.set(prof.meta.get("stock_init_boot") or PV.DEFAULT_STOCK_INIT_BOOT)
         self._sync_media_tab()                             # box-art tab follows whether the golden has ES-DE
 
     def refresh_devices(self):
@@ -1610,7 +1595,6 @@ class App:
         if not serial:
             self.fw_status_var.set("Select a device to see its firmware suggestion.")
             return
-        self._sync_stock_field(serial)        # field reflects THIS unit's stock init_boot (default kit if none)
         r = self.fw_resolved.get(serial)
         if not r:
             self.fw_status_var.set(f"{serial}: no firmware info — click 'Refresh devices'.")
@@ -2090,44 +2074,6 @@ class App:
         except ValueError:
             return str(p)
 
-    def _set_profile_asset(self, key, title, filetypes, var, profile_name=None):
-        """Pick a Root image (stock init_boot / Magisk apk) and write it into a profile's profile.meta.
-        `profile_name` targets a specific profile (e.g. the SELECTED DEVICE's assigned profile); it falls
-        back to the Profile dropdown. Persists per-profile so ⓪ Root can find it; the device list isn't touched."""
-        name = profile_name or self.prof_var.get()
-        if not name:
-            messagebox.showinfo("CAS", "Select a device (or a profile) first.")
-            return
-        f = filedialog.askopenfilename(title=title, filetypes=filetypes)
-        if not f:
-            return
-        val = self._store_path(f)
-        P.set_meta_key(P.pathlib.Path(self.profiles_root) / name / "profile.meta", key, val)
-        var.set(val)
-        self.log(f"profile '{name}': set {key} = {val}")
-
-    def _browse_stock_init_boot(self):
-        # Target the SELECTED DEVICE's assigned profile (so you set the init_boot for the unit you're on),
-        # falling back to the Profile dropdown when no device row is selected.
-        serial = self._selected_serial()
-        name = self.assigned.get(serial) if serial else None
-        prof_name = name if (name and name != "(no match)") else None
-        self._set_profile_asset("stock_init_boot", "Pick the device family's STOCK init_boot (.img)",
-                                [("init_boot image", "*.img"), ("all files", "*.*")], self.stock_var,
-                                profile_name=prof_name)
-
-    def _sync_stock_field(self, serial):
-        """Show the SELECTED device's assigned-profile stock init_boot in the field — the profile's own
-        override, or the bundled DEFAULT kit init_boot when it sets none — so it's clear which image Root
-        will use for this unit (when no firmware overrides). Default-to-kit answers 'firmware unknown'."""
-        name = self.assigned.get(serial)
-        if not name or name == "(no match)":
-            return
-        try:
-            prof = P.Profile(P.pathlib.Path(self.profiles_root) / name)
-            self.stock_var.set(prof.meta.get("stock_init_boot") or PV.DEFAULT_STOCK_INIT_BOOT)
-        except Exception:
-            pass
 
     def _probe_sd_media(self, serial=None):
         """AUTO-DETECT whether a device's SD carries an ES-DE folder / box art, shown inline (no button).
@@ -2149,8 +2095,9 @@ class App:
         def work():
             try:
                 a = Adb(serial=serial, adb=self.adb_bin)
-                out = a.shell("ls -d /storage/*-*/ES-DE /storage/*-*/ES-DE/downloaded_media "
-                              "/storage/*-*/downloaded_media 2>/dev/null")[1].strip()
+                # match ANY external volume-id format (a big exFAT card mounts hyphen-LESS), not just /*-*/
+                out = a.shell("ls -d /storage/*/ES-DE /storage/*/ES-DE/downloaded_media "
+                              "/storage/*/downloaded_media 2>/dev/null")[1].strip()
                 paths = out.splitlines()
                 esde = any(p.rstrip("/").endswith("/ES-DE") for p in paths)
                 art = any(p.rstrip("/").endswith("downloaded_media") for p in paths)

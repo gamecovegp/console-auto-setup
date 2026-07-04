@@ -98,8 +98,65 @@ log(){  printf '   %s\n' "$*"; }
 ok(){   printf ' [ok]   %s\n' "$*"; }
 warn(){ printf ' [warn] %s\n' "$*"; }
 is_root(){ id 2>/dev/null | grep -q 'uid=0'; }
-detect_sd(){ for d in /storage/*-*; do [ -d "$d" ] && { echo "$d"; return; }; done; }
+# First external /storage volume, in ANY volume-id format (FAT 'XXXX-XXXX', exFAT 16-hex, OTG UUID) —
+# list every mounted volume and skip only the internal 'emulated'/'self', never assume a hyphen.
+detect_sd(){ for d in /storage/*/; do d=${d%/}; n=${d##*/}; [ "$n" = emulated ] || [ "$n" = self ] || { [ -d "$d" ] && { echo "$d"; return; }; }; done; }
 app_uid(){ stat -c %u "/data/data/$1" 2>/dev/null; }   # the app's uid on THIS device (differs per unit)
+
+# pb_rewrite_serial <file> <old_serial> <new_serial>
+# LENGTH-CORRECT SD-serial rewrite for a Jetpack DataStore Preferences protobuf (*.preferences_pb, e.g.
+# ES-DE's settings, the OEM launcher's GameLauncher). These files are NUL-free, so `grep -I` MISREADS
+# them as text and a plain `sed` rewrites the serial in-place — desyncing the protobuf length varints
+# (a 9-char FAT id -> a 16-char exFAT id shifts every field). The app then dies on launch with
+# "Unable to parse preferences proto". We instead decode the flat PreferenceMap, substitute the serial
+# inside string/bytes values, and RE-ENCODE every length from the actual content, so it is correct for
+# ANY serial length. On ANY parse/verify failure the file is LEFT UNCHANGED (still a valid proto -> the
+# app starts, just with the golden-serial path) and we return non-zero. Needs awk + od (present here).
+pb_rewrite_serial(){
+  _pb_f="$1"; _pb_old="$2"; _pb_new="$3"
+  [ -f "$_pb_f" ] || return 0
+  command -v awk >/dev/null 2>&1 && command -v od >/dev/null 2>&1 || { warn "pb-rewrite: no awk/od — ${_pb_f##*/} left unchanged"; return 1; }
+  grep -q "$_pb_old" "$_pb_f" 2>/dev/null || return 0            # serial not present -> nothing to do
+  _pb_ob="$(printf '%s' "$_pb_old" | od -An -v -tu1 | tr '\n' ' ')"
+  _pb_nb="$(printf '%s' "$_pb_new" | od -An -v -tu1 | tr '\n' ' ')"
+  _pb_tmp="$_pb_f.casnew"
+  od -An -v -tu1 "$_pb_f" | LC_ALL=C awk -v oldb="$_pb_ob" -v newb="$_pb_nb" '
+    function rdvint(idx,   v,sh,b){ v=0; sh=0
+      while(1){ b=B[idx++]; v += (b%128)*(2^sh); if(b<128) break; sh+=7 } NEXTP=idx; return v }
+    function appv(n){  while(n>=128){ RV[++RN]=(n%128)+128;  n=int(n/128) } RV[++RN]=n }
+    function appv2(n){ while(n>=128){ OUT[++O]=(n%128)+128;  n=int(n/128) } OUT[++O]=n }
+    function vbytes(n,   c){ c=1; while(n>=128){ n=int(n/128); c++ } return c }
+    function subst(s,e,   i,j){ SN=0; i=s
+      while(i<e){ if(i+no-1<e){ j=0; while(j<no && B[i+j]==OA[j+1]) j++
+          if(j==no){ for(j=1;j<=nn;j++) SS[++SN]=NA[j]; i+=no; continue } }
+        SS[++SN]=B[i]; i++ } }
+    function rewrite_value(s,e,   p,ftag,plen,k){ RN=0; p=s; ftag=B[p]
+      if(ftag==42 || ftag==66){ p++; plen=rdvint(p); p=NEXTP; subst(p,p+plen)
+        RV[++RN]=ftag; appv(SN); for(k=1;k<=SN;k++) RV[++RN]=SS[k] }
+      else { for(k=s;k<e;k++) RV[++RN]=B[k] } }
+    BEGIN{ no=split(oldb,OA," "); nn=split(newb,NA," ") }
+    { for(i=1;i<=NF;i++) B[++N]=$i+0 }
+    END{ P=1; O=0
+      while(P<=N){
+        if(B[P]!=10) exit 3;  P++; elen=rdvint(P); P=NEXTP; eend=P+elen
+        if(B[P]!=10) exit 3;  P++; klen=rdvint(P); P=NEXTP; kstart=P; P+=klen
+        if(B[P]!=18) exit 3;  P++; vlen=rdvint(P); P=NEXTP; vstart=P
+        rewrite_value(vstart, vstart+vlen)
+        elen2 = 1 + vbytes(klen) + klen + 1 + vbytes(RN) + RN
+        OUT[++O]=10; appv2(elen2)
+        OUT[++O]=10; appv2(klen); for(i=0;i<klen;i++) OUT[++O]=B[kstart+i]
+        OUT[++O]=18; appv2(RN);   for(i=1;i<=RN;i++) OUT[++O]=RV[i]
+        P=eend }
+      for(i=1;i<=O;i++) printf "%c", OUT[i] }
+  ' > "$_pb_tmp" 2>/dev/null
+  _pb_rc=$?
+  if [ "$_pb_rc" -ne 0 ] || [ ! -s "$_pb_tmp" ] || grep -q "$_pb_old" "$_pb_tmp" 2>/dev/null; then
+    rm -f "$_pb_tmp"; warn "pb-rewrite: could not safely rewrite ${_pb_f##*/} (exit=$_pb_rc) — LEFT UNCHANGED"; return 1
+  fi
+  cat "$_pb_tmp" > "$_pb_f" && rm -f "$_pb_tmp"   # overwrite in place; pkg dir is re-chowned/relabeled after
+  ok "pb-rewrite: ${_pb_f##*/} serial $_pb_old -> $_pb_new"
+  return 0
+}
 # Special appops that `pm install -g` does NOT grant — they are "special access" (Settings → Special app
 # access), not runtime permissions. We grant each one the app DECLARES, then VERIFY it stuck, so a silent
 # grant failure surfaces. Declaration-driven (keyed off the manifest), so no package is hardcoded:

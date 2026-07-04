@@ -113,14 +113,24 @@ for pkg in $RPKGS; do
   fi
   # rewrite the golden SD serial -> this unit's serial in any config that references it
   if [ -n "$SERIAL" ] && [ -n "$GSERIAL" ] && [ "$GSERIAL" != "$SERIAL" ]; then
-    # text configs (the SAF content URIs live here): same-length in-place rewrite.
-    grep -rIl "$GSERIAL" "/data/data/$pkg" 2>/dev/null | while IFS= read -r f; do sed -i "s/$GSERIAL/$SERIAL/g" "$f"; done
+    # DataStore Preferences protobufs FIRST: NUL-free, so `grep -I` misreads them as text and a plain
+    # `sed` would desync their length varints -> app crashes ("Unable to parse preferences proto"). These
+    # need a length-correct, protobuf-aware rewrite. Done here so the text/binary passes below SKIP them.
+    find "/data/data/$pkg" -name '*.preferences_pb' 2>/dev/null | while IFS= read -r f; do
+      pb_rewrite_serial "$f" "$GSERIAL" "$SERIAL"                 # leaves a valid file even on failure (no crash)
+    done
+    # text configs (the SAF content URIs live here): same-length-agnostic in-place rewrite.
+    grep -rIl "$GSERIAL" "/data/data/$pkg" 2>/dev/null | while IFS= read -r f; do
+      case "$f" in *.preferences_pb) continue;; esac              # protobuf handled above — never sed it
+      sed -i "s/$GSERIAL/$SERIAL/g" "$f"
+    done
     # binary files holding the old serial (missed by -I): drop regenerable CACHES (e.g. Citra's
     # databases/icons.db) so they rebuild clean. A binary NON-cache config is flagged + a marker dropped
     # (the post-loop check turns it into a hard failure — it would mean a broken different-serial clone).
     grep -rl "$GSERIAL" "/data/data/$pkg" 2>/dev/null | while IFS= read -r f; do
       grep -Iq "$GSERIAL" "$f" 2>/dev/null && continue            # text -> already rewritten above
       case "$f" in
+        *.preferences_pb) continue;;                             # protobuf handled above (rewritten or safely left)
         */cache/*|*/code_cache/*|*/databases/*) rm -f "$f"; warn "dropped stale binary cache (serial): ${f##*/} — regenerates";;
         *) warn "serial in BINARY non-cache config NOT rewritten: $f — broken on a different-serial SD"; : > /data/local/tmp/.cas_serial_fail;;
       esac
