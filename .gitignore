@@ -56,3 +56,14 @@ cas-config.json
 *.pic
 *.mov
 *.pbix
+
+# ── Magisk boot-patch toolkit — MUST ship (un-ignore, LAST so it beats the rules above) ──
+#   provision/root/magisk-patch/ (aarch64 magiskboot + magiskinit + magisk + init-ld + Magisk's
+#   boot_patch.sh/util_functions.sh + stub.apk) is a FIXED, device-agnostic runtime asset the root
+#   flow reads from BUNDLE/provision/root/magisk-patch/ and pushes to the device to patch init_boot.
+#   Unlike firmware/APKs (operator-supplied, external in data/), this is small (~1.5 MB) and required
+#   for cas to root at all, so it is bundled INTO the frozen app and therefore must be in git — a clean
+#   checkout (what CI freezes) has no other source for it. These negations must sit AFTER **/magisk-patch/
+#   and *.apk above (last matching pattern wins; the dir must be re-included before its files can be).
+!/provision/root/magisk-patch/
+!/provision/root/magisk-patch/**

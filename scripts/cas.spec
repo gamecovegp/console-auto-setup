@@ -63,11 +63,19 @@ def _p(*parts):
 
 # --- read-only device-side shell scripts -> provision\root\ inside BUNDLE ---
 datas = [
-    (_p('provision/root/restore.sh'),  'provision/root'),
-    (_p('provision/root/capture.sh'),  'provision/root'),
-    (_p('provision/root/lib-root.sh'), 'provision/root'),
-    (_p('assets/cas-window.png'),      'assets'),          # GameCove logo for the Tk window/taskbar icon
-    (_p('assets/app-icons/*.png'),     'assets/app-icons'),  # curated per-app launcher icons for the app list
+    (_p('provision/root/restore.sh'),      'provision/root'),
+    (_p('provision/root/capture.sh'),      'provision/root'),
+    (_p('provision/root/lib-root.sh'),     'provision/root'),
+    (_p('provision/root/scrub.sh'),        'provision/root'),   # Lock-time ship-clean scrub (cas.provision.SCRUB)
+    (_p('provision/root/grant-persist.sh'), 'provision/root'),  # permanent shell-grant writer (cas.provision.GRANT_PERSIST)
+    # Magisk boot-patch toolkit -> BUNDLE/provision/root/magisk-patch/. cas.provision.patch_init_boot_on_device
+    # pushes this whole dir to the device to patch a stock init_boot with Magisk (aarch64 magiskboot +
+    # magiskinit + magisk + init-ld + Magisk's boot_patch.sh/util_functions.sh + stub.apk). WITHOUT this the
+    # frozen exe roots nothing: "could not push the Magisk patch toolkit to the device" and the unit never boots
+    # rooted. The * glob mirrors the assets/app-icons/*.png entry below; the dir is flat (no subdirs).
+    (_p('provision/root/magisk-patch/*'),  'provision/root/magisk-patch'),
+    (_p('assets/cas-window.png'),          'assets'),          # GameCove logo for the Tk window/taskbar icon
+    (_p('assets/app-icons/*.png'),         'assets/app-icons'),  # curated per-app launcher icons for the app list
 ]
 
 # Belt-and-braces: make sure tkinter's submodules + Tcl/Tk data come along.
