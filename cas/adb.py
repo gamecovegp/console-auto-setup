@@ -17,6 +17,18 @@ _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform.startswith("win") else 
 CANCELLED = 130    # rc for a child stopped by Cancel (128 + SIGINT) — distinguishes an abort from a real fail
 
 
+def _local(p):
+    """Normalize a LOCAL (PC-side) path for `adb push`/`pull` to forward slashes.
+
+    adb.exe on Windows fails to recurse a DIRECTORY whose local path uses backslash separators — it
+    reports success but transfers 0 files (single files DO work with backslashes, which is why the
+    Magisk single-file pushes rooted fine while the multi-file golden PAYLOAD push landed nothing and
+    Download failed with "no APK in payload" — see the mangmi-air-x-256 0-byte download on Windows vs a
+    clean 1.3 GB push of the SAME profile on Linux). adb.exe accepts forward slashes for Windows local
+    paths (`D:/CAS Profiles/...`), so hand it a POSIX-style local path. No-op on POSIX (no backslashes)."""
+    return str(p).replace("\\", "/")
+
+
 def is_cancelled(rc):
     """True if `rc` is the cancelled sentinel (so callers/report can show ⏹ cancelled, not ❌ failed)."""
     return rc == CANCELLED
@@ -197,7 +209,7 @@ class Adb:
 
     def pull_stream(self, src, dst, on_line):
         """adb pull, streaming progress lines ('[ NN%] ...') to on_line(); True on success."""
-        args = self._base() + ["pull", str(src), str(dst)]
+        args = self._base() + ["pull", str(src), _local(dst)]
         if self.runner is subprocess_runner:
             return subprocess_stream(args, on_line, cancel=self.cancel) == 0
         return self.runner(args)[0] == 0
@@ -212,7 +224,7 @@ class Adb:
         `total_kb` is the device-side payload size (du -sk); 0/unknown -> emit MB-only lines (bar stays
         marching). Returns True on success. An injected (test) runner has no real process to poll, so it
         falls back to one blocking pull."""
-        args = self._base() + ["pull", str(src), str(dst)]
+        args = self._base() + ["pull", str(src), _local(dst)]
         if self.runner is not subprocess_runner:
             return self.runner(args)[0] == 0
         total_kb = int(total_kb or 0)
@@ -245,7 +257,7 @@ class Adb:
 
     def push_stream(self, src, dst, on_line):
         """adb push, streaming progress lines to on_line(); True on success."""
-        args = self._base() + ["push", str(src), str(dst)]
+        args = self._base() + ["push", _local(src), str(dst)]
         if self.runner is subprocess_runner:
             return subprocess_stream(args, on_line, cancel=self.cancel) == 0
         return self.runner(args)[0] == 0
@@ -260,11 +272,11 @@ class Adb:
         """adb push -> (ok, message). On failure `message` carries adb's stderr/stdout (e.g. 'device
         offline', 'No space left on device', a source read error) so the caller can log WHY the push
         died instead of a blind False. Honors cancel (routes through raw)."""
-        rc, out, err = self.raw("push", str(src), str(dst))
+        rc, out, err = self.raw("push", _local(src), str(dst))
         return rc == 0, (err or out or "").strip()
 
     def pull(self, src, dst):
-        return self.raw("pull", str(src), str(dst))[0] == 0
+        return self.raw("pull", str(src), _local(dst))[0] == 0
 
     def reboot(self):
         return self.raw("reboot")[0] == 0

@@ -3560,5 +3560,40 @@ class SpecPackagingTest(unittest.TestCase):
                              "both Analysis() calls must pass identical datas")
 
 
+class AdbLocalPathTest(unittest.TestCase):
+    """adb push/pull must hand adb the LOCAL (PC-side) path with forward slashes. On Windows a
+    backslash DIRECTORY path makes `adb push <dir>` report success but transfer 0 files — which is
+    why the multi-file golden PAYLOAD push landed nothing and Download died with "no APK in payload"
+    on the frozen Windows build, while the SAME profile pushed 1.3 GB fine on Linux (and single-file
+    Magisk pushes rooted fine even on Windows). Regression guard for that 0-byte Windows Download."""
+
+    def _rec(self):
+        calls = []
+
+        def runner(args, input_text=None, timeout=900):
+            calls.append(list(args))
+            return 0, "", ""
+        return calls, runner
+
+    def test_push_normalizes_backslash_local_src(self):
+        from cas.adb import Adb
+        calls, runner = self._rec()
+        Adb(serial="X", runner=runner).push(
+            r"D:\CAS Profiles\prof\golden_root_payload\com.x", "/data/local/tmp/cas/payload/")
+        push = next(c for c in calls if "push" in c)
+        local = push[push.index("push") + 1]
+        self.assertEqual(local, "D:/CAS Profiles/prof/golden_root_payload/com.x")
+        self.assertNotIn("\\", local)
+        # the DEVICE path is untouched (already POSIX)
+        self.assertEqual(push[-1], "/data/local/tmp/cas/payload/")
+
+    def test_pull_normalizes_backslash_local_dst(self):
+        from cas.adb import Adb
+        calls, runner = self._rec()
+        Adb(serial="X", runner=runner).pull("/data/local/tmp/cas/x", r"D:\CAS Profiles\out\x")
+        pull = next(c for c in calls if "pull" in c)
+        self.assertEqual(pull[-1], "D:/CAS Profiles/out/x")
+
+
 if __name__ == "__main__":
     unittest.main()
