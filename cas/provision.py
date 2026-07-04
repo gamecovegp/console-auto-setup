@@ -538,9 +538,22 @@ def patch_init_boot_on_device(adb, stock_init_boot, dest, log=print):
     is what lets root() work from a stock image with no per-profile pre-patched file. Returns True on
     success; the unit is left unchanged on failure (only an image was produced)."""
     adb.shell(f"rm -rf {DEV_PATCH}; mkdir -p {DEV_PATCH}")
-    if not adb.push(str(MAGISK_PATCH) + "/.", f"{DEV_PATCH}/"):
-        log("ERROR: could not push the Magisk patch toolkit to the device.")
+    # Push the toolkit file-by-file rather than `adb push <dir>/. <dest>/`. The "/." contents idiom
+    # relies on adb's dir-merge semantics AND POSIX separators; from a Windows PC str(WindowsPath) is
+    # backslash-separated and the trailing "/." is brittle — which is exactly the path the frozen
+    # cas-gui.exe takes. MAGISK_PATCH is a small flat dir, so an explicit per-file push is deterministic
+    # on every OS and pinpoints a missing/empty toolkit instead of a blind "could not push".
+    if not MAGISK_PATCH.is_dir():
+        log(f"ERROR: bundled Magisk patch toolkit missing at {MAGISK_PATCH} — the build is incomplete.")
         return False
+    toolkit = sorted(p for p in MAGISK_PATCH.iterdir() if p.is_file())
+    if not toolkit:
+        log(f"ERROR: bundled Magisk patch toolkit is empty at {MAGISK_PATCH} — the build is incomplete.")
+        return False
+    for f in toolkit:
+        if not adb.push(str(f), f"{DEV_PATCH}/{f.name}"):
+            log("ERROR: could not push the Magisk patch toolkit to the device.")
+            return False
     if not adb.push(str(stock_init_boot), f"{DEV_PATCH}/init_boot.img"):
         log("ERROR: could not push the stock init_boot to the device.")
         return False
