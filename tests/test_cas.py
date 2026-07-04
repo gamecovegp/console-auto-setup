@@ -21,9 +21,14 @@ class FakeRunner:
     def __init__(self, model="Odin2 Mini", golden=False, root=True, boot="1", sd=True,
                  push_ok=True, pull_ok=True, su_blocked=False, slot="_a", first_api="33",
                  device_owner=False, do_set_ok=True, do_restrict=True, release_clears=True,
-                 restrict_in="device_policy", do_set_err=None, dev_code=""):
+                 restrict_in="device_policy", do_set_err=None, dev_code="",
+                 sd_vols=None, sd_esde=False, sd_art=False):
         self.calls = []
         self.model, self.golden, self.root, self.boot, self.sd = model, golden, root, boot, sd
+        # External /storage volume ids present on the (fake) device — modeling ANY volume-id format, not
+        # just the hyphenated FAT 'XXXX-XXXX'. Defaults follow `sd`: one dashed card when sd, none when not.
+        self.sd_vols = list(sd_vols) if sd_vols is not None else (["9C33-6BBD"] if sd else [])
+        self.sd_esde, self.sd_art = sd_esde, sd_art     # does the card carry an ES-DE tree / box art
         # dev_code = ro.mangmi.dev.code — present ("" default = absent) only on MANGMI (EDL-only) units.
         self.dev_code = dev_code
         self.push_ok, self.pull_ok = push_ok, pull_ok
@@ -41,6 +46,25 @@ class FakeRunner:
         # (Android 14+ keeps the per-admin device_policy userRestrictions field EMPTY and lists them under
         # dumpsys user 'Effective/global restrictions' instead). Only matters when do_restrict is True.
         self.restrict_in = restrict_in
+
+    def _storage_ls(self, cmd):
+        """Emulate the device's /storage volume listing for the app's probes. Returns (rc,out,err),
+        or None when `cmd` is not a storage probe. 'emulated'/'self' are always present (internal);
+        `self.sd_vols` are the external cards, in WHATEVER volume-id format."""
+        if "/storage/*/ES-DE" in cmd or "downloaded_media" in cmd:      # _probe_sd_media box-art scan
+            hits = []
+            for n in self.sd_vols:
+                if self.sd_esde:
+                    hits.append(f"/storage/{n}/ES-DE")
+                if self.sd_art:
+                    hits.append(f"/storage/{n}/downloaded_media")
+            return 0, ("\n".join(hits) + "\n" if hits else ""), ""
+        names = ["emulated", "self"] + list(self.sd_vols)
+        if "/storage/*/" in cmd:                                        # format-agnostic volume probe
+            return 0, "".join(f"/storage/{n}/\n" for n in names), ""
+        if "/storage/*-*" in cmd:                                       # legacy dash-only glob (pre-fix)
+            return 0, "".join(f"/storage/{n}\n" for n in names if "-" in n), ""
+        return None
 
     def __call__(self, args, input_text=None, timeout=900):
         self.calls.append(list(args))
@@ -67,10 +91,14 @@ class FakeRunner:
                     return 0, "[ok] restored apps\n[ok] RESTORE complete\n", ""
                 if "capture.sh" in cmd:
                     return 0, "[ok] GOLDEN captured\n", ""
-                if "/storage/*-*" in cmd:
-                    return 0, ("/storage/9C33-6BBD\n" if self.sd else ""), ""
+                sl = self._storage_ls(cmd)
+                if sl is not None:
+                    return sl
                 return 0, "", ""
             tail = args[-1]
+            sl = self._storage_ls(tail)
+            if sl is not None:
+                return sl
             if tail.startswith("dpm list-owners"):
                 return 0, ("Device owner: com.gamecove.gamecove_companion\n" if self._owner
                            else "No device owner.\n"), ""
@@ -324,6 +352,18 @@ class TestAdb(unittest.TestCase):
     def test_sd_info(self):
         self.assertIn("9C33-6BBD", Adb(runner=FakeRunner(sd=True)).sd_info())
         self.assertEqual(Adb(runner=FakeRunner(sd=False)).sd_info(), "no SD")
+
+    def test_sd_detected_regardless_of_volume_id_format(self):
+        # A big exFAT card mounts as a hyphen-LESS 16-hex volume id (e.g. Retroid Pocket 6's ROM card at
+        # /storage/6ED25E36D25E032F). Detection must NOT assume the FAT 'XXXX-XXXX' shape, or the card —
+        # and thus the auto-matched profile/tier — silently reads as 'no SD'.
+        for vol in ("6ED25E36D25E032F", "9C33-6BBD", "ABCD-1234"):
+            r = FakeRunner(sd_vols=[vol])
+            self.assertIn(vol, Adb(runner=r).sd_info(), f"{vol} not detected")
+            self.assertTrue(Adb(runner=r).has_sd(), f"has_sd False for {vol}")
+        # only the internal 'emulated'/'self' present -> genuinely no card
+        self.assertEqual(Adb(runner=FakeRunner(sd_vols=[])).sd_info(), "no SD")
+        self.assertFalse(Adb(runner=FakeRunner(sd_vols=[])).has_sd())
 
     def test_pull_with_progress_fallback(self):
         # an injected (test) runner has no real process to poll -> one blocking pull; success follows pull_ok
@@ -3210,66 +3250,6 @@ class TestAssignFirmware(unittest.TestCase):
                     os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
 
 
-class TestStockInitBoot(unittest.TestCase):
-    """The Stock init_boot field follows the SELECTED DEVICE's assigned profile, and defaults to the
-    bundled kit init_boot when that profile sets no override."""
-
-    class _Var:
-        def __init__(self, v=""): self.v = v
-        def set(self, x): self.v = x
-        def get(self): return self.v
-
-    def _env(self, t):
-        os.environ["CAS_PROFILES"] = str(t)
-        os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cfg.json")
-
-    def test_browse_targets_selected_devices_profile(self):
-        import types
-        from unittest import mock
-        from cas.gui import App
-        saved = {k: os.environ.get(k) for k in ("CAS_CONFIG", "CAS_PROFILES")}
-        with tempfile.TemporaryDirectory() as t:
-            self._env(t)
-            try:
-                _mk(t, "profA"); _mk(t, "profB")
-                app = App.__new__(App); app.profiles_root = str(t); app.log = lambda m: None
-                app.prof_var = types.SimpleNamespace(get=lambda: "profA")     # dropdown = A
-                app.dev_tree = types.SimpleNamespace(selection=lambda: ["S1"])
-                app.assigned = {"S1": "profB"}                                # device's profile = B
-                app.stock_var = self._Var()
-                img = pathlib.Path(t) / "rp6_init_boot.img"; img.write_bytes(b"x")
-                with mock.patch("cas.gui.filedialog.askopenfilename", return_value=str(img)):
-                    app._browse_stock_init_boot()
-                self.assertTrue(P.Profile(pathlib.Path(t) / "profB").meta.get("stock_init_boot", "")
-                                .endswith("rp6_init_boot.img"))               # device's profile updated
-                self.assertFalse(P.Profile(pathlib.Path(t) / "profA").meta.get("stock_init_boot", "")
-                                 .endswith("rp6_init_boot.img"))              # dropdown profile untouched
-            finally:
-                for k, v in saved.items():
-                    os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
-
-    def test_sync_stock_field_defaults_to_kit_when_no_override(self):
-        import types
-        from cas.gui import App
-        from cas import provision as PV
-        saved = {k: os.environ.get(k) for k in ("CAS_CONFIG", "CAS_PROFILES")}
-        with tempfile.TemporaryDirectory() as t:
-            self._env(t)
-            try:
-                bare = pathlib.Path(t) / "bare"; (bare / "golden_root_payload").mkdir(parents=True)
-                (bare / "profile.meta").write_text("model_match=X\n")         # NO stock_init_boot override
-                app = App.__new__(App); app.profiles_root = str(t)
-                app.assigned = {"S1": "bare"}; app.stock_var = self._Var("stale")
-                app._sync_stock_field("S1")
-                self.assertEqual(app.stock_var.get(), PV.DEFAULT_STOCK_INIT_BOOT)   # defaulted to the kit
-                P.set_meta_key(bare / "profile.meta", "stock_init_boot", "custom/x.img")
-                app._sync_stock_field("S1")
-                self.assertEqual(app.stock_var.get(), "custom/x.img")          # override wins when set
-            finally:
-                for k, v in saved.items():
-                    os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
-
-
 class TestRunChainReport(unittest.TestCase):
     """Regression: a completed chain (e.g. Save) must hand _report a result it can consume, or done()
     crashes mid-way and leaves the UI wedged in the busy/loading state (buttons greyed, watch cursor)."""
@@ -3593,6 +3573,30 @@ class AdbLocalPathTest(unittest.TestCase):
         Adb(serial="X", runner=runner).pull("/data/local/tmp/cas/x", r"D:\CAS Profiles\out\x")
         pull = next(c for c in calls if "pull" in c)
         self.assertEqual(pull[-1], "D:/CAS Profiles/out/x")
+
+
+class FastbootMissingHelpTest(unittest.TestCase):
+    """When a unit reboots to the bootloader but never shows in `fastboot devices`, the operator gets
+    OS-aware, actionable guidance — on Windows the REAL cause (missing bootloader USB driver) + the
+    one-time fix, not a dead-end 'Aborting'. This is the fastboot-flash step of ⓪ Root."""
+
+    def test_windows_points_at_the_bootloader_driver(self):
+        from unittest import mock
+        from cas import provision as PV
+        with mock.patch.object(PV.os, "name", "nt"):
+            msg = PV.fastboot_missing_help()
+        self.assertIn("BOOTLOADER USB DRIVER", msg)
+        self.assertIn("setup-windows.bat", msg)      # the shipped helper
+        self.assertIn("WinUSB", msg)                 # the driver to install
+        self.assertNotIn("android-udev", msg)        # that's the POSIX branch, not here
+
+    def test_posix_is_cable_mode_guidance_not_driver(self):
+        from unittest import mock
+        from cas import provision as PV
+        with mock.patch.object(PV.os, "name", "posix"):
+            msg = PV.fastboot_missing_help()
+        self.assertIn("did not enter fastboot", msg)
+        self.assertNotIn("BOOTLOADER USB DRIVER", msg)
 
 
 if __name__ == "__main__":

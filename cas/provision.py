@@ -786,6 +786,28 @@ def capture_to_pc(adb, name, stamp, root="profiles", log=print, dry_pull=False):
     return True
 
 
+def fastboot_missing_help():
+    """Actionable guidance when a unit reboots to its bootloader but never shows in `fastboot devices`.
+
+    On Windows this is almost always the missing BOOTLOADER USB driver, NOT a code/device fault: adb and
+    fastboot use DIFFERENT Windows drivers, so Download + the on-device Magisk patch work while the fastboot
+    FLASH can't see the unit. Linux gets this for free via udev, which is why the same unit roots there. The
+    fix is a one-time per-PC WinUSB driver install (setup-windows.bat / Zadig). On POSIX a timeout here is a
+    cable/mode issue instead."""
+    if os.name == "nt":
+        return ("ERROR: the unit reached its bootloader but Windows can't see it in fastboot — the "
+                "BOOTLOADER USB DRIVER is missing. (adb uses a different driver, so Download and the Magisk "
+                "patch worked; only the fastboot FLASH is blocked. Linux roots this unit fine because udev "
+                "provides the driver automatically.) ONE-TIME FIX per PC — with the unit still on its "
+                "bootloader/fastboot screen: run scripts\\setup-windows.bat, OR use Zadig "
+                "(zadig.akeo.ie) → Options▸List All Devices → select the 'Android Bootloader Interface' "
+                "(a.k.a. the fastboot device) → driver 'WinUSB' → Install/Replace Driver. Then re-run Root. "
+                "The unit is UNHARMED — hold Power ~10s to reboot it back to Android.")
+    return ("ERROR: device did not enter fastboot (nothing in `fastboot devices`). Check the USB cable/port "
+            "and that it reached the bootloader; on Linux make sure android-udev rules are installed. The "
+            "unit is unharmed and still bootable.")
+
+
 def fastboot_flasher(fastboot, wait=True, on_critical=None):
     """Flash backend: reboot to BOOTLOADER fastboot and write the patched image to `target`. Works on units
     whose bootloader implements `flash` (Retroid/AYN/Odin). Returns callable(adb, target, image, log)->bool;
@@ -795,7 +817,7 @@ def fastboot_flasher(fastboot, wait=True, on_critical=None):
         log(f"rebooting to bootloader to flash {target} (fastboot)...")
         adb.raw("reboot", "bootloader")
         if wait and not fastboot.wait(on_tick=lambda s: log(f"  …waiting for fastboot ({s}s)")):
-            log("ERROR: device did not enter fastboot. Aborting (it should still be bootable).")
+            log(fastboot_missing_help())
             return False
         if on_critical:
             on_critical(True)

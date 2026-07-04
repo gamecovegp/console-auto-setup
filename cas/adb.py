@@ -9,6 +9,22 @@ import time
 
 SU = "/debug_ramdisk/su"   # MagiskSU path on these units (plain `su` isn't on the adb PATH)
 
+# List every mounted /storage volume (trailing-slash glob = dirs only) and filter in Python, rather than
+# a device-side glob that assumes a hyphenated volume id. Kept trivial so it survives `su -c` space-joining.
+SD_LS = "ls -d /storage/*/ 2>/dev/null"
+_SD_INTERNAL = ("emulated", "self")   # always-present internal mounts — never the external ROM card
+
+
+def _sd_volumes(ls_out):
+    """External volume paths from `ls -d /storage/*/` output (any volume-id format), minus the internal
+    'emulated'/'self'. Returns full paths with the trailing slash stripped."""
+    vols = []
+    for line in (ls_out or "").splitlines():
+        p = line.strip().rstrip("/")
+        if p and p.rsplit("/", 1)[-1] not in _SD_INTERNAL:
+            vols.append(p)
+    return vols
+
 # cas-gui.exe is a GUI (windowed) app; without this, every adb/fastboot subprocess pops a black
 # console window on Windows. CREATE_NO_WINDOW suppresses it. 0 elsewhere — the conditional never
 # evaluates the (Windows-only) attribute off-Windows, and creationflags=0 is a no-op on POSIX.
@@ -331,19 +347,28 @@ class Adb:
         rc, out, _ = self.su("[ -e /data/adb/.cas_golden ] && echo CAS_GOLD || echo CAS_NOTGOLD", timeout=30)
         return not (rc == 0 and "CAS_NOTGOLD" in out and "CAS_GOLD" not in out)
 
+    def sd_volumes(self, timeout=15):
+        """External /storage volume paths (e.g. '/storage/6ED25E36D25E032F'), newest-listed first.
+        Detects a card in ANY volume-id format — FAT 'XXXX-XXXX', exFAT 16-hex, OTG UUIDs — rather than
+        assuming a hyphenated id (a big exFAT ROM card mounts hyphen-LESS, so the old '/storage/*-*' glob
+        missed it entirely). We list every /storage child and drop only the always-present internal
+        'emulated'/'self'. Tries shell first (listing /storage usually needs no root), falls back to su."""
+        out = self.shell(SD_LS)[1]
+        vols = _sd_volumes(out)
+        if not vols:
+            vols = _sd_volumes(self.su(SD_LS, timeout=timeout)[1])
+        return vols
+
     def has_sd(self):
-        """True if an external SD volume (/storage/XXXX-XXXX) is mounted (carries ROMs + the serial)."""
-        return bool(self.su("ls -d /storage/*-* 2>/dev/null")[1].strip())
+        """True if an external SD volume is mounted (carries ROMs + the serial)."""
+        return bool(self.sd_volumes())
 
     def sd_info(self, timeout=15):
-        """Short descriptor of the external SD card for the UI: 'C89C-53BE · 238G', or 'no SD'.
-        Tries shell first (listing /storage usually needs no root), falls back to su."""
-        out = self.shell("ls -d /storage/*-* 2>/dev/null")[1].strip()
-        if not out:
-            out = self.su("ls -d /storage/*-* 2>/dev/null", timeout=timeout)[1].strip()
-        if not out:
+        """Short descriptor of the external SD card for the UI: 'C89C-53BE · 238G', or 'no SD'."""
+        vols = self.sd_volumes(timeout=timeout)
+        if not vols:
             return "no SD"
-        path = out.split()[0]
+        path = vols[0]
         serial = path.rsplit("/", 1)[-1]
         size = ""
         for line in self.shell(f"df -h {path} 2>/dev/null")[1].splitlines():

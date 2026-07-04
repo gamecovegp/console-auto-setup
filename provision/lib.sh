@@ -39,7 +39,9 @@ exists(){ [ "$(SH "[ -e \"$1\" ] && echo Y")" = Y ]; }
 fg_activity(){ SH 'dumpsys activity activities | grep -m1 topResumedActivity' | sed -E 's/.*u0 //; s/\} .*//'; }
 
 # ---- SD + payload ----
-detect_sd(){ SDPATH="$(SH 'for d in /storage/*-*; do [ -d "$d" ] && echo "$d" && break; done')"; SDID="${SDPATH##*/}"; PAYLOAD="${PAYLOAD:-$SDPATH/golden_payload}"; }
+# SDPATH = first external /storage volume, in ANY volume-id format (skip internal 'emulated'/'self',
+# never assume a hyphenated id — a big exFAT ROM card mounts hyphen-LESS and the old /*-* glob missed it).
+detect_sd(){ SDPATH="$(SH 'for d in /storage/*/; do d=${d%/}; n=${d##*/}; [ "$n" = emulated ] || [ "$n" = self ] || { [ -d "$d" ] && { echo "$d"; break; }; }; done')"; SDID="${SDPATH##*/}"; PAYLOAD="${PAYLOAD:-$SDPATH/golden_payload}"; }
 
 # ---- app lifecycle / perms ----
 launch_first(){ # $1=pkg : start once so the APP creates its dirs app-owned, then stop.
