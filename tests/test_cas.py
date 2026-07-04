@@ -2243,6 +2243,15 @@ class TestProvisionLockdown(unittest.TestCase):
             self.assertTrue(PV.provision(Adb(runner=r), prof, log=lambda *_: None))
             self.assertFalse(any("dpm set-device-owner" in c for c in r.cmds()))
 
+    def test_download_skips_device_owner_by_default(self):
+        # Default is OFF: a profile with NO @lockdown flag must NOT make the Companion Device Owner,
+        # so units never ship "locked by organization" unless a profile opts in with `@lockdown on`.
+        with tempfile.TemporaryDirectory() as tmp:
+            prof = self._profile(tmp, {"settings": "on"})
+            r = FakeRunner()
+            self.assertTrue(PV.provision(Adb(runner=r), prof, log=lambda *_: None))
+            self.assertFalse(any("dpm set-device-owner" in c for c in r.cmds()))
+
     def test_download_succeeds_even_if_lockdown_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             prof = self._profile(tmp, {"settings": "on", "lockdown": "on"})
