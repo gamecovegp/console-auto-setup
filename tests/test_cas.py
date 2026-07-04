@@ -2990,10 +2990,13 @@ class TestApkStoreDeploy(unittest.TestCase):
 
     def test_install_apk_single_and_split(self):
         fr = FakeRunner(); adb = Adb(runner=fr)
-        self.assertTrue(PV._install_apk(adb, "p", [pathlib.Path("/x/base.apk")], log=lambda *a: None))
-        self.assertTrue(any(c[-1] == "/x/base.apk" and "install" in c for c in fr.calls))
+        base = pathlib.Path("/x/base.apk")
+        self.assertTrue(PV._install_apk(adb, "p", [base], log=lambda *a: None))
+        # _install_apk passes str(Path); compare the OS-native rendering (Windows -> backslashes),
+        # not a hardcoded POSIX literal, so this test is cross-platform.
+        self.assertTrue(any(c[-1] == str(base) and "install" in c for c in fr.calls))
         fr2 = FakeRunner(); adb2 = Adb(runner=fr2)
-        PV._install_apk(adb2, "p", [pathlib.Path("/x/base.apk"), pathlib.Path("/x/split.apk")],
+        PV._install_apk(adb2, "p", [base, pathlib.Path("/x/split.apk")],
                         log=lambda *a: None)
         self.assertTrue(any("install-multiple" in c for c in fr2.calls))
 
