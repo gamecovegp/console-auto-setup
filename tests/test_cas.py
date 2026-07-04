@@ -3433,5 +3433,85 @@ class TestLibWatch(unittest.TestCase):
         self.assertEqual(app._after, [2000])
 
 
+class SpecPackagingTest(unittest.TestCase):
+    """Guards the PyInstaller spec so a frozen build actually bundles the `cas` package.
+
+    Regression (v0.3.0, first release after the scripts/ reorg 4c03961): the entry shims
+    moved into scripts/ while `cas/` stayed at the repo root. PyInstaller adds the ENTRY
+    SCRIPT's own directory (scripts/) to its import search path, so with pathex=[] it could
+    not import `cas` during analysis and froze a bundle MISSING the package -> the exe died
+    at launch with `ModuleNotFoundError: No module named 'cas'`. The spec MUST put the repo
+    root on `pathex` so `cas` resolves during analysis. The CI freeze step never runtime-tests
+    the exe, so this static check is the regression guard.
+    """
+
+    def _analyze_spec(self):
+        """exec scripts/cas.spec with PyInstaller's injected globals stubbed; return
+        (repo_root, [pathex passed to each Analysis(...) call])."""
+        import types
+
+        repo = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        spec_path = os.path.join(repo, "scripts", "cas.spec")
+
+        captured = []
+
+        class _Stub:
+            # the spec reads attrs off Analysis results (a.pure, a.scripts, a.binaries, …);
+            # return harmless empties for any attribute it touches.
+            def __getattr__(self, _name):
+                return []
+
+        def _Analysis(scripts, pathex=None, **kw):
+            captured.append(list(pathex or []))
+            return _Stub()
+
+        def _factory(*a, **k):
+            return _Stub()
+
+        # The spec does `from PyInstaller.utils.hooks import collect_all` at eval time.
+        # PyInstaller is a BUILD-only dep (absent in the test env), so fake the module tree.
+        fake_hooks = types.ModuleType("PyInstaller.utils.hooks")
+        fake_hooks.collect_all = lambda _name: ([], [], [])
+        fake_utils = types.ModuleType("PyInstaller.utils")
+        fake_utils.hooks = fake_hooks
+        fake_pyi = types.ModuleType("PyInstaller")
+        fake_pyi.utils = fake_utils
+
+        keys = ("PyInstaller", "PyInstaller.utils", "PyInstaller.utils.hooks")
+        saved = {k: sys.modules.get(k) for k in keys}
+        sys.modules.update(dict(zip(keys, (fake_pyi, fake_utils, fake_hooks))))
+        try:
+            src = pathlib.Path(spec_path).read_text()
+            ns = {
+                # PyInstaller injects SPECPATH (abs dir of the .spec) + the build classes.
+                "SPECPATH": os.path.join(repo, "scripts"),
+                "Analysis": _Analysis,
+                "PYZ": _factory, "EXE": _factory, "COLLECT": _factory, "BUNDLE": _factory,
+                "__file__": spec_path,
+            }
+            exec(compile(src, spec_path, "exec"), ns)
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    sys.modules.pop(k, None)
+                else:
+                    sys.modules[k] = v
+        return repo, captured
+
+    def test_spec_pathex_includes_repo_root(self):
+        repo, captured = self._analyze_spec()
+        # sanity: the package we must bundle really lives at the repo root
+        self.assertTrue(os.path.isdir(os.path.join(repo, "cas")))
+        self.assertTrue(captured, "spec defined no Analysis() — did the spec change shape?")
+        repo_abs = os.path.abspath(repo)
+        for pathex in captured:
+            resolved = [os.path.abspath(p) for p in pathex]
+            self.assertIn(repo_abs, resolved,
+                          "cas.spec Analysis(pathex=...) must include the repo root so "
+                          "PyInstaller can import `cas` during analysis; otherwise the "
+                          "frozen build ships without it (ModuleNotFoundError: No module "
+                          "named 'cas' at launch).")
+
+
 if __name__ == "__main__":
     unittest.main()
