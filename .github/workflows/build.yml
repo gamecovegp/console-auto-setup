@@ -111,6 +111,19 @@ jobs:
           ls -R dist || true
           test -d dist/cas
 
+      - name: Smoke-test the frozen exe actually imports `cas`
+        # The freeze step can silently produce a bundle MISSING the cas package (e.g. a bad
+        # pathex leaving `cas` off the analysis import path) and still exit 0 — the failure
+        # only surfaces at LAUNCH (ModuleNotFoundError: No module named 'cas'). That is exactly
+        # how v0.3.0 shipped a dead exe. So RUN the frozen console exe here: `cas --help` imports
+        # cas.cli -> the whole cas package and exits 0 without touching a device. The GUI exe
+        # shares the same COLLECT bundle + cas package, so this covers cas-gui too.
+        shell: bash
+        run: |
+          BIN="dist/cas/cas"
+          [ "${{ runner.os }}" = "Windows" ] && BIN="dist/cas/cas.exe"
+          "$BIN" --help
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
