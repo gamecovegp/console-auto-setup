@@ -89,7 +89,11 @@ hiddenimports = list(tk_hidden) + [
 # --- analysis: one per executable; COLLECT dedupes the shared (identical) datas/binaries ---
 a_gui = Analysis(
     [_p('scripts/pyi_entry_gui.py')],
-    pathex=[],
+    # The entry shim lives in scripts/ but the `cas` package sits at the repo ROOT. PyInstaller
+    # only auto-adds the entry script's OWN dir (scripts/) to the analysis import path, so without
+    # REPO here `from cas.gui import main` can't resolve and the bundle ships WITHOUT cas ->
+    # ModuleNotFoundError: No module named 'cas' at launch (regression from the scripts/ reorg).
+    pathex=[REPO],
     binaries=tk_binaries,
     datas=datas,
     hiddenimports=hiddenimports,
@@ -105,7 +109,7 @@ a_gui = Analysis(
 
 a_cli = Analysis(
     [_p('scripts/pyi_entry_cli.py')],
-    pathex=[],
+    pathex=[REPO],   # see a_gui: repo root must be on the import path so `cas` resolves
     binaries=tk_binaries,
     datas=datas,
     hiddenimports=hiddenimports,
