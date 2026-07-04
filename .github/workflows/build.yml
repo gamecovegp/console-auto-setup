@@ -124,6 +124,41 @@ jobs:
           [ "${{ runner.os }}" = "Windows" ] && BIN="dist/cas/cas.exe"
           "$BIN" --help
 
+      - name: Verify the frozen bundle actually SHIPS the device-side resources
+        # `cas --help` only proves the Python package imports — it does NOT touch the read-only
+        # resources cas pushes to the device (magisk-patch toolkit, scrub.sh, grant-persist.sh). A
+        # spec that forgets one freezes a bundle that imports fine but fails at RUNTIME on the
+        # operator's rig (e.g. "could not push the Magisk patch toolkit" -> unit never roots/boots).
+        # Assert each required resource is present in dist/ (layout-agnostic find: onedir puts datas
+        # under _internal/). This runs on windows-latest too, so a Windows-incomplete bundle fails here.
+        shell: bash
+        run: |
+          set -e
+          req=(
+            provision/root/restore.sh
+            provision/root/capture.sh
+            provision/root/lib-root.sh
+            provision/root/scrub.sh
+            provision/root/grant-persist.sh
+            provision/root/magisk-patch/boot_patch.sh
+            provision/root/magisk-patch/util_functions.sh
+            provision/root/magisk-patch/magiskboot
+            provision/root/magisk-patch/magiskinit
+            provision/root/magisk-patch/magisk
+            provision/root/magisk-patch/init-ld
+            provision/root/magisk-patch/stub.apk
+            assets/cas-window.png
+          )
+          fail=0
+          for r in "${req[@]}"; do
+            if find dist/cas -path "*/$r" | grep -q .; then
+              echo "OK   $r"
+            else
+              echo "MISSING  $r"; fail=1
+            fi
+          done
+          [ "$fail" = 0 ] || { echo "::error::frozen bundle is missing required device-side resources"; exit 1; }
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

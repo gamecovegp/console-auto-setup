@@ -3447,7 +3447,7 @@ class SpecPackagingTest(unittest.TestCase):
 
     def _analyze_spec(self):
         """exec scripts/cas.spec with PyInstaller's injected globals stubbed; return
-        (repo_root, [pathex passed to each Analysis(...) call])."""
+        (repo_root, [{'pathex':[...], 'datas':[(src,dest),...]} per Analysis(...) call])."""
         import types
 
         repo = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -3461,8 +3461,8 @@ class SpecPackagingTest(unittest.TestCase):
             def __getattr__(self, _name):
                 return []
 
-        def _Analysis(scripts, pathex=None, **kw):
-            captured.append(list(pathex or []))
+        def _Analysis(scripts, pathex=None, datas=None, **kw):
+            captured.append({"pathex": list(pathex or []), "datas": list(datas or [])})
             return _Stub()
 
         def _factory(*a, **k):
@@ -3504,13 +3504,60 @@ class SpecPackagingTest(unittest.TestCase):
         self.assertTrue(os.path.isdir(os.path.join(repo, "cas")))
         self.assertTrue(captured, "spec defined no Analysis() — did the spec change shape?")
         repo_abs = os.path.abspath(repo)
-        for pathex in captured:
-            resolved = [os.path.abspath(p) for p in pathex]
+        for rec in captured:
+            resolved = [os.path.abspath(p) for p in rec["pathex"]]
             self.assertIn(repo_abs, resolved,
                           "cas.spec Analysis(pathex=...) must include the repo root so "
                           "PyInstaller can import `cas` during analysis; otherwise the "
                           "frozen build ships without it (ModuleNotFoundError: No module "
                           "named 'cas' at launch).")
+
+    # Every read-only resource the runtime loads from BUNDLE/ (= sys._MEIPASS when frozen). If any
+    # is absent from the spec's datas it silently vanishes from the frozen bundle and the feature
+    # that reads it dies at RUNTIME (e.g. magisk-patch missing -> "could not push the Magisk patch
+    # toolkit", the unit never roots/boots). Keep in lock-step with the `BUNDLE / ...` refs in
+    # cas/provision.py + cas/gui.py.
+    REQUIRED_BUNDLED = [
+        "provision/root/restore.sh",
+        "provision/root/capture.sh",
+        "provision/root/lib-root.sh",
+        "provision/root/scrub.sh",
+        "provision/root/grant-persist.sh",
+        "provision/root/magisk-patch/boot_patch.sh",   # sourced by the on-device patch
+        "provision/root/magisk-patch/util_functions.sh",
+        "provision/root/magisk-patch/magiskboot",       # the aarch64 patcher binary
+        "provision/root/magisk-patch/magiskinit",
+        "provision/root/magisk-patch/magisk",
+        "provision/root/magisk-patch/init-ld",
+        "provision/root/magisk-patch/stub.apk",          # boot_patch.sh compresses this into the ramdisk
+        "assets/cas-window.png",
+    ]
+
+    def test_spec_bundles_every_required_runtime_resource(self):
+        import glob
+        repo, captured = self._analyze_spec()
+        self.assertTrue(captured, "spec defined no Analysis() — did the spec change shape?")
+        # Expand every datas src (globs included, mirroring PyInstaller) to the set of real files it
+        # ships, as repo-relative POSIX paths. glob only matches files that EXIST — so this also
+        # guards that the resource is present in a clean checkout (i.e. committed, not gitignored).
+        covered = set()
+        esc_repo = glob.escape(repo)   # this bench's path has '[07]' — escape it so glob treats the
+                                       # dir literally while the trailing '*' in a src stays a wildcard.
+        for src, _dest in captured[0]["datas"]:
+            pattern = esc_repo + src[len(repo):] if src.startswith(repo) else glob.escape(src)
+            for m in glob.glob(pattern):
+                if os.path.isfile(m):
+                    rel = os.path.relpath(os.path.abspath(m), repo).replace(os.sep, "/")
+                    covered.add(rel)
+        missing = [r for r in self.REQUIRED_BUNDLED if r not in covered]
+        self.assertEqual(missing, [],
+                         "cas.spec datas does not bundle (or the file is missing/gitignored from a "
+                         f"clean checkout): {missing}. These are read from BUNDLE/ at runtime; if not "
+                         "frozen in, the feature dies on the operator's machine.")
+        # Both exes must ship the SAME datas (COLLECT dedups); guard they don't drift apart.
+        for rec in captured[1:]:
+            self.assertEqual(rec["datas"], captured[0]["datas"],
+                             "both Analysis() calls must pass identical datas")
 
 
 if __name__ == "__main__":
