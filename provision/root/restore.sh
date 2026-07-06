@@ -172,6 +172,16 @@ done
 # DELETE any existing MediaDirectory line (robust to spacing) and append a clean one. [VERIFY the element
 # format against the live ES-DE build on first run.]
 ES_SET="/storage/emulated/0/ES-DE/settings/es_settings.xml"
+# 2c-pre) Restore the golden's es_settings.xml (the per-system alternative-emulator picks — 3DS→Citra,
+# DS→melonDS, PS2→NetherSX2… — plus frontend settings). This is the ONLY internal ES-DE file the payload
+# carries; the rest of the ES-DE tree rides the SD card. Done BEFORE the ROM/Media rewrite below so those
+# per-unit dirs are re-pointed on top of the golden's settings.
+if echo "$RPKGS" | grep -q org.es_de.frontend && [ -f "$P/es_settings.xml" ]; then
+  mkdir -p "${ES_SET%/*}"
+  if cp "$P/es_settings.xml" "$ES_SET"; then
+    relabel "$ES_SET" 2>/dev/null; ok "restored ES-DE es_settings.xml (emulator-per-system picks)"
+  else warn "ES-DE es_settings.xml restore failed"; FAIL=$((FAIL+1)); fi
+fi
 if echo "$RPKGS" | grep -q org.es_de.frontend && [ -f "$ES_SET" ]; then
   case "${CAS_ES_MEDIA:-sd}" in
     internal) MEDIA_DIR="/storage/emulated/0/ES-DE/downloaded_media";;

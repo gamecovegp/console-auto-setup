@@ -241,6 +241,32 @@ class GrantShellRoot(unittest.TestCase):
         self.assertTrue(ok)                               # root() returns True via the auto-grant tail
         self.assertTrue(ra.granted)                       # the auto-tap path actually ran
 
+    def test_root_refuses_wrong_partition_type_image(self):
+        # REGRESSION (Retroid Pocket 5 / kona brick): an init_boot image is RAMDISK-ONLY (kernel_size 0).
+        # Flashed to a plain `boot` partition (a pre-init_boot unit's target) it removes the kernel and the
+        # unit bootloops straight to fastboot. The inverse (a full boot.img -> init_boot) is wrong too.
+        # root() must REFUSE both BEFORE flashing — model-independently (this unit sets no model_match).
+        INIT_BOOT = b"ANDROID!" + (0).to_bytes(4, "little") + b"\0" * 512          # ramdisk-only, no kernel
+        FULL_BOOT = b"ANDROID!" + (0x800000).to_bytes(4, "little") + b"\0" * 512   # has a kernel
+        with tempfile.TemporaryDirectory() as d:
+            ib = pathlib.Path(d) / "init_boot.img"; ib.write_bytes(INIT_BOOT)
+            bt = pathlib.Path(d) / "boot.img";      bt.write_bytes(FULL_BOOT)
+            # (a) init_boot image on a pre-init_boot unit (first_api<33 -> 'boot_a' target) -> refuse
+            ra = FakeRunner(root=False, first_api="31", slot="_a")
+            logs = []
+            ok = PV.root(Adb(runner=ra), Fastboot(runner=FakeRunner()), ib, magisk_apk=None,
+                         log=logs.append, wait=False, flasher=lambda *a: True)
+            self.assertFalse(ok)
+            self.assertTrue(any("REFUSING" in m for m in logs), logs)
+            self.assertFalse(any("flash" in " ".join(c).lower() for c in ra.calls))   # nothing flashed
+            # (b) full boot image on an A13+ unit (first_api>=33 -> 'init_boot_a' target) -> refuse
+            rb = FakeRunner(root=False, first_api="33", slot="_a")
+            logs2 = []
+            ok2 = PV.root(Adb(runner=rb), Fastboot(runner=FakeRunner()), bt, magisk_apk=None,
+                          log=logs2.append, wait=False, flasher=lambda *a: True)
+            self.assertFalse(ok2)
+            self.assertTrue(any("REFUSING" in m for m in logs2), logs2)
+
 
 def make_profile(tmp, name="odin2mini", model="Odin2 ?Mini", apps=None):
     apps = apps or ["org.es_de.frontend", "dev.eden.eden_emulator", "org.citra.emu"]
@@ -2132,6 +2158,45 @@ class TestEdl(unittest.TestCase):
         edl = Edl("/x/q", "/x/f", "/x/p", runner=subprocess_runner)
         self.assertEqual(edl._launcher("/dev/cas-nonexistent-port"), [])
         self.assertEqual(edl._launcher(""), [])
+
+    def test_edl_ports_posix_globs_ttyusb(self):
+        from cas import adb as A
+        from unittest import mock
+        with mock.patch.object(A.os, "name", "posix"), \
+             mock.patch.object(A.glob, "glob", return_value=["/dev/ttyUSB1", "/dev/ttyUSB0"]):
+            self.assertEqual(A._edl_ports("/dev/ttyUSB*"), ["/dev/ttyUSB0", "/dev/ttyUSB1"])   # sorted
+
+    def test_edl_ports_windows_formats_com_port(self):
+        # Windows has no /dev glob: the QDLoader 9008 COM port(s) are returned as \\.\COMn (the form the
+        # EDL tools want; the \\.\ prefix also handles COM10+). Regression for EDL on a Windows bench.
+        from cas import adb as A
+        from unittest import mock
+        with mock.patch.object(A.os, "name", "nt"), \
+             mock.patch.object(A, "_windows_edl_com_ports", return_value=["COM7", "COM12"]):
+            self.assertEqual(A._edl_ports(), [r"\\.\COM7", r"\\.\COM12"])
+
+    def test_find_port_returns_first_available_com(self):
+        from cas.adb import Edl
+        from cas import adb as A
+        from unittest import mock
+        edl = Edl("/x/q", "/x/f", "/x/p")
+        with mock.patch.object(A, "_edl_ports", return_value=[r"\\.\COM3"]):
+            self.assertEqual(edl.find_port(timeout=2), r"\\.\COM3")
+
+    def test_find_port_none_on_timeout(self):
+        from cas.adb import Edl
+        from cas import adb as A
+        from unittest import mock
+        edl = Edl("/x/q", "/x/f", "/x/p")
+        with mock.patch.object(A, "_edl_ports", return_value=[]), \
+             mock.patch.object(A.time, "sleep", lambda *_a, **_k: None):
+            self.assertIsNone(edl.find_port(timeout=2))
+
+    def test_windows_edl_com_ports_never_raises(self):
+        # Off Windows winreg is absent -> [] (no crash). On Windows with no 9008 attached -> also []. The
+        # invariant we lock in: it always returns a list and never raises, so find_port stays safe anywhere.
+        from cas import adb as A
+        self.assertIsInstance(A._windows_edl_com_ports(), list)
 
 
 class TestFlashers(unittest.TestCase):

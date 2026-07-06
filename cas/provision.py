@@ -844,10 +844,12 @@ def edl_flasher(edl, geometry, wait=True, on_critical=None):
     def _flash(adb, target, image, log):
         log(f"rebooting to EDL to flash {target} (Firehose)...")
         adb.raw("reboot", "edl")
+        _edl_port_kind = "COM port (QDLoader 9008)" if os.name == "nt" else "serial /dev/ttyUSB"
         port = edl.find_port(timeout=(60 if wait else 4),
-                             on_tick=lambda s: log(f"  …waiting for EDL serial /dev/ttyUSB ({s}s)"))
+                             on_tick=lambda s: log(f"  …waiting for EDL {_edl_port_kind} ({s}s)"))
         if not port:
-            log("ERROR: no EDL serial port appeared (qcserial driver? hold power ~12s to recover).")
+            drv = ("QDLoader 9008 driver installed?" if os.name == "nt" else "qcserial driver?")
+            log(f"ERROR: no EDL port appeared ({drv} hold power ~12s to recover).")
             return False
         with tempfile.TemporaryDirectory() as td:
             if on_critical:
@@ -885,6 +887,21 @@ def flasher_for_firmware(firmware, fastboot, slot, version=None, runner=None, on
     q, f, p = tools
     edl = Edl(q, f, p, runner=(runner or subprocess_runner), cancel=getattr(fastboot, "cancel", None))
     return edl_flasher(edl, geom, on_critical=on_critical), None
+
+
+def _img_kernel_size(path):
+    """kernel_size from an Android boot image header (magic 'ANDROID!', then a LE u32 at offset 8 — the
+    field is at the same offset in header versions v0–v4). Returns the size, or None if `path` isn't an
+    Android boot image. An init_boot is ramdisk-only, so its kernel_size is 0; a full boot.img is >0.
+    Used to refuse an image whose type doesn't match the flash target (which otherwise bricks the unit)."""
+    try:
+        with open(path, "rb") as fh:
+            hdr = fh.read(12)
+    except OSError:
+        return None
+    if len(hdr) < 12 or hdr[:8] != b"ANDROID!":
+        return None
+    return int.from_bytes(hdr[8:12], "little")
 
 
 def root(adb, fastboot, stock_init_boot, magisk_apk=None, log=print, wait=True, model_match=None,
@@ -936,6 +953,31 @@ def root(adb, fastboot, stock_init_boot, magisk_apk=None, log=print, wait=True, 
     # Resolve the flash target (partition + active slot) NOW, while adb is still up — it can't be read once
     # the unit is in fastboot. Detected, not hardcoded, so a slot-B / pre-init_boot unit isn't mis-flashed.
     target = adb.boot_flash_target()
+
+    # IMAGE/PARTITION-TYPE GUARD (model-independent, so it fires even when a profile sets no model_match):
+    # an init_boot image is RAMDISK-ONLY (kernel_size 0). Flashing it to a plain `boot` partition — the
+    # target on pre-init_boot units like the Retroid Pocket 5 / Odin (kona) — removes the kernel and the
+    # unit bootloops straight to fastboot ("keeps returning to fastboot on Start"). The inverse (a full
+    # boot.img with a kernel flashed to init_boot) is wrong too. Refuse BEFORE touching the unit — NOT
+    # bypassed by `force` (this is a physical image mismatch, unrelated to which model sibling it is).
+    part = target[:-2] if target.endswith(("_a", "_b")) else target
+    ksz = _img_kernel_size(stock)
+    if ksz is None:
+        # Not a recognizable Android boot image — can't type-check it here. Not fatal: the on-device
+        # boot_patch.sh needs a real boot image and fails loudly on anything else, so this never flashes.
+        log(f"warning: '{pathlib.Path(stock).name}' has no 'ANDROID!' boot header — skipping the "
+            "image/partition-type check (the on-device Magisk patch will reject a non-boot image).")
+    elif part == "boot" and ksz == 0:
+        log(f"REFUSING: '{pathlib.Path(stock).name}' is an init_boot (ramdisk-only, no kernel) but this "
+            f"unit flashes to '{target}', which needs a FULL boot image. Flashing it would remove the "
+            "kernel and bootloop the unit to fastboot. Use THIS unit's own stock boot.img (wrong-device "
+            "image — e.g. an Odin2 init_boot on a Retroid Pocket 5).")
+        return False
+    elif part == "init_boot" and ksz != 0:
+        log(f"REFUSING: '{pathlib.Path(stock).name}' is a full boot image (has a kernel) but this unit "
+            f"flashes to '{target}' (init_boot is ramdisk-only). Wrong image would brick boot. Use the "
+            "unit's stock init_boot.")
+        return False
 
     # (1) install the Magisk APP FIRST (from the PC). Needs no root; it's the manager that owns root after
     #     the flash. `adb install` pushes the apk off the PC filesystem (never the SD), then pm-installs it.

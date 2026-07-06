@@ -101,6 +101,14 @@ for d in $INTERNAL_DIRS; do
         -C /storage/emulated/0 "$d" 2>/dev/null \
     && ok "captured internal:$d config ($(du -sh "$P/internal_$d.tar" 2>/dev/null | cut -f1))"
 done
+# ES-DE: capture ONLY es_settings.xml (the per-system alternative-emulator picks + frontend settings). The
+# rest of the ES-DE tree (gamelists/themes/box art) rides the SD card, so we do NOT tar the multi-GB tree —
+# just this one internal file, which internal storage would otherwise lose on a factory reset / fresh unit.
+if [ -f "$ES_SETTINGS_PATH" ]; then
+  cp "$ES_SETTINGS_PATH" "$P/es_settings.xml" \
+    && ok "captured ES-DE es_settings.xml (emulator-per-system picks; $(du -h "$P/es_settings.xml" 2>/dev/null | cut -f1))" \
+    || warn "could not capture ES-DE es_settings.xml"
+fi
 # device-experience settings: full dumps for reference; restore applies the safe allowlist (lib-root.sh).
 # Gated by @settings in the capture-manifest (default on; off = this golden carries no display settings).
 FCSET=on; [ -n "${CAS_MANIFEST:-}" ] && [ -f "$CAS_MANIFEST" ] && { v="$(manifest_flag "$CAS_MANIFEST" settings)"; [ -n "$v" ] && FCSET="$v"; }

@@ -479,6 +479,61 @@ class Fastboot:
         return self.runner(self._base() + ["reboot"])[0] == 0
 
 
+def _windows_edl_com_ports():
+    """COM port names (e.g. 'COM3') of any connected Qualcomm EDL 9008 device, read from the Windows
+    registry (stdlib winreg — no pyserial dependency, so the frozen app stays stdlib-only). Windows has no
+    /dev glob: the 9008 device is a COM port, and we identify THE right one by its USB id VID_05C6&PID_9008
+    (the QDLoader 9008), reading each instance's `Device Parameters\\PortName`. [] on non-Windows / none."""
+    try:
+        import winreg
+    except ImportError:
+        return []
+    ports = []
+    try:
+        usb = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Enum\USB")
+    except OSError:
+        return ports
+    with usb:
+        i = 0
+        while True:
+            try:
+                dev = winreg.EnumKey(usb, i)
+            except OSError:
+                break
+            i += 1
+            du = dev.upper()
+            if "VID_05C6" not in du or "PID_9008" not in du:      # not the Qualcomm QDLoader 9008
+                continue
+            try:
+                devkey = winreg.OpenKey(usb, dev)
+            except OSError:
+                continue
+            with devkey:
+                j = 0
+                while True:
+                    try:
+                        inst = winreg.EnumKey(devkey, j)
+                    except OSError:
+                        break
+                    j += 1
+                    try:
+                        with winreg.OpenKey(devkey, inst + r"\Device Parameters") as dp:
+                            name, _ = winreg.QueryValueEx(dp, "PortName")
+                            if name and name not in ports:
+                                ports.append(name)
+                    except OSError:
+                        pass
+    return ports
+
+
+def _edl_ports(pattern="/dev/ttyUSB*"):
+    """Candidate EDL port paths for THIS OS. Windows: the QDLoader 9008 COM port(s) as r'\\\\.\\COMn' (the
+    form QSaharaServer/fh_loader want; the \\\\.\\ prefix also handles COM10+). POSIX: glob(pattern)."""
+    if os.name == "nt":
+        return [r"\\.\%s" % c for c in _windows_edl_com_ports()]
+    return sorted(glob.glob(pattern))
+
+
 class Edl:
     """Flash a partition via Qualcomm EDL / Firehose (Sahara loads a programmer, fh_loader writes). For
     devices whose BOOTLOADER fastboot can't flash (e.g. MANGMI: `Writing… FAILED (remote: 'unknown
@@ -524,11 +579,13 @@ class Edl:
         return [exe] if exe else []
 
     def find_port(self, timeout=60, on_tick=None, pattern="/dev/ttyUSB*"):
-        """Poll for the EDL serial port (created when the device enters EDL). Returns the path or None."""
+        """Poll for the EDL port (created when the device enters EDL). Returns the path/name or None.
+        Linux: the /dev/ttyUSB* node. Windows: the Qualcomm QDLoader 9008 COM port (r'\\\\.\\COMn'), found
+        via the registry (Windows has no /dev glob) — so EDL flashing works on a Windows bench too."""
         for i in range(max(1, timeout // 2)):
             if self.cancel is not None and self.cancel.is_set():
                 return None
-            ports = sorted(glob.glob(pattern))
+            ports = _edl_ports(pattern)
             if ports:
                 return ports[0]
             if on_tick and i and i % 5 == 0:
@@ -586,10 +643,15 @@ class Edl:
                                    **self._runner_kw())
         blob = (out or "") + (err or "")
         if "Could not connect" in blob or "Sahara protocol completed" not in blob:
-            log("EDL: Sahara couldn't open the 9008 port. CAS auto-elevates via pkexec when the port "
-                "isn't directly accessible — if you cancelled that prompt (or pkexec/polkit is absent, "
-                "e.g. headless/SSH), approve it on retry, or set up access once with: "
-                f"bash scripts/setup-linux.sh (installs the udev rule). {err.strip()}")
+            if os.name == "nt":
+                log("EDL: Sahara couldn't open the 9008 port. On Windows this means the Qualcomm QDLoader "
+                    "9008 driver isn't installed, or the device isn't in EDL — install the QDLoader 9008 "
+                    f"driver (Device Manager should show a 'Qualcomm HS-USB QDLoader 9008' COM port) and retry. {err.strip()}")
+            else:
+                log("EDL: Sahara couldn't open the 9008 port. CAS auto-elevates via pkexec when the port "
+                    "isn't directly accessible — if you cancelled that prompt (or pkexec/polkit is absent, "
+                    "e.g. headless/SSH), approve it on retry, or set up access once with: "
+                    f"bash scripts/setup-linux.sh (installs the udev rule). {err.strip()}")
             return False
 
         log(f"EDL: Firehose writing {label}...")

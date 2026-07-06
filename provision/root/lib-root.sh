@@ -19,12 +19,22 @@ payload_pkgs(){
 # dir — wiped by a factory reset, so the payload MUST carry them. Citra MMJ keeps its whole state here
 # (nand/saves/sysdata/config); RetroArch keeps system/saves/playlists/config here. These are shared media
 # storage (not app-UID-owned), so restore is a plain tar extract — FUSE handles ownership.
-INTERNAL_DIRS="citra-emu RetroArch ES-DE"
+# Shared internal-storage dirs (/storage/emulated/0/<dir>) captured WHOLESALE — app config/state OUTSIDE
+# the app's private dirs; a factory reset wipes internal storage, so the golden must carry them. PSP =
+# PPSSPP's memstick (SYSTEM/ppsspp.ini + controls.ini + saves/states); it lives here, NOT in /data/data or
+# /sdcard/Android/data, so without it PPSSPP settings never transfer.
+# NOTE: ES-DE is deliberately NOT here. Its frontend tree (gamelists/themes/box art) is multi-GB and rides
+# the SD card by default; the ONLY per-unit ES-DE state that must travel is es_settings.xml (the per-system
+# alternative-emulator picks: 3DS→Citra, DS→melonDS, PS2→NetherSX2…), captured/restored as a single file.
+INTERNAL_DIRS="citra-emu RetroArch PSP"
+# The one internal ES-DE file the golden carries (the rest of ES-DE rides the SD card).
+ES_SETTINGS_PATH="/storage/emulated/0/ES-DE/settings/es_settings.xml"
 # Which shared internal-storage dir (if any) a package owns — restored only if the app is in the manifest.
 internal_for(){ case "$1" in
-  org.es_de.frontend) echo "ES-DE";;
   org.citra.emu) echo "citra-emu";;
   com.retroarch.aarch64) echo "RetroArch";;
+  org.ppsspp.ppsspp) echo "PSP";;      # PPSSPP memstick (config + saves) in shared storage
+  # ES-DE is handled separately (es_settings.xml only) — see ES_SETTINGS_PATH, capture.sh, restore.sh.
 esac; }
 # Manifest = app names (one per line) + "@flag value" lines + "#" comments. Both parsers are pure.
 manifest_pkgs(){ sed -e 's/#.*//' "$1" 2>/dev/null | grep -vE '^[[:space:]]*@' | awk 'NF{print $1}'; }
