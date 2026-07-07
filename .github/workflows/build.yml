@@ -159,16 +159,26 @@ jobs:
           done
           [ "$fail" = 0 ] || { echo "::error::frozen bundle is missing required device-side resources"; exit 1; }
 
-      - name: Bundle Windows operator helpers (fastboot driver setup)
-        # Ship the .bat helpers INSIDE the Windows kit (dist/cas) so the operator can fix the fastboot
-        # bootloader-driver gap that blocks ⓪ Root on Windows: adb works, but fastboot needs its OWN WinUSB
-        # driver (Linux gets it free via udev). The in-app "device did not enter fastboot" message points at
-        # setup-windows.bat, so it must be present. Windows-only; no-op on the other runners.
+      - name: Bundle Windows operator helpers (USB driver setup)
+        # Ship the .bat helpers + the drivers\ tree INSIDE the Windows kit (dist/cas) so the operator can
+        # close the USB-driver gap that blocks ⓪ Root/③ Seal on Windows: adb works, but the FLASH interfaces
+        # (fastboot bootloader + Qualcomm EDL 9008) need drivers Windows doesn't ship (Linux gets them free
+        # via udev). setup-windows.bat -> drivers\install-drivers.ps1 publishes them to the driver store
+        # (one-time, fleet-wide, no Zadig). The whole drivers\ dir (installer + fallback INFs + vendor drop
+        # slots) must be present or the helper can't run. Windows-only; no-op on the other runners.
         if: runner.os == 'Windows'
         shell: bash
         run: |
           cp scripts/setup-windows.bat scripts/fastboot-check.bat dist/cas/
+          cp -r scripts/drivers dist/cas/drivers
           ls -1 dist/cas/*.bat
+          echo "drivers/ tree:"; find dist/cas/drivers -type f | sort
+          # fail loudly if the driver installer or its fallback INFs didn't make it into the kit
+          for f in drivers/install-drivers.ps1 \
+                   drivers/fallback/fastboot/cas-fastboot.inf \
+                   drivers/fallback/edl/cas-edl-9008.inf; do
+            test -f "dist/cas/$f" || { echo "::error::Windows kit missing $f"; exit 1; }
+          done
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

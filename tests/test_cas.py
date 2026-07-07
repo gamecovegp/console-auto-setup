@@ -3664,5 +3664,61 @@ class FastbootMissingHelpTest(unittest.TestCase):
         self.assertNotIn("BOOTLOADER USB DRIVER", msg)
 
 
+class WindowsDriverKitTest(unittest.TestCase):
+    """The Windows USB-driver setup (setup-windows.bat -> drivers\\install-drivers.ps1) closes the flash-
+    interface driver gap that blocks ⓪ Root / ③ Seal on Windows, ONE-TIME + fleet-wide (no Zadig). These
+    static checks guard that the shipped assets exist, target the right USB ids, and — the hard lesson from
+    past releases — are actually copied INTO the Windows kit by CI (an asset that isn't packaged silently
+    disables the feature on the operator's rig)."""
+
+    repo = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+    def _read(self, *parts):
+        p = os.path.join(self.repo, *parts)
+        self.assertTrue(os.path.isfile(p), f"missing shipped asset: {os.path.join(*parts)}")
+        with open(p, encoding="utf-8") as f:
+            return f.read()
+
+    def test_driver_assets_exist(self):
+        for parts in (
+            ("scripts", "setup-windows.bat"),
+            ("scripts", "drivers", "install-drivers.ps1"),
+            ("scripts", "drivers", "README.md"),
+            ("scripts", "drivers", "fallback", "fastboot", "cas-fastboot.inf"),
+            ("scripts", "drivers", "fallback", "edl", "cas-edl-9008.inf"),
+        ):
+            self._read(*parts)   # raises if absent
+
+    def test_fastboot_inf_targets_standard_id_class_and_android_guid(self):
+        inf = self._read("scripts", "drivers", "fallback", "fastboot", "cas-fastboot.inf")
+        self.assertIn("USB\\VID_18D1&PID_D00D", inf)                       # standard Android fastboot id
+        self.assertIn("USB\\Class_ff&SubClass_42&Prot_03", inf)           # fastboot interface class (brand-agnostic)
+        # the ADB/fastboot device-interface GUID fastboot.exe enumerates — the bit generic Zadig WinUSB omits
+        self.assertIn("{F72FE0D4-CAE1-11D1-B3B3-00E01F809FEB}", inf)
+        self.assertIn("Needs   = WINUSB.NT", inf)                          # binds the in-box WinUSB driver
+
+    def test_edl_inf_targets_qualcomm_9008(self):
+        inf = self._read("scripts", "drivers", "fallback", "edl", "cas-edl-9008.inf")
+        self.assertIn("USB\\VID_05C6&PID_9008", inf)                      # Qualcomm EDL 9008 (fixed across all EDL units)
+        self.assertIn("usbser.sys", inf)                                  # in-box serial driver -> COM port
+
+    def test_setup_bat_elevates_and_runs_the_installer(self):
+        bat = self._read("scripts", "setup-windows.bat")
+        self.assertIn("net session", bat)                                 # admin check
+        self.assertIn("RunAs", bat)                                       # self-elevation
+        self.assertIn("drivers\\install-drivers.ps1", bat)                # delegates to the installer
+
+    def test_installer_publishes_to_driver_store(self):
+        ps1 = self._read("scripts", "drivers", "install-drivers.ps1")
+        self.assertIn("/add-driver", ps1)                                 # pnputil driver-store publish...
+        self.assertIn("/install", ps1)                                    # ...applied to connected + future units
+
+    def test_ci_packages_the_drivers_tree_into_the_windows_kit(self):
+        # Regression guard (v0.3.x saga): a Windows helper the CI forgot to copy = feature silently absent.
+        yml = self._read(".github", "workflows", "build.yml")
+        self.assertIn("cp -r scripts/drivers dist/cas/drivers", yml)
+        self.assertIn("drivers/install-drivers.ps1", yml)                 # the fail-loud presence check
+
+
 if __name__ == "__main__":
     unittest.main()

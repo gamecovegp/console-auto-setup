@@ -1,0 +1,56 @@
+; cas-fastboot.inf
+; ---------------------------------------------------------------------------------------------------
+; OFFLINE FALLBACK driver for Android fastboot / bootloader devices (Retroid / AYN / Odin), so
+; `fastboot devices` works on Windows and CAS can flash the patched init_boot during (0) Root.
+;
+; setup-windows.bat / install-drivers.ps1 PREFER Google's own signed USB driver (bundled in
+; drivers\vendor\fastboot or downloaded). This self-signed INF is used only when neither is available
+; (an offline bench). It binds the IN-BOX WinUSB.sys — no third-party kernel binary is shipped — and
+; registers the Android device-interface GUID that fastboot.exe enumerates, which generic Zadig WinUSB
+; does NOT (that is why a raw Zadig install leaves fastboot blind).
+;
+; It matches BOTH the standard Google fastboot id (VID_18D1&PID_D00D) AND the fastboot interface class
+; (FF/42/03), so any AOSP fastboot device binds regardless of brand/VID — that is what makes it work
+; across every model, not just one unit. Published to the driver store (pnputil), so every same-id unit
+; auto-binds on plug with no per-device step.
+; ---------------------------------------------------------------------------------------------------
+[Version]
+Signature   = "$Windows NT$"
+Class       = USBDevice
+ClassGuid   = {88BAE032-5A81-49f0-BC3D-A4FF138216D6}
+Provider    = %ProviderName%
+CatalogFile = cas-fastboot.cat
+DriverVer   = 01/01/2026,1.0.0.0
+PnpLockdown = 1
+
+[Manufacturer]
+%ProviderName% = Cas, NTamd64, NTarm64
+
+; --- match the standard fastboot id AND the fastboot interface class (brand-agnostic) ---
+[Cas.NTamd64]
+%FastbootDevice% = WinUSB_Install, USB\VID_18D1&PID_D00D
+%FastbootDevice% = WinUSB_Install, USB\Class_ff&SubClass_42&Prot_03
+
+[Cas.NTarm64]
+%FastbootDevice% = WinUSB_Install, USB\VID_18D1&PID_D00D
+%FastbootDevice% = WinUSB_Install, USB\Class_ff&SubClass_42&Prot_03
+
+; --- bind the in-box WinUSB function driver (Win10+ needs no co-installer) ---
+[WinUSB_Install.NT]
+Include = winusb.inf
+Needs   = WINUSB.NT
+
+[WinUSB_Install.NT.Services]
+Include = winusb.inf
+Needs   = WINUSB.NT.Services
+
+; --- register the ADB/fastboot device-interface GUID so fastboot.exe finds the device ---
+[WinUSB_Install.NT.HW]
+AddReg = Dev_AddReg
+
+[Dev_AddReg]
+HKR,,DeviceInterfaceGUIDs,0x10000,"{F72FE0D4-CAE1-11D1-B3B3-00E01F809FEB}"
+
+[Strings]
+ProviderName   = "CAS (Console Auto Setup)"
+FastbootDevice = "Android Bootloader Interface (CAS WinUSB)"

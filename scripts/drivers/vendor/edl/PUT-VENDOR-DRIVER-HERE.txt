@@ -1,0 +1,10 @@
+Drop the Qualcomm QDLoader HS-USB (9008) driver here (recommended for MANGMI / EDL flashing on Windows).
+
+  1. Obtain the "Qualcomm HS-USB QDLoader 9008" driver package (the standard signed Qualcomm driver).
+  2. Place its .inf (and the files it references) somewhere under this folder.
+  3. Run ..\..\..\setup-windows.bat — install-drivers.ps1 finds any *.inf here and installs it,
+     in preference to the bundled self-signed usbser fallback.
+
+If this folder has no .inf, setup uses the bundled self-signed fallback (fallback\edl\cas-edl-9008.inf),
+which maps the 9008 device to the in-box usbser.sys COM driver. The EDL-on-Windows path is not yet
+field-proven — validate on a bench, or flash MANGMI on Linux (scripts/setup-linux.sh).
