@@ -1,0 +1,10 @@
+Drop the Google USB Driver here (optional — highest-trust fastboot driver).
+
+  1. Download: https://developer.android.com/studio/run/win-usb  ("Download Google USB Driver")
+  2. Unzip it so that android_winusb.inf ends up somewhere under this folder
+     (e.g. this\folder\usb_driver\android_winusb.inf).
+  3. Run ..\..\..\setup-windows.bat — install-drivers.ps1 finds any *.inf here and installs it,
+     in preference to downloading or the self-signed fallback.
+
+If this folder has no .inf, setup still works: it downloads Google's driver (if online) or uses the
+bundled self-signed fallback (offline). This drop-in is just the most-trusted option for offline benches.

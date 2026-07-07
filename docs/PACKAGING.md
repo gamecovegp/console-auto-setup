@@ -100,10 +100,16 @@ dist\cas\
 │  ├─ Apps\             #   emulator/companion APKs (gamecove-companion.apk, Magisk-v30.7.apk, …)
 │  ├─ retroarch-cores\  #   curated arm64 RetroArch cores
 │  └─ ES-DE\downloaded_media\        #   ES-DE box art pushed per device
-└─ platform-tools\      # EXTERNAL — vendored adb/fastboot (auto-detected by both exes)
-   ├─ adb.exe
-   ├─ fastboot.exe
-   └─ *.dll              (AdbWinApi.dll, AdbWinUsbApi.dll, libwinpthread-1.dll)
+├─ platform-tools\      # EXTERNAL — vendored adb/fastboot (auto-detected by both exes)
+│  ├─ adb.exe
+│  ├─ fastboot.exe
+│  └─ *.dll              (AdbWinApi.dll, AdbWinUsbApi.dll, libwinpthread-1.dll)
+├─ setup-windows.bat    # Windows only — ONE-TIME USB driver setup (run once per PC; see below)
+├─ fastboot-check.bat   # Windows only — read-only bootloader reachability/lock probe
+└─ drivers\             # Windows only — used by setup-windows.bat (installer + fallback INFs)
+   ├─ install-drivers.ps1
+   ├─ fallback\{fastboot\cas-fastboot.inf, edl\cas-edl-9008.inf}
+   └─ vendor\{fastboot,edl}\    (optional drop-in for the vendor's own signed driver)
 ```
 
 - **The operator workflow IS the app — not scripts.** Launch `cas-gui.exe`, select the
@@ -111,6 +117,12 @@ dist\cas\
   (restore the golden + every app + the GameCove Companion) → **③ Lock for shipping**. This
   supersedes the legacy hand-run `windows-kit\*.bat` flow (`1-flash-root` → `2-run-restore` →
   verify), which is kept only as a fallback for benches that can't launch the app.
+- **Windows USB drivers — one-time per PC.** adb works out of the box, but the flash interfaces
+  (fastboot bootloader + Qualcomm EDL 9008) need drivers Windows doesn't ship. Run
+  `setup-windows.bat` **once per bench**: it self-elevates and publishes both drivers to the Windows
+  driver store, so every unit auto-binds on plug — no Zadig, no per-device setup. `18D1:D00D` (fastboot)
+  and `05C6:9008` (EDL) are standard ids shared across brands, so one install covers the whole fleet.
+  Details/fallbacks in `drivers\README.md`. Linux/macOS need none of this (udev / class-compliant).
 - `cas-gui.exe` with no args auto-detects `platform-tools\adb.exe` (then legacy
   `windows-kit\`, then `PATH`). `--adb` / `--fastboot` always override.
 - `cas.exe` with no flags auto-detects the same sibling `platform-tools\adb.exe` /

@@ -7,10 +7,15 @@ Per-unit time ≈ 6–8 min, mostly unattended. Everything heavy (ROMs, payload,
    `https://dl.google.com/android/repository/platform-tools-latest-windows.zip`, extract to
    `C:\platform-tools`. Open **PowerShell** in that folder (Shift-right-click → "Open PowerShell here").
    Use `.\adb` / `.\fastboot` (or add the folder to PATH and drop the `.\`).
-2. **USB drivers:** plug the unit in. `adb` usually works out of the box. For **fastboot/bootloader mode**
-   Windows often needs a driver — if `fastboot devices` is blank in bootloader, install the Google USB
-   driver (Device Manager → the unknown "Android" device → Update driver → point to the driver), or use
-   **Zadig** to set **WinUSB** on the "Android Bootloader Interface".
+2. **USB drivers (one-time, fleet-wide):** `adb` works out of the box, but the **flash** interfaces don't —
+   Windows doesn't ship them. Run **`setup-windows.bat`** (in the kit root; it self-elevates) **once per PC**.
+   It publishes both drivers to the Windows driver store, so every unit auto-binds on plug — **no Zadig,
+   no per-device setup**:
+   - **fastboot / bootloader** (Retroid / AYN / Odin) → so `fastboot devices` sees the unit.
+   - **Qualcomm EDL 9008** (MANGMI) → so the EDL COM port appears.
+   It installs PC-side drivers only; it does not touch any device. Details + manual fallbacks (Google USB
+   driver, Qualcomm QDLoader) are in `drivers\README.md`. *Do not use Zadig* — it binds per unit-serial, so
+   you'd have to redo it for every device.
 3. **Files on the PC:** copy `magisk_patched_init_boot.img` (from
    `provision/root/firmware/odin2_20231201/`) into `C:\platform-tools`.
 

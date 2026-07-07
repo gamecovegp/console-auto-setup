@@ -1,0 +1,57 @@
+; cas-edl-9008.inf
+; ---------------------------------------------------------------------------------------------------
+; OFFLINE FALLBACK driver for Qualcomm EDL (Emergency Download, 9008) devices — MANGMI in EDL/Firehose
+; mode. Exposes the device as a COM port, which CAS's Windows EDL backend requires: it locates the port
+; by the USB id VID_05C6&PID_9008 and drives fh_loader/QSaharaServer over it.
+;
+; setup-windows.bat / install-drivers.ps1 PREFER a real Qualcomm QDLoader driver dropped into
+; drivers\vendor\edl. This self-signed INF is the offline fallback; it binds the IN-BOX Windows serial
+; driver (usbser.sys) — no third-party kernel binary shipped.
+;
+; VALIDATE ON BENCH: the EDL-on-Windows path is not yet field-proven. If a MANGMI in EDL does not appear
+; as a COM port after this, drop the vendor QDLoader driver into drivers\vendor\edl and re-run — or flash
+; MANGMI on Linux, where EDL is a one-line udev rule (scripts/setup-linux.sh).
+; ---------------------------------------------------------------------------------------------------
+[Version]
+Signature   = "$Windows NT$"
+Class       = Ports
+ClassGuid   = {4D36E978-E325-11CE-BFC1-08002BE10318}
+Provider    = %ProviderName%
+CatalogFile = cas-edl-9008.cat
+DriverVer   = 01/01/2026,1.0.0.0
+PnpLockdown = 1
+
+[Manufacturer]
+%ProviderName% = Cas, NTamd64, NTarm64
+
+[Cas.NTamd64]
+%EdlDevice% = Usbser_Install, USB\VID_05C6&PID_9008
+
+[Cas.NTarm64]
+%EdlDevice% = Usbser_Install, USB\VID_05C6&PID_9008
+
+; --- bind the in-box usbser.sys serial-over-USB driver -> a COM port ---
+[Usbser_Install.NT]
+Include     = mdmcpq.inf
+CopyFiles   = FakeModemCopyFileSection
+AddReg      = Usbser_AddReg
+
+[Usbser_AddReg]
+HKR,,DevLoader,,*ntkern
+HKR,,NTMPDriver,,usbser.sys
+HKR,,EnumPropPages32,,"MsPorts.dll,SerialPortPropPageProvider"
+
+[Usbser_Install.NT.Services]
+AddService = usbser, 0x00000002, Usbser_Service
+
+[Usbser_Service]
+DisplayName   = %ServiceName%
+ServiceType   = 1
+StartType     = 3
+ErrorControl  = 1
+ServiceBinary = %12%\usbser.sys
+
+[Strings]
+ProviderName = "CAS (Console Auto Setup)"
+EdlDevice    = "Qualcomm HS-USB QDLoader 9008 (CAS usbser)"
+ServiceName  = "CAS EDL serial (usbser)"
