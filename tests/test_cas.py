@@ -3713,6 +3713,36 @@ class WindowsDriverKitTest(unittest.TestCase):
         self.assertIn("/add-driver", ps1)                                 # pnputil driver-store publish...
         self.assertIn("/install", ps1)                                    # ...applied to connected + future units
 
+    def test_windows_consumed_scripts_are_pure_ascii(self):
+        # Windows PowerShell 5.1 reads a no-BOM .ps1 as the ANSI code page (CP1252), NOT UTF-8. A UTF-8
+        # em-dash (U+2014 = bytes E2 80 94) then decodes as three chars ending in 0x94 = U+201D, a curly
+        # double-quote that PowerShell treats as a string delimiter -> quotes unbalance and the whole
+        # script dies with "missing terminator". cmd.exe (.bat) and the INF parser are ANSI too. So every
+        # Windows-EXECUTED script must be pure ASCII. (README.md is documentation, not executed -> exempt.)
+        # Regression for the bench that couldn't run setup-windows.bat: install-drivers.ps1 had 9 em-dashes.
+        for parts in (
+            ("scripts", "setup-windows.bat"),
+            ("scripts", "drivers", "install-drivers.ps1"),
+            ("scripts", "drivers", "fallback", "fastboot", "cas-fastboot.inf"),
+            ("scripts", "drivers", "fallback", "edl", "cas-edl-9008.inf"),
+        ):
+            p = os.path.join(self.repo, *parts)
+            with open(p, "rb") as f:
+                raw = f.read()
+            bad, line, col = [], 1, 0
+            for byte in raw:
+                if byte == 0x0A:
+                    line, col = line + 1, 0
+                    continue
+                col += 1
+                if byte > 0x7F:
+                    bad.append((line, col, hex(byte)))
+            self.assertEqual(
+                bad, [],
+                f"{os.path.join(*parts)} has non-ASCII bytes (breaks Windows PowerShell/cmd/INF parsing); "
+                f"first few (line,col,byte): {bad[:5]}",
+            )
+
     def test_ci_packages_the_drivers_tree_into_the_windows_kit(self):
         # Regression guard (v0.3.x saga): a Windows helper the CI forgot to copy = feature silently absent.
         yml = self._read(".github", "workflows", "build.yml")

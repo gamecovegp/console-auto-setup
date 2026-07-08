@@ -1,21 +1,21 @@
 <#
-  install-drivers.ps1 — one-time, fleet-wide Windows driver setup for CAS on-device flashing.
+  install-drivers.ps1 - one-time, fleet-wide Windows driver setup for CAS on-device flashing.
 
   Publishes drivers to the Windows DRIVER STORE (pnputil /add-driver /install) so EVERY unit with a
-  matching USB id auto-binds on plug — no per-device Zadig, ever. Two drivers:
+  matching USB id auto-binds on plug - no per-device Zadig, ever. Two drivers:
 
-    * fastboot / bootloader  (Retroid / AYN / Odin) — WinUSB on the Android fastboot interface so
+    * fastboot / bootloader  (Retroid / AYN / Odin) - WinUSB on the Android fastboot interface so
       `fastboot devices` works. Standard id VID_18D1&PID_D00D (+ the fastboot interface class FF/42/03).
-    * Qualcomm EDL 9008      (MANGMI, EDL/Firehose)  — a COM-port driver on VID_05C6&PID_9008, which
+    * Qualcomm EDL 9008      (MANGMI, EDL/Firehose)  - a COM-port driver on VID_05C6&PID_9008, which
       CAS's Windows EDL backend needs (it locates the port by that USB id).
 
   For each driver it uses the most-trusted source available, in order:
-    1) a real VENDOR driver dropped into drivers\vendor\<kind>\  (signed by the vendor — best)
+    1) a real VENDOR driver dropped into drivers\vendor\<kind>\  (signed by the vendor - best)
     2) (fastboot only) Google's signed USB driver, downloaded if this bench is online
     3) the bundled FALLBACK inf, self-signed on THIS machine (works offline)
 
   WHY the fallback is safe to self-sign: the INF only maps a device to an IN-BOX Microsoft driver
-  (winusb.sys / usbser.sys) — no third-party kernel binary is introduced — so signature enforcement on
+  (winusb.sys / usbser.sys) - no third-party kernel binary is introduced - so signature enforcement on
   the .sys is already satisfied; only our catalog needs to be trusted, which we do by importing a
   self-signed cert into TrustedPublisher + Root. No Secure Boot / test-signing changes required.
 
@@ -93,7 +93,7 @@ function Try-Vendor([string]$kind) {
 }
 
 function Try-DownloadGoogleUsb {
-  # Google's own SIGNED USB driver — covers the VID_18D1 fastboot ids across brands. Stable URL.
+  # Google's own SIGNED USB driver - covers the VID_18D1 fastboot ids across brands. Stable URL.
   $url  = 'https://dl.google.com/android/repository/usb_driver_r13-windows.zip'
   $dest = Join-Path $here 'vendor\fastboot'
   try {
@@ -140,5 +140,5 @@ Write-Host "=== CAS Windows driver setup (one-time per PC; publishes to the driv
 if (-not $SkipFastboot) { Install-Fastboot } else { Write-Host "[skip] fastboot driver" }
 if (-not $SkipEdl)      { Install-Edl }      else { Write-Host "[skip] EDL driver" }
 Write-Host ""
-Write-Host "[done] Drivers are in the Windows driver store. Every matching unit now auto-binds on plug —"
+Write-Host "[done] Drivers are in the Windows driver store. Every matching unit now auto-binds on plug -"
 Write-Host "       no Zadig, no per-device setup. Unplug/replug the unit, then re-run (0) Root in CAS."
