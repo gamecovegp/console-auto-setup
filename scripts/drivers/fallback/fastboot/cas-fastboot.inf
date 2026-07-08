@@ -5,12 +5,12 @@
 ;
 ; setup-windows.bat / install-drivers.ps1 PREFER Google's own signed USB driver (bundled in
 ; drivers\vendor\fastboot or downloaded). This self-signed INF is used only when neither is available
-; (an offline bench). It binds the IN-BOX WinUSB.sys — no third-party kernel binary is shipped — and
+; (an offline bench). It binds the IN-BOX WinUSB.sys - no third-party kernel binary is shipped - and
 ; registers the Android device-interface GUID that fastboot.exe enumerates, which generic Zadig WinUSB
 ; does NOT (that is why a raw Zadig install leaves fastboot blind).
 ;
 ; It matches BOTH the standard Google fastboot id (VID_18D1&PID_D00D) AND the fastboot interface class
-; (FF/42/03), so any AOSP fastboot device binds regardless of brand/VID — that is what makes it work
+; (FF/42/03), so any AOSP fastboot device binds regardless of brand/VID - that is what makes it work
 ; across every model, not just one unit. Published to the driver store (pnputil), so every same-id unit
 ; auto-binds on plug with no per-device step.
 ; ---------------------------------------------------------------------------------------------------

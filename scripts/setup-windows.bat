@@ -1,16 +1,16 @@
 @echo off
 REM ============================================================================
-REM  setup-windows.bat  —  ONE-TIME Windows driver setup so CAS can FLASH (Root/Seal).
+REM  setup-windows.bat  -  ONE-TIME Windows driver setup so CAS can FLASH (Root/Seal).
 REM
 REM  Windows does not ship the USB drivers CAS needs to flash a unit. This installs them
-REM  into the Windows DRIVER STORE, so EVERY unit auto-binds on plug — no Zadig, and no
+REM  into the Windows DRIVER STORE, so EVERY unit auto-binds on plug - no Zadig, and no
 REM  per-device setup (that was the Zadig trap: it binds per unit-serial, so you had to
 REM  redo it for each device). Two drivers get installed:
-REM     * fastboot / bootloader (Retroid / AYN / Odin)  — so `fastboot devices` sees the unit
-REM     * Qualcomm EDL 9008 (MANGMI)                     — so the EDL COM port appears
+REM     * fastboot / bootloader (Retroid / AYN / Odin)  - so `fastboot devices` sees the unit
+REM     * Qualcomm EDL 9008 (MANGMI)                     - so the EDL COM port appears
 REM
-REM  Run it ONCE per Windows PC. Safe to re-run. It installs PC-side drivers ONLY — it does
-REM  NOT flash, reboot, or modify any device. (Linux needs none of this — udev covers it.)
+REM  Run it ONCE per Windows PC. Safe to re-run. It installs PC-side drivers ONLY - it does
+REM  NOT flash, reboot, or modify any device. (Linux needs none of this - udev covers it.)
 REM
 REM  The actual work is in drivers\install-drivers.ps1 (this .bat just elevates + runs it).
 REM ============================================================================
