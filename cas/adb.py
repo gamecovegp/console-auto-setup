@@ -478,6 +478,11 @@ class Fastboot:
     def reboot(self):
         return self.runner(self._base() + ["reboot"])[0] == 0
 
+    def reboot_bootloader(self):
+        """Reboot from the CURRENT fastboot mode into the BOOTLOADER — used to fall back from fastbootd to
+        bootloader fastboot. Only call while a fastboot device is present (else fastboot blocks waiting)."""
+        return self.runner(self._base() + ["reboot", "bootloader"])[0] == 0
+
 
 def _windows_edl_com_ports():
     """COM port names (e.g. 'COM3') of any connected Qualcomm EDL 9008 device, read from the Windows

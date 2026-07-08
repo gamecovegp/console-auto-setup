@@ -809,30 +809,48 @@ def fastboot_missing_help():
 
 
 def fastboot_flasher(fastboot, wait=True, on_critical=None):
-    """Flash backend: reboot to BOOTLOADER fastboot and write the patched image to `target`. Works on units
-    whose bootloader implements `flash` (Retroid/AYN/Odin). Returns callable(adb, target, image, log)->bool;
-    always reboots back to the OS, never strands the unit in fastboot. `on_critical(bool)` brackets the
-    actual partition write so the GUI can warn before a Cancel that could brick."""
-    def _flash(adb, target, image, log):
-        log(f"rebooting to bootloader to flash {target} (fastboot)...")
-        adb.raw("reboot", "bootloader")
-        if wait and not fastboot.wait(on_tick=lambda s: log(f"  …waiting for fastboot ({s}s)")):
-            log(fastboot_missing_help())
-            return False
+    """Flash backend: write the patched image to `target` via fastboot, trying FASTBOOTD (userspace fastboot)
+    FIRST and falling back to BOOTLOADER fastboot. Rationale: some unlocked bootloaders reject `flash`
+    ("Flashing is not allowed") while their userspace fastbootd accepts it (e.g. Retroid); other/older units
+    have no fastbootd and only the bootloader can flash. Works on units whose fastboot implements `flash`
+    (Retroid/AYN/Odin). Returns callable(adb, target, image, log)->bool; always reboots back to the OS, never
+    strands the unit in fastboot. `on_critical(bool)` brackets the actual write so the GUI can warn before a
+    Cancel that could brick."""
+    def _bracketed_flash(target, image):
         if on_critical:
             on_critical(True)
         try:
-            ok = fastboot.flash(target, image)
+            return fastboot.flash(target, image)
         finally:
             if on_critical:
                 on_critical(False)
-        if not ok:
-            log("ERROR: patched flash failed — this bootloader's fastboot may not support 'flash' "
-                "(e.g. MANGMI → needs the EDL backend). Booting back to the OS, NOT rooted.")
-            fastboot.reboot()                          # never strand the unit in fastboot
+
+    def _flash(adb, target, image, log):
+        # (1) Prefer fastbootd (userspace fastboot) — bootloader fastboot rejects `flash` on some units.
+        log(f"rebooting to fastbootd to flash {target}...")
+        adb.raw("reboot", "fastboot")
+        in_fastboot = (not wait) or fastboot.wait(on_tick=lambda s: log(f"  …waiting for fastbootd ({s}s)"))
+        if in_fastboot:
+            if _bracketed_flash(target, image):
+                fastboot.reboot()
+                return True
+            log("fastbootd rejected the flash; falling back to bootloader fastboot...")
+            fastboot.reboot_bootloader()               # already in a fastboot mode -> safe hop to bootloader
+        else:
+            log("no fastbootd on this unit; falling back to bootloader fastboot...")
+            adb.raw("reboot", "bootloader")            # never reached fastboot -> assume still in the OS
+
+        # (2) Fall back to BOOTLOADER fastboot.
+        if wait and not fastboot.wait(on_tick=lambda s: log(f"  …waiting for fastboot ({s}s)")):
+            log(fastboot_missing_help())
             return False
-        fastboot.reboot()
-        return True
+        if _bracketed_flash(target, image):
+            fastboot.reboot()
+            return True
+        log("ERROR: patched flash failed in both fastbootd and bootloader fastboot — this unit's fastboot may "
+            "not support 'flash' (e.g. MANGMI → needs the EDL backend). Booting back to the OS, NOT rooted.")
+        fastboot.reboot()                              # never strand the unit in fastboot
+        return False
     return _flash
 
 

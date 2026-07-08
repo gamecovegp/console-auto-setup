@@ -1638,7 +1638,7 @@ class TestRoot(unittest.TestCase):
             os.unlink(patched); os.unlink(apk)
         self.assertTrue(ok)
         self.assertIn("flash init_boot_a", "\n".join(fb.cmds()))     # flashed the PATCHED init_boot
-        self.assertIn("reboot bootloader", "\n".join(ra.cmds()))     # entered fastboot
+        self.assertIn("reboot fastboot", "\n".join(ra.cmds()))       # entered fastbootd (userspace fastboot) first
         a = "\n".join(ra.cmds())
         self.assertIn("install", a)                                  # installed the Magisk app...
         self.assertIn(apk, a)                                        # ...from the PC apk path (not the SD)
@@ -2216,6 +2216,100 @@ class TestFlashers(unittest.TestCase):
             adb, "init_boot_a", "/tmp/p.img", lambda *a: None))
         self.assertFalse(PV.fastboot_flasher(Fastboot(serial="SER", runner=fb_flashfail))(
             adb, "init_boot_a", "/tmp/p.img", lambda *a: None))
+
+    @staticmethod
+    def _reboot_target(args):
+        i = args.index("reboot")
+        return args[i + 1] if i + 1 < len(args) else "os"
+
+    def test_fastboot_flasher_prefers_fastbootd(self):
+        """The flash enters FASTBOOTD (userspace) first — some unlocked bootloaders reject `flash` but
+        fastbootd accepts it (e.g. Retroid). On success it must NOT touch bootloader mode or reflash."""
+        from cas.adb import Adb, Fastboot
+        from cas import provision as PV
+        seq = []
+
+        def adb_runner(args, input_text=None, timeout=900):
+            if "reboot" in args:
+                seq.append("adb:reboot:" + self._reboot_target(args))
+            return (0, "", "")
+
+        def fb_runner(args, input_text=None, timeout=900):
+            if args[-1] == "devices":
+                return (0, "SER\t fastboot\n", "")
+            if "flash" in args:
+                seq.append("fb:flash")
+            elif "reboot" in args:
+                seq.append("fb:reboot:" + self._reboot_target(args))
+            return (0, "", "")
+        ok = PV.fastboot_flasher(Fastboot(serial="SER", runner=fb_runner))(
+            Adb(runner=adb_runner), "init_boot_a", "/tmp/p.img", lambda *a: None)
+        self.assertTrue(ok)
+        self.assertEqual(seq[0], "adb:reboot:fastboot")     # fastbootd first
+        self.assertEqual(seq.count("fb:flash"), 1)          # one flash, no bootloader retry
+        self.assertNotIn("adb:reboot:bootloader", seq)
+        self.assertNotIn("fb:reboot:bootloader", seq)
+
+    def test_fastboot_flasher_falls_back_to_bootloader_on_fastbootd_reject(self):
+        """If fastbootd rejects the flash, hop to bootloader fastboot (via the fastboot-side reboot, since a
+        fastboot device is present) and retry there."""
+        from cas.adb import Adb, Fastboot
+        from cas import provision as PV
+        seq = []
+        state = {"flashes": 0}
+
+        def adb_runner(args, input_text=None, timeout=900):
+            if "reboot" in args:
+                seq.append("adb:reboot:" + self._reboot_target(args))
+            return (0, "", "")
+
+        def fb_runner(args, input_text=None, timeout=900):
+            if args[-1] == "devices":
+                return (0, "SER\t fastboot\n", "")
+            if "flash" in args:
+                state["flashes"] += 1
+                seq.append("fb:flash")
+                # reject in fastbootd (1st), accept in bootloader (2nd)
+                return (1, "", "FAILED (remote: 'not allowed')") if state["flashes"] == 1 else (0, "", "")
+            if "reboot" in args:
+                seq.append("fb:reboot:" + self._reboot_target(args))
+            return (0, "", "")
+        ok = PV.fastboot_flasher(Fastboot(serial="SER", runner=fb_runner))(
+            Adb(runner=adb_runner), "init_boot_a", "/tmp/p.img", lambda *a: None)
+        self.assertTrue(ok)
+        self.assertEqual(seq[0], "adb:reboot:fastboot")     # fastbootd first
+        self.assertIn("fb:reboot:bootloader", seq)          # in-fastboot -> fastboot-side hop to bootloader
+        self.assertEqual(seq.count("fb:flash"), 2)          # failed in fastbootd, succeeded in bootloader
+
+    def test_fastboot_flasher_falls_back_when_no_fastbootd(self):
+        """A unit with no userspace fastboot never appears after `reboot fastboot`; the flasher reboots to the
+        bootloader via ADB (it's still in the OS) and flashes there."""
+        from cas.adb import Adb, Fastboot
+        from cas import provision as PV
+        seq = []
+
+        def adb_runner(args, input_text=None, timeout=900):
+            if "reboot" in args:
+                seq.append("adb:reboot:" + self._reboot_target(args))
+            return (0, "", "")
+
+        def fb_runner(args, input_text=None, timeout=900):
+            if args[-1] == "devices":
+                return (0, "SER\t fastboot\n", "")
+            if "flash" in args:
+                seq.append("fb:flash")
+            elif "reboot" in args:
+                seq.append("fb:reboot:" + self._reboot_target(args))
+            return (0, "", "")
+        fb = Fastboot(serial="SER", runner=fb_runner)
+        waits = iter([False, True])                          # fastbootd wait fails; bootloader wait succeeds
+        fb.wait = lambda on_tick=None, timeout=60: next(waits)
+        ok = PV.fastboot_flasher(fb)(Adb(runner=adb_runner), "init_boot_a", "/tmp/p.img", lambda *a: None)
+        self.assertTrue(ok)
+        self.assertEqual(seq[0], "adb:reboot:fastboot")     # tried fastbootd
+        self.assertIn("adb:reboot:bootloader", seq)         # no fastbootd -> adb reboot bootloader (in the OS)
+        self.assertNotIn("fb:reboot:bootloader", seq)       # did NOT use the fastboot-side hop
+        self.assertEqual(seq.count("fb:flash"), 1)
 
     def test_edl_flasher_success(self):
         from cas.adb import Adb, Edl
