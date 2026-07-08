@@ -5,6 +5,7 @@ import json
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -425,6 +426,36 @@ class TestFlashMethod(unittest.TestCase):
         flasher2, reason2 = PV.flasher_for_firmware(fb_fw, fastboot="FBOBJ", slot="_a")
         self.assertIsNotNone(flasher2)
         self.assertIsNone(reason2)
+
+    def test_edl_tools_prefers_windows_exe(self):
+        """On Windows, edl_tools() returns the .exe host tools when present (the Linux ELF can't run there
+        — subprocess raises WinError 193). On POSIX it stays with the extensionless ELF."""
+        src = fake_edl_build(self.tmp, "MANGMI_win_la2.0.l.user.20260507.165105")
+        (src / "QSaharaServer.exe").write_bytes(b"MZ")     # a real Windows PE marker
+        (src / "fh_loader.exe").write_bytes(b"MZ")
+        fw = FW.ingest(src, self.root, firmware_id="air-x")
+        with mock.patch.object(FW.os, "name", "nt"):
+            q, f, _ = fw.edl_tools()
+            self.assertTrue(str(q).endswith("QSaharaServer.exe"))
+            self.assertTrue(str(f).endswith("fh_loader.exe"))
+        with mock.patch.object(FW.os, "name", "posix"):
+            q, f, _ = fw.edl_tools()
+            self.assertTrue(str(q).endswith("QSaharaServer"))
+            self.assertFalse(str(q).endswith(".exe"))
+
+    def test_flasher_windows_rejects_linux_only_edl_tools(self):
+        """A Windows bench with only the Linux QSaharaServer/fh_loader must fail fast with a clear,
+        honest reason (name the missing .exe / QPST) — NOT blame the QDLoader driver and NOT strand the
+        unit in EDL. This is the MQ66 'WinError 193 %1 is not a valid Win32 application' case."""
+        from cas import provision as PV
+        edl_fw = FW.ingest(fake_edl_build(self.tmp, "MANGMI_linux_la2.0.l.user.20260507.165105"),
+                           self.root, firmware_id="air-x")
+        with mock.patch.object(FW.os, "name", "nt"):
+            flasher, reason = PV.flasher_for_firmware(edl_fw, fastboot=None, slot="_b",
+                                                      runner=lambda *a, **k: (0, "", ""))
+        self.assertIsNone(flasher)
+        self.assertIsNotNone(reason)
+        self.assertIn(".exe", reason)
 
 
 if __name__ == "__main__":

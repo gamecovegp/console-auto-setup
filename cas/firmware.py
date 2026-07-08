@@ -9,6 +9,7 @@ DEVICE ROOT firmware only (handheld OS/boot images) — never emulator/app BIOS.
 it never flashes.
 """
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -186,9 +187,21 @@ class Firmware:
         return self._payload_glob(f"**/{ft}.img", version)
 
     def edl_tools(self, version=None):
-        """(QSaharaServer, fh_loader, prog_firehose) paths bundled in the payload, or None if not present."""
-        q = self._payload_glob("**/QSaharaServer", version)
-        f = self._payload_glob("**/fh_loader", version)
+        """(QSaharaServer, fh_loader, prog_firehose) paths bundled in the payload, or None if not present.
+
+        The two HOST tools are OS-specific executables: Windows needs the .exe builds (QSaharaServer.exe /
+        fh_loader.exe, from Qualcomm QPST/QFIL), Linux the extensionless ELF. Running the wrong one blows
+        up — on Windows `subprocess` raises `WinError 193: %1 is not a valid Win32 application` when handed
+        a Linux ELF (exactly the MQ66 EDL-flash failure). So prefer the host-appropriate variant, but fall
+        back to the other so flash_method still DETECTS an EDL build even when only the wrong-OS tool is
+        present (the flasher then reports the mismatch cleanly instead of blaming the driver). The
+        programmer .elf runs ON the device, so it's the same file on every host."""
+        def host(stem):
+            exe = self._payload_glob(f"**/{stem}.exe", version)
+            bare = self._payload_glob(f"**/{stem}", version)
+            return (exe or bare) if os.name == "nt" else (bare or exe)
+        q = host("QSaharaServer")
+        f = host("fh_loader")
         p = (self._payload_glob("**/prog_firehose_ddr.elf", version)
              or self._payload_glob("**/prog_firehose*.elf", version))
         return (q, f, p) if (q and f and p) else None

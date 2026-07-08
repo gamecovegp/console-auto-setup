@@ -643,7 +643,11 @@ class Edl:
                                    **self._runner_kw())
         blob = (out or "") + (err or "")
         if "Could not connect" in blob or "Sahara protocol completed" not in blob:
-            if os.name == "nt":
+            if "not a valid Win32 application" in blob or "WinError 193" in blob:
+                log("EDL: the bundled flasher isn't a Windows executable (Windows can't run the Linux "
+                    "QSaharaServer/fh_loader). Put the Windows QSaharaServer.exe + fh_loader.exe (from "
+                    f"Qualcomm QPST/QFIL) in the firmware payload and retry. {err.strip()}")
+            elif os.name == "nt":
                 log("EDL: Sahara couldn't open the 9008 port. On Windows this means the Qualcomm QDLoader "
                     "9008 driver isn't installed, or the device isn't in EDL — install the QDLoader 9008 "
                     f"driver (Device Manager should show a 'Qualcomm HS-USB QDLoader 9008' COM port) and retry. {err.strip()}")
