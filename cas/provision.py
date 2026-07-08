@@ -885,6 +885,15 @@ def flasher_for_firmware(firmware, fastboot, slot, version=None, runner=None, on
     if not geom:
         return None, f"EDL firmware has no rawprogram entry for init_boot{slot}."
     q, f, p = tools
+    # Fail fast on a host/tool OS mismatch BEFORE rebooting the unit to EDL (so it isn't stranded there).
+    # On Windows the host tools must be the .exe builds — a Linux ELF makes subprocess raise
+    # "WinError 193: %1 is not a valid Win32 application", which the port-open branch would otherwise
+    # misreport as a missing QDLoader driver (the driver is fine; the tool is the wrong OS).
+    if os.name == "nt" and not (str(q).lower().endswith(".exe") and str(f).lower().endswith(".exe")):
+        return None, ("EDL flashing on Windows needs the Windows host tools QSaharaServer.exe + "
+                      "fh_loader.exe (from Qualcomm QPST/QFIL) in the firmware payload — this build ships "
+                      "only the Linux binaries, which Windows can't execute. Drop both .exe beside them "
+                      "and retry (the 9008 driver/COM port are fine).")
     edl = Edl(q, f, p, runner=(runner or subprocess_runner), cancel=getattr(fastboot, "cancel", None))
     return edl_flasher(edl, geom, on_critical=on_critical), None
 
