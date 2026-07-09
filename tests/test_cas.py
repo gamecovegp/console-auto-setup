@@ -2244,13 +2244,18 @@ class TestEdl(unittest.TestCase):
             self.assertFalse(edl.flash_partition("/dev/ttyUSB0", "init_boot_b", str(img), self.GEOM, td))
 
     def test_staged_exec_makes_a_local_executable_copy(self):
-        # The fix: NAS/CIFS forces file_mode=0664 (non-exec), so tools must be copied local + chmod +x.
+        # POSIX behavior: NAS/CIFS forces file_mode=0664 (non-exec), so tools are copied local + chmod +x.
+        # Pin os.name=posix so this exercises the staging branch on ANY host runner (on real Windows the
+        # tool runs in place instead - see test_staged_exec_runs_in_place_on_windows).
         import os
+        from cas import adb as A
         from cas.adb import Edl
+        from unittest import mock
         with tempfile.TemporaryDirectory() as td:
             src = pathlib.Path(td) / "QSaharaServer"; src.write_text("#!/bin/sh\n"); src.chmod(0o644)
             wd = pathlib.Path(td) / "wd"; wd.mkdir()
-            out = Edl(str(src), "/x/fh_loader", "/x/p.elf")._staged_exec(str(src), wd)
+            with mock.patch.object(A.os, "name", "posix"):
+                out = Edl(str(src), "/x/fh_loader", "/x/p.elf")._staged_exec(str(src), wd)
             self.assertEqual(pathlib.Path(out).parent, wd)        # staged into the local workdir
             self.assertTrue(os.access(out, os.X_OK))              # and now executable
 
