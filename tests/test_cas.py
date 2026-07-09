@@ -514,6 +514,36 @@ class TestFastboot(unittest.TestCase):
         self.assertEqual(fb.resolve(), "MQ66")
 
 
+class TestManifestNewlines(unittest.TestCase):
+    """ROOT-CAUSE REGRESSION — Windows Download: "no APK in payload" for EVERY app while the payload sat on
+    the device, complete. save_manifest used pathlib.write_text(), whose text mode translates "\\n" ->
+    os.linesep, so on Windows the manifest pushed to the device carried CRLF. restore.sh/capture.sh parse it
+    with awk, whose default field separator does NOT include \\r, so every bare package line yielded
+    "$pkg" = "com.foo\\r" and "$P/$pkg/apk/" named a path that cannot exist. (Python's str.split() strips \\r,
+    so the PC-side _validate_payload passed on the SAME file — the two sides disagreed, which is what made
+    this look like a transfer bug.) The manifest is a DEVICE-consumed file: it must be LF-only on every OS.
+    This assertion is what the windows-latest CI runner enforces (on POSIX write_text already emits LF)."""
+
+    def test_save_manifest_is_lf_only_bytes(self):
+        with tempfile.TemporaryDirectory() as t:
+            m = pathlib.Path(t) / "manifest"
+            P.save_manifest(m, ["com.foo", "com.bar"], {"settings": "on"},
+                            header="# p (deploy)", axes={"com.bar": (True, False)})
+            raw = m.read_bytes()
+            self.assertNotIn(b"\r", raw, "device-consumed manifest must never carry CR (breaks awk on-device)")
+            self.assertIn(b"\ncom.foo\n", raw)          # bare line = the shape that carried the stray \r
+            self.assertTrue(raw.endswith(b"\n"))
+
+    def test_capture_and_deploy_manifests_share_the_lf_writer(self):
+        # Both device-pushed manifests (Download's {DEV}/manifest and Save's capture-manifest) go through
+        # save_manifest, so the LF fix must cover both. Guard that neither can regress to text mode.
+        with tempfile.TemporaryDirectory() as t:
+            for name in ("manifest", "capture-manifest"):
+                p = pathlib.Path(t) / name
+                P.save_manifest(p, ["com.foo"], {"grants": "off"}, header=f"# {name}")
+                self.assertNotIn(b"\r", p.read_bytes(), f"{name} must be LF-only")
+
+
 class TestManifestAxes(unittest.TestCase):
     def _write(self, text):
         d = pathlib.Path(tempfile.mkdtemp())
@@ -2305,27 +2335,26 @@ class TestEdl(unittest.TestCase):
         from cas import adb as A
         from unittest import mock
         edl = Edl("/x/q", "/x/f", "/x/p")
-        # Mock openability too: on a real Windows runner the probe would try to CreateFileW COM3 with no
-        # device attached and (correctly) fail, which has nothing to do with what this test asserts.
-        with mock.patch.object(A, "_edl_ports", return_value=[r"\\.\COM3"]), \
-             mock.patch.object(A, "_edl_port_openable", return_value=True):
+        # _edl_ports already returns only PRESENT ports (Windows filters by SERIALCOMM), so a name here
+        # means the device is really there - find_port returns it.
+        with mock.patch.object(A, "_edl_ports", return_value=[r"\\.\COM3"]):
             self.assertEqual(edl.find_port(timeout=2), r"\\.\COM3")
 
-    def test_find_port_waits_until_the_port_is_actually_openable(self):
+    def test_find_port_waits_until_the_port_is_present(self):
         # Regression (MANGMI AIR X bench): on Windows the registry keeps a 9008 device's PortName after
-        # unplug, so _edl_ports() reports COM3 the instant we look - while the unit is still rebooting into
-        # EDL. find_port() returned it on poll #0 and QSaharaServer died with "Failed to open com port
-        # handle ... Could not connect to \\.\COM3". Gate on the port actually OPENING, not on the name.
+        # unplug, so a naive scan 'saw' COM3 the instant we looked - while the unit was still rebooting into
+        # EDL - and find_port returned a dead port that QSaharaServer couldn't open. _edl_ports now filters
+        # to PRESENT ports (SERIALCOMM), so it returns [] until the unit re-enumerates. find_port must wait
+        # out those empty polls and return the port only once it actually shows up.
         from cas.adb import Edl
         from cas import adb as A
         from unittest import mock
         edl = Edl("/x/q", "/x/f", "/x/p")
-        # name present on every poll (stale registry), but only openable on the 3rd probe (unit enumerated)
-        with mock.patch.object(A, "_edl_ports", return_value=[r"\\.\COM3"]), \
-             mock.patch.object(A.time, "sleep", lambda *_a, **_k: None), \
-             mock.patch.object(A, "_edl_port_openable", side_effect=[False, False, True]) as openable:
+        ports = mock.Mock(side_effect=[[], [], [r"\\.\COM3"]])   # absent, absent, then present
+        with mock.patch.object(A, "_edl_ports", ports), \
+             mock.patch.object(A.time, "sleep", lambda *_a, **_k: None):
             self.assertEqual(edl.find_port(timeout=30), r"\\.\COM3")
-        self.assertEqual(openable.call_count, 3)   # waited out two not-ready polls, returned on the third
+        self.assertEqual(ports.call_count, 3)   # waited out two empty polls, returned on the third
 
     def test_find_port_none_on_timeout(self):
         from cas.adb import Edl
@@ -2341,6 +2370,7 @@ class TestEdl(unittest.TestCase):
         # invariant we lock in: it always returns a list and never raises, so find_port stays safe anywhere.
         from cas import adb as A
         self.assertIsInstance(A._windows_edl_com_ports(), list)
+        self.assertIsInstance(A._windows_active_com_ports(), set)   # its presence filter, also crash-proof
 
 
 class TestFlashers(unittest.TestCase):
