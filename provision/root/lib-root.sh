@@ -4,13 +4,20 @@
 PKGS="dev.eden.eden_emulator com.retroarch.aarch64 org.dolphinemu.dolphinemu com.flycast.emulator \
 com.github.stenzek.duckstation xyz.aethersx2.android xyz.aethersx2.tturnip me.magnum.melonds.nightly \
 org.citra.emu org.ppsspp.ppsspp org.mupen64plusae.v3.fzurita org.es_de.frontend gamehub.lite"
+# CRLF guard. The manifest is GENERATED ON THE PC (pathlib.write_text translates "\n" -> "\r\n" on Windows)
+# and a pkglist can be hand-edited in Notepad. awk's default field separator does NOT include \r, so a bare
+# package line yields "$pkg" = "com.foo\r" and "$P/$pkg/apk/" names a path that cannot exist -> restore warned
+# "no APK in payload" for EVERY app while the payload sat on the device, complete. (Python's str.split() DOES
+# strip \r, so the PC-side validation passed on the same file — the two sides disagreed.) Strip \r wherever we
+# parse a PC-writable list. Same class as the *.sh eol=lf rule in .gitattributes.
+strip_cr(){ awk '{ sub(/\r$/, ""); print }'; }
 # payload_pkgs [payload_dir] — the authoritative cloned package set: the golden's captured pkglist.txt
 # (one pkg per line) when present and non-empty, else the static $PKGS fallback. Pure file IO (no adb/root),
 # so it is locally testable. payload_dir defaults to the capture/restore payload location.
 payload_pkgs(){
   pdir="${1:-${CAS_OUT:-$(detect_sd)/golden_root_payload}}"
   if [ -s "$pdir/pkglist.txt" ]; then
-    cat "$pdir/pkglist.txt"
+    strip_cr < "$pdir/pkglist.txt"
   else
     printf '%s\n' $PKGS
   fi
@@ -37,12 +44,12 @@ internal_for(){ case "$1" in
   # ES-DE is handled separately (es_settings.xml only) — see ES_SETTINGS_PATH, capture.sh, restore.sh.
 esac; }
 # Manifest = app names (one per line) + "@flag value" lines + "#" comments. Both parsers are pure.
-manifest_pkgs(){ sed -e 's/#.*//' "$1" 2>/dev/null | grep -vE '^[[:space:]]*@' | awk 'NF{print $1}'; }
-manifest_flag(){ f="$1"; n="$2"; sed -n "s/^@${n}[[:space:]]\{1,\}//p" "$f" 2>/dev/null | awk 'NF{print $1; exit}'; }
+manifest_pkgs(){ sed -e 's/#.*//' "$1" 2>/dev/null | grep -vE '^[[:space:]]*@' | awk '{sub(/\r$/,"")} NF{print $1}'; }
+manifest_flag(){ f="$1"; n="$2"; sed -n "s/^@${n}[[:space:]]\{1,\}//p" "$f" 2>/dev/null | awk '{sub(/\r$/,"")} NF{print $1; exit}'; }
 # manifest_axes <manifest> <pkg> — echoes the capture axes for a pkg: "apk config" (bare/default),
 # "apk", "config", or empty if the pkg isn't listed. Tokens after the pkg name narrow it.
 manifest_axes(){
-  line="$(sed -e 's/#.*//' "$1" 2>/dev/null | grep -vE '^[[:space:]]*@' | awk -v p="$2" 'NF && $1==p {print; exit}')"
+  line="$(sed -e 's/#.*//' "$1" 2>/dev/null | grep -vE '^[[:space:]]*@' | awk -v p="$2" '{sub(/\r$/,"")} NF && $1==p {print; exit}')"
   [ -n "$line" ] || return 0
   rest="$(echo "$line" | cut -s -d' ' -f2-)"
   case "$rest" in

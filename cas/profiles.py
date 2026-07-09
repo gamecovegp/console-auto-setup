@@ -382,7 +382,13 @@ def save_manifest(manifest_path, pkgs, flags, header="# manifest", axes=None):
     lines = [header]
     lines += [_line(p) for p in pkgs]
     lines += [f"@{k} {v}" for k, v in flags.items()]
-    pathlib.Path(manifest_path).write_text("\n".join(lines) + "\n")
+    # write_BYTES, never write_text: text mode translates "\n" -> os.linesep, so on Windows this file went
+    # to the device with CRLF. restore.sh/capture.sh parse it with awk, whose default field separator does
+    # NOT include \r — every bare package line then yielded "$pkg" = "com.foo\r" and "$P/$pkg/apk/" named a
+    # path that cannot exist, so Download warned "no APK in payload" for EVERY app while the payload was
+    # sitting on the device, complete. (Python's str.split() strips \r, so PC-side validation passed on the
+    # SAME file and the two sides disagreed.) The device is LF-only; keep these bytes LF-only.
+    pathlib.Path(manifest_path).write_bytes(("\n".join(lines) + "\n").encode("utf-8"))
 
 
 class Profile:
