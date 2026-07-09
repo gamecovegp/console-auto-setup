@@ -1001,8 +1001,9 @@ def flasher_for_firmware(firmware, fastboot, slot, version=None, runner=None, on
     if os.name == "nt" and not (str(q).lower().endswith(".exe") and str(f).lower().endswith(".exe")):
         return None, ("EDL flashing on Windows needs the Windows host tools QSaharaServer.exe + "
                       "fh_loader.exe (from Qualcomm QPST/QFIL) in the firmware payload — this build ships "
-                      "only the Linux binaries, which Windows can't execute. Drop both .exe beside them "
-                      "and retry (the 9008 driver/COM port are fine).")
+                      "only the Linux binaries, which Windows can't execute. Fix: install QPST, then run "
+                      "scripts/install-edl-host-tools.ps1 (fans both .exe into every EDL payload), or drop "
+                      "both .exe beside the Linux tools by hand and retry (the 9008 driver/COM port are fine).")
     edl = Edl(q, f, p, runner=(runner or subprocess_runner), cancel=getattr(fastboot, "cancel", None))
     return edl_flasher(edl, geom, on_critical=on_critical), None
 

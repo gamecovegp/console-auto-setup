@@ -3871,13 +3871,18 @@ class WindowsDriverKitTest(unittest.TestCase):
         # script dies with "missing terminator". cmd.exe (.bat) and the INF parser are ANSI too. So every
         # Windows-EXECUTED script must be pure ASCII. (README.md is documentation, not executed -> exempt.)
         # Regression for the bench that couldn't run setup-windows.bat: install-drivers.ps1 had 9 em-dashes.
-        for parts in (
-            ("scripts", "setup-windows.bat"),
-            ("scripts", "drivers", "install-drivers.ps1"),
-            ("scripts", "drivers", "fallback", "fastboot", "cas-fastboot.inf"),
-            ("scripts", "drivers", "fallback", "edl", "cas-edl-9008.inf"),
-        ):
-            p = os.path.join(self.repo, *parts)
+        # GLOB every Windows-executed script under scripts/ (.ps1/.bat/.inf) so a NEW one is auto-guarded
+        # without editing this list (install-edl-host-tools.ps1 was added this way).
+        scripts = os.path.join(self.repo, "scripts")
+        wanted = []
+        for dirpath, _dirs, files in os.walk(scripts):
+            for name in files:
+                if os.path.splitext(name)[1].lower() in (".ps1", ".bat", ".inf"):
+                    wanted.append(os.path.relpath(os.path.join(dirpath, name), self.repo))
+        self.assertTrue(wanted, "no Windows-consumed scripts found under scripts/ - glob is broken")
+        for rel in sorted(wanted):
+            parts = rel.split(os.sep)
+            p = os.path.join(self.repo, rel)
             with open(p, "rb") as f:
                 raw = f.read()
             bad, line, col = [], 1, 0
