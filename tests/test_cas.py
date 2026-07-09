@@ -2305,8 +2305,27 @@ class TestEdl(unittest.TestCase):
         from cas import adb as A
         from unittest import mock
         edl = Edl("/x/q", "/x/f", "/x/p")
-        with mock.patch.object(A, "_edl_ports", return_value=[r"\\.\COM3"]):
+        # Mock openability too: on a real Windows runner the probe would try to CreateFileW COM3 with no
+        # device attached and (correctly) fail, which has nothing to do with what this test asserts.
+        with mock.patch.object(A, "_edl_ports", return_value=[r"\\.\COM3"]), \
+             mock.patch.object(A, "_edl_port_openable", return_value=True):
             self.assertEqual(edl.find_port(timeout=2), r"\\.\COM3")
+
+    def test_find_port_waits_until_the_port_is_actually_openable(self):
+        # Regression (MANGMI AIR X bench): on Windows the registry keeps a 9008 device's PortName after
+        # unplug, so _edl_ports() reports COM3 the instant we look - while the unit is still rebooting into
+        # EDL. find_port() returned it on poll #0 and QSaharaServer died with "Failed to open com port
+        # handle ... Could not connect to \\.\COM3". Gate on the port actually OPENING, not on the name.
+        from cas.adb import Edl
+        from cas import adb as A
+        from unittest import mock
+        edl = Edl("/x/q", "/x/f", "/x/p")
+        # name present on every poll (stale registry), but only openable on the 3rd probe (unit enumerated)
+        with mock.patch.object(A, "_edl_ports", return_value=[r"\\.\COM3"]), \
+             mock.patch.object(A.time, "sleep", lambda *_a, **_k: None), \
+             mock.patch.object(A, "_edl_port_openable", side_effect=[False, False, True]) as openable:
+            self.assertEqual(edl.find_port(timeout=30), r"\\.\COM3")
+        self.assertEqual(openable.call_count, 3)   # waited out two not-ready polls, returned on the third
 
     def test_find_port_none_on_timeout(self):
         from cas.adb import Edl

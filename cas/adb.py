@@ -564,10 +564,45 @@ def _windows_edl_com_ports():
 
 def _edl_ports(pattern="/dev/ttyUSB*"):
     """Candidate EDL port paths for THIS OS. Windows: the QDLoader 9008 COM port(s) as r'\\\\.\\COMn' (the
-    form QSaharaServer/fh_loader want; the \\\\.\\ prefix also handles COM10+). POSIX: glob(pattern)."""
+    form QSaharaServer/fh_loader want; the \\\\.\\ prefix also handles COM10+). POSIX: glob(pattern).
+
+    Windows names here are CANDIDATES ONLY — see _edl_port_openable()."""
     if os.name == "nt":
         return [r"\\.\%s" % c for c in _windows_edl_com_ports()]
     return sorted(glob.glob(pattern))
+
+
+def _edl_port_openable(port):
+    """True when `port` can actually be OPENED right now. The real readiness condition on Windows.
+
+    The registry Enum key for VID_05C6&PID_9008 SURVIVES unplug — that is how Windows remembers a device's
+    COM assignment — so _windows_edl_com_ports() reports e.g. COM3 for a unit that is still rebooting into
+    EDL and has not enumerated yet. find_port() then "found" a port instantly and QSaharaServer died with
+    "Failed to open com port handle ... Could not connect to \\\\.\\COM3" (the MANGMI AIR X bench). Existence
+    of a registry key is NOT presence; being able to open the port is. Probe with CreateFileW
+    (OPEN_EXISTING, exclusive): it fails while the device is absent, and succeeds only once usbser has
+    enumerated it AND nothing else holds it — exactly what QSaharaServer needs a moment later.
+
+    POSIX (or no ctypes): True — a /dev/ttyUSB* node only exists while the device is enumerated, so the
+    glob already implies presence."""
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except ImportError:                      # pragma: no cover - ctypes is stdlib
+        return True
+    GENERIC_READ, GENERIC_WRITE, OPEN_EXISTING = 0x80000000, 0x40000000, 3
+    invalid = ctypes.c_void_p(-1).value
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.CreateFileW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                                wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+    h = k32.CreateFileW(port, GENERIC_READ | GENERIC_WRITE, 0, None, OPEN_EXISTING, 0, None)
+    if not h or h == invalid:                # absent (2), access-denied (5) or held by someone else (32)
+        return False
+    k32.CloseHandle(h)
+    return True
 
 
 def _tool_tail(blob, lines=8, limit=700):
@@ -628,15 +663,22 @@ class Edl:
         return [exe] if exe else []
 
     def find_port(self, timeout=60, on_tick=None, pattern="/dev/ttyUSB*"):
-        """Poll for the EDL port (created when the device enters EDL). Returns the path/name or None.
+        """Poll for a USABLE EDL port (created when the device enters EDL). Returns the path/name or None.
         Linux: the /dev/ttyUSB* node. Windows: the Qualcomm QDLoader 9008 COM port (r'\\\\.\\COMn'), found
-        via the registry (Windows has no /dev glob) — so EDL flashing works on a Windows bench too."""
+        via the registry (Windows has no /dev glob) — so EDL flashing works on a Windows bench too.
+
+        Gate on _edl_port_openable(), NOT on the name merely existing. On Windows the registry keeps a
+        9008 device's PortName after unplug, so the name is present the instant we look — while the unit
+        is still rebooting into EDL. Returning it made QSaharaServer fail immediately ("Failed to open com
+        port handle"). Polling the OPEN succeeding is the real condition, and it naturally waits out the
+        reboot/re-enumerate. (POSIX is unaffected: _edl_port_openable is True there, and the /dev node
+        only exists while the device is attached.)"""
         for i in range(max(1, timeout // 2)):
             if self.cancel is not None and self.cancel.is_set():
                 return None
-            ports = _edl_ports(pattern)
-            if ports:
-                return ports[0]
+            for p in _edl_ports(pattern):
+                if _edl_port_openable(p):
+                    return p
             if on_tick and i and i % 5 == 0:
                 on_tick(i * 2)
             time.sleep(2)

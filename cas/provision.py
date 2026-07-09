@@ -958,7 +958,7 @@ def edl_flasher(edl, geometry, wait=True, on_critical=None):
                              on_tick=lambda s: log(f"  …waiting for EDL {_edl_port_kind} ({s}s)"))
         if not port:
             drv = ("QDLoader 9008 driver installed?" if os.name == "nt" else "qcserial driver?")
-            log(f"ERROR: no EDL port appeared ({drv} hold power ~12s to recover).")
+            log(f"ERROR: no EDL port became usable ({drv} hold power ~12s to recover).")
             return False
         with tempfile.TemporaryDirectory() as td:
             if on_critical:
