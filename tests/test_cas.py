@@ -339,6 +339,57 @@ class TestAdb(unittest.TestCase):
         runner = lambda args, input_text=None, timeout=900: (1, "", "error: no devices/emulators found")
         self.assertFalse(Adb(runner=runner).is_online())
 
+    def test_wait_boot_never_uses_open_ended_wait_for_device(self):
+        # ROOT-CAUSE REGRESSION — Root froze at "step 4/4: waiting for the device to finish booting" on a
+        # unit that HAD already booted. wait_boot() opened with a blocking `adb wait-for-device`, which
+        # (a) is bounded by the RUNNER's 900s default, not wait_boot's `timeout`, (b) ran BEFORE the poll
+        # loop so it emitted no on_tick progress and the cancel check never got a turn, and (c) only
+        # returns once adb itself reaches the 'device' state — which stalls while the unit re-enumerates
+        # after the fastbootd flash / the adb server's transport list is stale. Poll the real condition
+        # instead (a fresh `adb shell getprop` re-resolves the transport). await_online() already avoids
+        # wait-for-device for exactly this reason.
+        class NoWaitForDevice(FakeRunner):
+            def __call__(self, args, input_text=None, timeout=900):
+                assert "wait-for-device" not in args, \
+                    "wait_boot must not call the open-ended `adb wait-for-device` (blocks ~900s, no ticks)"
+                return super().__call__(args, input_text, timeout)
+        r = NoWaitForDevice()
+        self.assertTrue(Adb(runner=r).wait_boot(timeout=10))
+        self.assertNotIn("wait-for-device", "\n".join(r.cmds()))
+
+    def test_wait_boot_recovers_when_device_is_briefly_unreachable(self):
+        # The real post-flash sequence: the unit is absent from adb for a few seconds while it
+        # re-enumerates, THEN answers sys.boot_completed=1. Polling must ride through the dead window and
+        # detect the boot (the old wait-for-device prelude wedged here instead).
+        from unittest import mock
+
+        class SlowBoot(FakeRunner):
+            def __init__(self, dead=3, **kw):
+                super().__init__(**kw)
+                self.dead, self.probes = dead, 0
+
+            def __call__(self, args, input_text=None, timeout=900):
+                if "shell" in args and args[-1].startswith("getprop sys.boot_completed"):
+                    self.probes += 1
+                    if self.probes <= self.dead:            # still re-enumerating -> adb can't reach it
+                        return 1, "", "error: device '2ee078bd' not found"
+                    return 0, "1\n", ""
+                return super().__call__(args, input_text, timeout)
+        r = SlowBoot(dead=3)
+        with mock.patch("time.sleep", lambda *a, **k: None):
+            self.assertTrue(Adb(runner=r).wait_boot(timeout=60))
+        self.assertEqual(r.probes, 4)                        # kept polling through the dead window
+
+    def test_wait_boot_is_bounded_and_reports_progress(self):
+        # A unit that never boots must FAIL inside its own `timeout` (not the runner's 900s) and must emit
+        # progress ticks so the operator sees it working rather than a frozen UI.
+        from unittest import mock
+        ticks = []
+        r = FakeRunner(boot="0")                             # sys.boot_completed never becomes 1
+        with mock.patch("time.sleep", lambda *a, **k: None):
+            self.assertFalse(Adb(runner=r).wait_boot(timeout=60, on_tick=ticks.append))
+        self.assertEqual(ticks, [10, 20, 30, 40, 50])        # ~every 10s, bounded by timeout=60
+
     def test_boot_flash_target_init_boot_ab(self):
         # A unit launched on Android 13+ (first_api>=33) is A/B -> flash 'init_boot_<active slot>'.
         self.assertEqual(Adb(runner=FakeRunner(first_api="33", slot="_a")).boot_flash_target(), "init_boot_a")
@@ -2203,6 +2254,21 @@ class TestEdl(unittest.TestCase):
             self.assertEqual(pathlib.Path(out).parent, wd)        # staged into the local workdir
             self.assertTrue(os.access(out, os.X_OK))              # and now executable
 
+    def test_staged_exec_runs_in_place_on_windows(self):
+        # Windows has no noexec mount, and copying a fresh flashing .exe into %TEMP% only invites Defender
+        # to scan/block it (the MANGMI "Sahara couldn't open the port" bench). So on Windows the tool runs
+        # IN PLACE from the payload - the exact path proven to work by hand - never copied into workdir.
+        from cas import adb as A
+        from cas.adb import Edl
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as td:
+            src = pathlib.Path(td) / "QSaharaServer.exe"; src.write_bytes(b"MZfake")
+            wd = pathlib.Path(td) / "wd"; wd.mkdir()
+            with mock.patch.object(A.os, "name", "nt"):
+                out = Edl(str(src), "/x/fh_loader.exe", "/x/p.elf")._staged_exec(str(src), wd)
+            self.assertEqual(out, str(src))                       # unchanged - run in place
+            self.assertFalse((wd / "QSaharaServer.exe").exists()) # nothing copied into %TEMP%
+
     def test_launcher_noop_with_mocked_runner(self):
         # Auto-escalation must never fire under a mocked runner (tests / non-real flows), whatever the port.
         from cas.adb import Edl
@@ -2386,6 +2452,32 @@ class TestFlashers(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             img = pathlib.Path(td) / "p.img"; img.write_bytes(b"x")
             self.assertTrue(flasher(Adb(runner=FakeRunner()), "init_boot_b", str(img), lambda *a: None))
+
+    def test_edl_sahara_failure_logs_tool_output_and_exit_code(self):
+        # Regression (MANGMI AIR X bench): the cancel-aware subprocess_runner merges stderr into stdout and
+        # returns err="", but the failure branches logged only `err` -> empty. CAS then printed a hardcoded
+        # GUESS ("install the QDLoader 9008 driver") on a bench whose driver + COM3 were provably fine.
+        # The log must instead carry what the tool actually said, plus its exit code.
+        from cas.adb import Adb, Edl
+        from cas import provision as PV
+
+        def runner(args, input_text=None, timeout=900):
+            if args[0].endswith("QSaharaServer"):
+                return 3, "Sahara: Cannot open port \\\\.\\COM3 (access denied)\n", ""   # err EMPTY on purpose
+            return 0, "", ""
+        edl = Edl("/x/QSaharaServer", "/x/fh_loader", "/x/p.elf", runner=runner)
+        edl.find_port = lambda timeout=60, on_tick=None, pattern="/dev/ttyUSB*": "/dev/ttyUSB0"
+        geom = {"sector_size": "512", "num_sectors": "1", "partition": "0",
+                "start_sector": "1", "start_byte_hex": "0x0"}
+        lines = []
+        flasher = PV.edl_flasher(edl, geom)
+        with tempfile.TemporaryDirectory() as td:
+            img = pathlib.Path(td) / "p.img"; img.write_bytes(b"x")
+            self.assertFalse(flasher(Adb(runner=FakeRunner()), "init_boot_b", str(img), lines.append))
+        blob = "\n".join(lines)
+        self.assertIn("Cannot open port", blob)          # the tool's REAL message reached the operator
+        self.assertIn("exit 3", blob)                     # ...and its exit code
+        self.assertNotIn("driver isn't installed", blob)  # ...and we no longer assert a cause we can't know
 
     def test_root_dispatches_to_provided_flasher(self):
         from cas.adb import Adb, Fastboot

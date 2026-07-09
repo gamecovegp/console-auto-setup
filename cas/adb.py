@@ -31,6 +31,9 @@ def _sd_volumes(ls_out):
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform.startswith("win") else 0
 
 CANCELLED = 130    # rc for a child stopped by Cancel (128 + SIGINT) — distinguishes an abort from a real fail
+BOOT_PROBE_TIMEOUT = 15   # seconds per `getprop sys.boot_completed` probe inside wait_boot. A booted device
+#   answers instantly; a rebooting/absent one errors out fast. Bounding it keeps ONE wedged adb call from
+#   eating the whole wait budget (the runner's default is 900s — that is what froze Root's step 4/4).
 
 
 def _local(p):
@@ -207,9 +210,14 @@ class Adb:
         push during a Download)."""
         return self.runner(self._base() + list(args), **self._runner_kw())
 
-    def shell(self, cmd):
-        """Run `adb shell <cmd>` (cmd is one string). Honors the cancel event."""
-        return self.runner(self._base() + ["shell", cmd], **self._runner_kw())
+    def shell(self, cmd, timeout=None):
+        """Run `adb shell <cmd>` (cmd is one string). Honors the cancel event. `timeout` (seconds) bounds
+        THIS call — pass it for probes inside a wait loop so one wedged adb call can't eat the whole budget
+        (the runner's default is 900s). Omit it and the runner default applies (unchanged behavior)."""
+        kw = self._runner_kw()
+        if timeout is not None:
+            kw["timeout"] = timeout
+        return self.runner(self._base() + ["shell", cmd], **kw)
 
     def su(self, cmd, timeout=900):
         """Run <cmd> as root: `adb shell /debug_ramdisk/su -c <cmd>`. Honors the cancel event."""
@@ -284,8 +292,8 @@ class Adb:
             return subprocess_stream(args, on_line, cancel=self.cancel) == 0
         return self.runner(args)[0] == 0
 
-    def getprop(self, key):
-        return self.shell("getprop " + key)[1].strip()
+    def getprop(self, key, timeout=None):
+        return self.shell("getprop " + key, timeout=timeout)[1].strip()
 
     def push(self, src, dst):
         return self.push_msg(src, dst)[0]
@@ -308,8 +316,9 @@ class Adb:
         # hang a batch — fail fast as "not root" after the timeout.
         return "uid=0" in self.su("id", timeout=30)[1]
 
-    def boot_completed(self):
-        return self.getprop("sys.boot_completed") == "1"
+    def boot_completed(self, timeout=None):
+        # An absent/offline/rebooting device just fails this probe (adb errors out) -> not "1" -> caller retries.
+        return self.getprop("sys.boot_completed", timeout=timeout) == "1"
 
     def slot_suffix(self):
         """A/B active-slot suffix ('_a'/'_b') to target the LIVE slot, or '' on A-only devices. getprop,
@@ -405,18 +414,34 @@ class Adb:
             time.sleep(2)
         return self.is_online()
 
-    def wait_boot(self, timeout=180, on_tick=None):
+    def wait_boot(self, timeout=300, on_tick=None):
         """Wait for the device to reconnect and finish booting. Returns True if booted.
-        on_tick(seconds) is called ~every 10s so a UI can show 'still booting…' during the wait."""
-        self.raw("wait-for-device")
-        for i in range(max(1, timeout // 2)):
+        on_tick(seconds) is called ~every 10s so a UI can show 'still booting…' during the wait.
+
+        `timeout` now covers the WHOLE window (re-enumerate + boot). It was 180s, but that only bounded the
+        poll loop — the old wait-for-device prelude blocked for the reconnect on top of it, so the effective
+        budget was (time-to-reappear + 180s). Polling from the reboot means one budget, so it is widened to
+        5 min to keep a slow unit (Magisk's first boot) from being failed early. A unit that boots normally
+        still returns as soon as it reports sys.boot_completed=1.
+
+        CONDITION-POLLED, and deliberately NEVER `adb wait-for-device` (same reason await_online avoids it).
+        That call blocks until ADB ITSELF hands the serial to the 'device' state, and it is bounded only by
+        the RUNNER's 900s default — not by `timeout`. It also ran BEFORE this loop, so it emitted no on_tick
+        progress and the cancel check never got a turn. After a fastbootd flash the unit re-enumerates on the
+        USB bus and the adb server's transport list is stale from the fastboot hop, so wait-for-device sat
+        there while the unit had ALREADY booted — Root froze at "waiting for the device to finish booting"
+        with no output. Polling instead issues a FRESH `adb shell getprop` each tick, which re-resolves the
+        transport; an absent/offline device merely fails a probe and we retry, so a slow reconnect recovers.
+        Each probe is bounded (BOOT_PROBE_TIMEOUT) so one wedged adb call can't consume the whole budget."""
+        step = 2
+        for i in range(max(1, timeout // step)):
             if self.cancel is not None and self.cancel.is_set():
                 return False
-            if self.boot_completed():
+            if self.boot_completed(timeout=BOOT_PROBE_TIMEOUT):
                 return True
             if on_tick and i and i % 5 == 0:
-                on_tick(i * 2)
-            time.sleep(2)
+                on_tick(i * step)
+            time.sleep(step)
         return False
 
 
@@ -545,6 +570,19 @@ def _edl_ports(pattern="/dev/ttyUSB*"):
     return sorted(glob.glob(pattern))
 
 
+def _tool_tail(blob, lines=8, limit=700):
+    """The last few non-empty lines of an EDL tool's output, for an error log.
+
+    The EDL tools print their REAL failure reason on stdout, and the cancel-aware `subprocess_runner`
+    merges stderr into stdout (returning err="") — so logging only `err` prints nothing and forces the
+    caller to GUESS a cause. Always show what the tool actually said."""
+    keep = [ln.strip() for ln in (blob or "").splitlines() if ln.strip()]
+    if not keep:
+        return ""
+    tail = " | ".join(keep[-lines:])
+    return tail[-limit:] if len(tail) > limit else tail
+
+
 class Edl:
     """Flash a partition via Qualcomm EDL / Firehose (Sahara loads a programmer, fh_loader writes). For
     devices whose BOOTLOADER fastboot can't flash (e.g. MANGMI: `Writing… FAILED (remote: 'unknown
@@ -621,7 +659,15 @@ class Edl:
         removable FAT/exFAT drive) and can force file_mode=0664 (non-executable), so exec'ing
         QSaharaServer/fh_loader straight off it fails with EACCES. Copy into the local workdir + chmod +x.
         Falls back to the original path if the copy can't be made (e.g. a mocked test path that doesn't
-        exist) — harmless, the runner is mocked."""
+        exist) — harmless, the runner is mocked.
+
+        WINDOWS: don't stage — run the tool IN PLACE. Windows has no noexec mount (an .exe runs off any
+        NTFS/exFAT/removable drive), so the copy buys nothing; worse, writing a fresh flashing .exe into
+        %TEMP% and immediately executing it is a textbook Defender real-time-scan trigger that can block or
+        stall the launch, which read as "Sahara couldn't open the port" on the MANGMI bench. Running the
+        payload's own QSaharaServer.exe/fh_loader.exe directly matches the invocation proven to work."""
+        if os.name == "nt":
+            return str(src)
         try:
             dst = pathlib.Path(workdir) / pathlib.Path(src).name
             if not dst.exists():
@@ -654,19 +700,23 @@ class Edl:
                                    **self._runner_kw())
         blob = (out or "") + (err or "")
         if "Could not connect" in blob or "Sahara protocol completed" not in blob:
+            # ALWAYS lead with what the tool actually said + its exit code. Guessing a cause here (the old
+            # "install the QDLoader driver" text) misdiagnosed a bench whose driver+COM port were fine.
+            said = _tool_tail(blob) or "(the tool printed nothing)"
+            log(f"EDL: Sahara did not complete (QSaharaServer exit {rc}) on {port}. It said: {said}")
             if "not a valid Win32 application" in blob or "WinError 193" in blob:
-                log("EDL: the bundled flasher isn't a Windows executable (Windows can't run the Linux "
-                    "QSaharaServer/fh_loader). Put the Windows QSaharaServer.exe + fh_loader.exe (from "
-                    f"Qualcomm QPST/QFIL) in the firmware payload and retry. {err.strip()}")
+                log("EDL: ...that means the bundled flasher isn't a Windows executable (Windows can't run "
+                    "the Linux QSaharaServer/fh_loader). Install QPST, then run "
+                    "scripts/install-edl-host-tools.ps1 to put the .exe builds in the firmware payload.")
             elif os.name == "nt":
-                log("EDL: Sahara couldn't open the 9008 port. On Windows this means the Qualcomm QDLoader "
-                    "9008 driver isn't installed, or the device isn't in EDL — install the QDLoader 9008 "
-                    f"driver (Device Manager should show a 'Qualcomm HS-USB QDLoader 9008' COM port) and retry. {err.strip()}")
+                log("EDL: ...check, in order: the unit is really in EDL (Device Manager shows a 9008 COM "
+                    "port); nothing else holds that port; and QSaharaServer.exe can start (a missing "
+                    "Qualcomm DLL makes it exit non-zero with no output - copy the whole QPST bin\\ "
+                    "beside it if so).")
             else:
-                log("EDL: Sahara couldn't open the 9008 port. CAS auto-elevates via pkexec when the port "
-                    "isn't directly accessible — if you cancelled that prompt (or pkexec/polkit is absent, "
-                    "e.g. headless/SSH), approve it on retry, or set up access once with: "
-                    f"bash scripts/setup-linux.sh (installs the udev rule). {err.strip()}")
+                log("EDL: ...CAS auto-elevates via pkexec when the port isn't directly accessible — if you "
+                    "cancelled that prompt (or pkexec/polkit is absent, e.g. headless/SSH), approve it on "
+                    "retry, or set up access once with: bash scripts/setup-linux.sh (installs the udev rule).")
             return False
 
         log(f"EDL: Firehose writing {label}...")
@@ -675,7 +725,8 @@ class Edl:
                                     "--noprompt", "--showpercentagecomplete"], **self._runner_kw())
         blob = (out or "") + (err or "")
         if "All Finished Successfully" not in blob and "{SUCCESS}" not in blob:
-            log(f"EDL: Firehose write of {label} FAILED. {err.strip()}")
+            said = _tool_tail(blob) or "(the tool printed nothing)"
+            log(f"EDL: Firehose write of {label} FAILED (fh_loader exit {rc}). It said: {said}")
             return False
         return True
 
