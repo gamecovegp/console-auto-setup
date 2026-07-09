@@ -12,7 +12,7 @@ REM     py -3.14 -m pip install "pyinstaller>=6.11"     REM 6.11+ supports Pytho
 REM ============================================================================
 
 setlocal
-REM script lives in scripts\ — build from the repo root so cas.spec's relative datas resolve.
+REM script lives in scripts\ - build from the repo root so cas.spec's relative datas resolve.
 cd /d "%~dp0.."
 
 echo(

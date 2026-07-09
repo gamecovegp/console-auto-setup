@@ -138,8 +138,14 @@ def subprocess_stream(args, on_line, input_text=None, cancel=None):
 
 
 def _dir_size_kb(path):
-    """Total size (KB) of all files under `path`. Tolerates a missing dir (pull hasn't created it yet)
-    and files that vanish/grow mid-walk (adb is writing into it) — best-effort sizing for a progress bar."""
+    """Total size (KB) of `path`: its own size when it's a single FILE (a one-archive pull), else the sum
+    of all files under it. Tolerates a missing path (pull hasn't created it yet) and files that vanish/grow
+    mid-walk (adb is writing into it) — best-effort sizing for a progress bar."""
+    try:
+        if os.path.isfile(path):
+            return os.path.getsize(path) // 1024
+    except OSError:
+        return 0
     total = 0
     for root, _dirs, files in os.walk(path):
         for f in files:

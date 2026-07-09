@@ -91,6 +91,8 @@ class FakeRunner:
                     return 0, "[ok] restored apps\n[ok] RESTORE complete\n", ""
                 if "capture.sh" in cmd:
                     return 0, "[ok] GOLDEN captured\n", ""
+                if "CAS_TOK" in cmd:                    # _pull_dir device-side tar-pack sentinel
+                    return 0, "CAS_TOK\n", ""
                 sl = self._storage_ls(cmd)
                 if sl is not None:
                     return sl
@@ -1232,6 +1234,28 @@ class TestProvision(unittest.TestCase):
             self.assertFalse(ok)
             self.assertNotIn("restore.sh", "\n".join(r.cmds()))        # never reached restore
 
+    def test_provision_never_pushes_a_directory(self):
+        # ROOT-CAUSE REGRESSION — Windows Download "no APK in payload" (Retroid Pocket 6, v0.3.4):
+        # `adb.exe push <directory>` reports SUCCESS but transfers 0 files on Windows (single-FILE pushes
+        # are fine — see adb._local). The forward-slash workaround alone was insufficient, so the captured
+        # module dirs never landed and restore.sh failed with "no APK in payload" for every app while the
+        # single-file metas (global.meta/pkglist) DID arrive. Fix: move every DIRECTORY over as ONE stored
+        # tar + on-device untar, exactly like push_es_media. Guard: provision must NEVER hand adb a
+        # directory to push, and the captured payload must arrive as a tar that is unpacked on the device.
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t)                              # 3 captured module dirs, each apk + data.tar
+            r = FakeRunner()
+            ok = PV.provision(Adb(runner=r), prof, log=lambda m: None)   # real (non-dry) push path
+            self.assertTrue(ok)
+            for c in r.calls:                                   # (1) no push source is a directory
+                if "push" in c:
+                    src = c[c.index("push") + 1]
+                    self.assertFalse(os.path.isdir(src),
+                                     f"pushed a DIRECTORY (0-byte on Windows): {src}")
+            joined = "\n".join(r.cmds())                        # (2) payload arrives as a tar, unpacked on device
+            self.assertIn("tar -xf", joined)
+            self.assertIn("/data/local/tmp/cas/payload", joined)
+
     def test_push_es_media_packs_one_archive(self):
         # Universal fast path: pack downloaded_media into ONE tar, push that single file, unpack it on the
         # device, delete it. Verifies we do NOT do a slow per-file directory push and that both the
@@ -1423,6 +1447,39 @@ class TestProvision(unittest.TestCase):
             self.assertTrue(any("root" in m.lower() for m in msgs), f"expected not-rooted message; got {msgs}")
             self.assertNotIn("capture.sh", "\n".join(r.cmds()))          # aborted before capturing
             self.assertFalse(any("push" in c for c in r.cmds()))         # aborted before pushing scripts
+
+    def test_capture_pulls_one_tar_not_a_directory(self):
+        # UNIVERSAL transfer (Windows + Linux): Save must pull the golden as ONE archive
+        # (device-pack -> single-file pull -> PC-unpack), NEVER `adb pull <dir>` — a directory pull can
+        # silently drop files on Windows (mirror of the "no APK in payload" push bug) and write an
+        # incomplete golden. Guard: every pull target is a .tar FILE, and the unpacked profile is complete.
+        class _CapRunner(FakeRunner):
+            def __call__(self, args, input_text=None, timeout=900):
+                if "pull" in args:                       # materialize a real payload tar at the PC dst
+                    import io, tarfile as _tf
+                    buf = io.BytesIO()
+                    with _tf.open(fileobj=buf, mode="w") as tar:
+                        for nm, data in (("global.meta", b"golden_serial=9C33-6BBD\n"),
+                                         ("pkglist.txt", b"com.foo\n"),
+                                         ("com.foo/apk/base.apk", b"x"),
+                                         ("com.foo/data.tar", b"x")):
+                            ti = _tf.TarInfo(nm); ti.size = len(data)
+                            tar.addfile(ti, io.BytesIO(data))
+                    self.calls.append(list(args))
+                    pathlib.Path(args[-1]).write_bytes(buf.getvalue())
+                    return 0, "", ""
+                return super().__call__(args, input_text, timeout)
+        with tempfile.TemporaryDirectory() as t:
+            r = _CapRunner()
+            ok = PV.capture_to_pc(Adb(runner=r), "newprof", "20260616", root=t, log=lambda m: None)
+            self.assertTrue(ok)
+            payload = pathlib.Path(t) / "newprof" / "golden_root_payload"
+            self.assertTrue((payload / "global.meta").exists())              # unpacked on the PC
+            self.assertTrue((payload / "com.foo" / "apk" / "base.apk").exists())
+            for c in r.calls:                                                # no DIRECTORY is ever pulled
+                if "pull" in c:
+                    src = c[c.index("pull") + 1]
+                    self.assertTrue(src.endswith(".tar"), f"pulled a non-tar (directory?): {src}")
 
     def test_seed_default_manifest_populates_empty_placeholder(self):
         # A 'New profile' leaves a placeholder manifest with NO app lines; after the first capture the
@@ -3814,13 +3871,18 @@ class WindowsDriverKitTest(unittest.TestCase):
         # script dies with "missing terminator". cmd.exe (.bat) and the INF parser are ANSI too. So every
         # Windows-EXECUTED script must be pure ASCII. (README.md is documentation, not executed -> exempt.)
         # Regression for the bench that couldn't run setup-windows.bat: install-drivers.ps1 had 9 em-dashes.
-        for parts in (
-            ("scripts", "setup-windows.bat"),
-            ("scripts", "drivers", "install-drivers.ps1"),
-            ("scripts", "drivers", "fallback", "fastboot", "cas-fastboot.inf"),
-            ("scripts", "drivers", "fallback", "edl", "cas-edl-9008.inf"),
-        ):
-            p = os.path.join(self.repo, *parts)
+        # GLOB every Windows-executed script under scripts/ (.ps1/.bat/.inf) so a NEW one is auto-guarded
+        # without editing this list (install-edl-host-tools.ps1 was added this way).
+        scripts = os.path.join(self.repo, "scripts")
+        wanted = []
+        for dirpath, _dirs, files in os.walk(scripts):
+            for name in files:
+                if os.path.splitext(name)[1].lower() in (".ps1", ".bat", ".inf"):
+                    wanted.append(os.path.relpath(os.path.join(dirpath, name), self.repo))
+        self.assertTrue(wanted, "no Windows-consumed scripts found under scripts/ - glob is broken")
+        for rel in sorted(wanted):
+            parts = rel.split(os.sep)
+            p = os.path.join(self.repo, rel)
             with open(p, "rb") as f:
                 raw = f.read()
             bad, line, col = [], 1, 0

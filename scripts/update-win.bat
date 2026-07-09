@@ -5,7 +5,7 @@ REM
 REM  Run this on the bench whenever a new version has been pushed to GitHub:
 REM     1) git pull (latest source + device scripts)
 REM     2) build-win.bat  (regenerates dist\cas\cas-gui.exe + cas.exe)
-REM     3) link the runtime dirs into dist\cas\ as JUNCTIONS — no multi-GB copy
+REM     3) link the runtime dirs into dist\cas\ as JUNCTIONS - no multi-GB copy
 REM
 REM  The runtime dirs (profiles, retroarch-cores, ES-DE\downloaded_media,
 REM  provision\root\firmware, windows-kit, Apps) are NOT in git; they live in THIS
@@ -53,6 +53,6 @@ if exist "data\ES-DE\downloaded_media" (
 )
 
 echo(
-echo === DONE — updated + rebuilt.  Run:  dist\cas\cas-gui.exe ===
+echo === DONE - updated + rebuilt.  Run:  dist\cas\cas-gui.exe ===
 echo   (golden library = the folder set in Settings -^> Library folder; else local profiles\)
 endlocal

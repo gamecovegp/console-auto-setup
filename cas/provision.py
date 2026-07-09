@@ -253,6 +253,103 @@ def push_es_media(adb, log=print, media_src=None):
             pass
 
 
+def _push_dir(adb, push, src, dev_parent, log, arcname=None):
+    """Move a PC DIRECTORY to `dev_parent` on the device, landing at `dev_parent/<arcname|src.name>`.
+
+    NEVER `adb push <dir>`: on Windows adb.exe reports success but transfers 0 files for a DIRECTORY
+    (single-FILE pushes are fine — see adb._local). That silently produced an empty payload and the
+    "no APK in payload" restore failure on the Windows bench even though Linux pushed the same profile
+    cleanly. So we mirror push_es_media: pack the dir into ONE stored tar with stdlib tarfile (no PC-side
+    `tar` binary needed — Windows/macOS/Linux alike), push that single file (reliable everywhere), and
+    unpack it on the device with toybox `tar` (confirmed by a CAS_XOK stdout sentinel, since adb shell's
+    exit code isn't reliable across devices). Returns True on success. `push` is the caller's retrying
+    push closure so the archive transfer still gets retries + cancel handling."""
+    src = pathlib.Path(src)
+    arc = arcname or src.name
+    # Stage the temp tar on the SAME volume as the source (space guaranteed); fall back to the system
+    # temp dir if the source tree is read-only. Stored (no compression): the payload is already tars/APKs.
+    tdir = str(src.parent) if os.access(src.parent, os.W_OK) else None
+    try:
+        fd, tmp = tempfile.mkstemp(prefix="cas_xfer_", suffix=".tar", dir=tdir)
+        os.close(fd)
+    except OSError as e:
+        log(f"cannot stage transfer archive for {arc}: {e} — aborting.")
+        return False
+    tmp = pathlib.Path(tmp)
+    dev_tar = f"{dev_parent}/_cas_xfer.tar"
+    try:
+        try:
+            with tarfile.open(tmp, "w") as tar:
+                tar.add(str(src), arcname=arc)
+        except OSError as e:
+            log(f"could not pack {arc}: {e} — aborting.")
+            return False
+        if not push(tmp, dev_tar):
+            return False                                       # push() already logged WHY + retried
+        # Unpack into dev_parent, then remove the on-device archive regardless of outcome.
+        rc, out, _ = adb.shell(f"cd {dev_parent} && tar -xf {dev_tar} && echo CAS_XOK")
+        adb.shell(f"rm -f {dev_tar}")
+        if rc == 0 and "CAS_XOK" in out:
+            return True
+        log(f"on-device unpack of {arc} failed (rc={rc}) — aborting "
+            "(a partial payload would ship a broken clone).")
+        return False
+    finally:
+        try:
+            tmp.unlink()                                       # never leave the PC-side archive behind
+        except OSError:
+            pass
+
+
+def _pull_dir(adb, dev_dir, pc_dir, log):
+    """Pull a DEVICE directory tree to `pc_dir` on the PC as ONE tar — the mirror of _push_dir, so Save is
+    OS-independent too. A plain `adb pull <dir>` can silently drop files on Windows the same way
+    `adb push <dir>` does, which would let a Windows bench write an INCOMPLETE golden (and the metas that
+    survive would pass the completeness check). So we pack the tree on the device with toybox `tar` — as
+    root, since the capture output is root-owned, then world-read the archive so the shell-side pull can
+    fetch it — pull that SINGLE file (reliable on every OS, with the usual '[ NN%]' progress), and unpack
+    it on the PC with stdlib tarfile (no PC-side `tar` binary needed). `pc_dir` ends up holding the tree's
+    CONTENTS. Returns True on success; removes the device-side archive on every path."""
+    dev_tar = f"{dev_dir}.tar"
+    # Pack as root (reads every file regardless of mode); chmod 644 so the shell `adb pull` can read it.
+    # Sentinel-confirmed (adb shell/su exit codes aren't reliable across devices — same as _push_dir).
+    rc, out, _ = adb.su(f"cd {dev_dir} && tar -cf {dev_tar} . && chmod 644 {dev_tar} && echo CAS_TOK")
+    if not (rc == 0 and "CAS_TOK" in out):
+        log(f"on-device pack of {dev_dir} failed (rc={rc}) — aborting.")
+        adb.su(f"rm -f {dev_tar}")
+        return False
+    total_kb = 0                                                # for the '[ NN%]' pull bar
+    rc_du, out_du, _ = adb.su(f"du -sk {dev_tar}", timeout=120)
+    if rc_du == 0:
+        try:
+            total_kb = int(out_du.split()[0])
+        except (ValueError, IndexError):
+            total_kb = 0
+    pc_dir = pathlib.Path(pc_dir)
+    pc_dir.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix="cas_pull_", suffix=".tar", dir=str(pc_dir.parent))
+    os.close(fd)
+    tmp = pathlib.Path(tmp)
+    try:
+        ok = adb.pull_with_progress(dev_tar, tmp, total_kb, log)  # ONE file, not a tree
+        adb.su(f"rm -f {dev_tar}")
+        if not ok:
+            log("pull of the payload archive failed — aborting.")
+            return False
+        try:
+            with tarfile.open(str(tmp), "r") as tar:
+                tar.extractall(str(pc_dir))
+        except (OSError, tarfile.TarError) as e:
+            log(f"could not unpack the pulled payload ({e}) — aborting (a partial golden is unsafe).")
+            return False
+        return True
+    finally:
+        try:
+            tmp.unlink()                                       # never leave the PC-side archive behind
+        except OSError:
+            pass
+
+
 def install_companion(adb, log=print, apk_src=None):
     """Install the GameCove Companion app from the PC (adb install pushes the apk off the PC filesystem,
     never the SD), so every provisioned unit ships with the current build. Shared across all units — a PC
@@ -435,18 +532,20 @@ def provision(adb, profile, log=print, dry_push=False, es_media_src=None):
                 "(a partial push would ship a broken clone).")
             return False
 
+        # DIRECTORIES go over as a tar (adb push <dir> lands 0 files on Windows — see _push_dir); single
+        # FILES below push directly (single-file pushes are reliable everywhere).
         for i, pkg in enumerate(pay_pkgs, 1):              # only the payload (captured) app modules
             log(f"pushing module {i}/{len(pay_pkgs)}: {pkg}")
-            if not push(pay / pkg, f"{DEV}/payload/"):
+            if not _push_dir(adb, push, pay / pkg, f"{DEV}/payload", log):
                 return False
         for f in ("global.meta", "pkglist.txt", "urigrants.xml"):
             if (pay / f).exists() and not push(pay / f, f"{DEV}/payload/"):
                 return False
-        if (pay / "settings").exists() and not push(pay / "settings", f"{DEV}/payload/"):
+        if (pay / "settings").is_dir() and not _push_dir(adb, push, pay / "settings", f"{DEV}/payload", log):
             return False
-        if (pay / "homescreen").exists() and not push(pay / "homescreen", f"{DEV}/payload/"):
+        if (pay / "homescreen").is_dir() and not _push_dir(adb, push, pay / "homescreen", f"{DEV}/payload", log):
             return False                                   # launcher layout + wallpaper + widget map (optional)
-        if (pay / "gamelauncher").exists() and not push(pay / "gamelauncher", f"{DEV}/payload/"):
+        if (pay / "gamelauncher").is_dir() and not _push_dir(adb, push, pay / "gamelauncher", f"{DEV}/payload", log):
             return False                                   # game-frontend emulator picks (DataStore), optional
         for pkg in pay_pkgs:                                # internal dirs for included PAYLOAD apps only
             d = P.internal_for(pkg)
@@ -472,7 +571,7 @@ def provision(adb, profile, log=print, dry_push=False, es_media_src=None):
             return False
         if push_cores:                                     # the full curated core set, FROM THE PC
             log(f"pushing RetroArch cores from PC ({sum(1 for _ in CORES_SRC.glob('*.so'))} cores)...")
-            if not push(CORES_SRC, f"{DEV}/cores"):
+            if not _push_dir(adb, push, CORES_SRC, DEV, log, arcname="cores"):  # -> {DEV}/cores/*.so
                 return False
 
     cores_env = f"CAS_CORES={DEV}/cores " if (push_cores and not dry_push) else ""
@@ -737,19 +836,11 @@ def capture_to_pc(adb, name, stamp, root="profiles", log=print, dry_pull=False):
         incoming = pdir / ".incoming"
         if incoming.exists():
             shutil.rmtree(incoming, ignore_errors=True)
-        # Size the payload on the device so the pull can show a REAL % bar + transfer rate. adb's own
-        # '[ NN%]' only renders to a TTY; piped (how we run it) the pull is silent for minutes and the UI
-        # looks frozen — so we poll the bytes landing on the PC against this total instead.
-        total_kb = 0
-        rc_du, out_du, _ = adb.su(f"du -sk {TMPCAP}", timeout=120)
-        if rc_du == 0:
-            try:
-                total_kb = int(out_du.split()[0])
-            except (ValueError, IndexError):
-                total_kb = 0
-        size_hint = f"~{total_kb // 1024} MB " if total_kb else ""
-        log(f"pulling captured {size_hint}payload to the PC — a multi-GB golden can take several minutes...")
-        if not adb.pull_with_progress(TMPCAP, incoming, total_kb, log):  # synthetic '[ NN%]' -> progress bar
+        # Pull as ONE archive, never `adb pull <dir>`: a directory pull can silently drop files on Windows
+        # (mirror of the push bug) and quietly write an incomplete golden. _pull_dir packs on-device, pulls
+        # a single file (with the '[ NN%]' progress bar), and unpacks on the PC — identical on every OS.
+        log("pulling the captured payload to the PC (one archive — a multi-GB golden can take several minutes)...")
+        if not _pull_dir(adb, TMPCAP, incoming, log):
             log("pull failed — existing profile untouched.")
             shutil.rmtree(incoming, ignore_errors=True)
             return False
@@ -910,8 +1001,9 @@ def flasher_for_firmware(firmware, fastboot, slot, version=None, runner=None, on
     if os.name == "nt" and not (str(q).lower().endswith(".exe") and str(f).lower().endswith(".exe")):
         return None, ("EDL flashing on Windows needs the Windows host tools QSaharaServer.exe + "
                       "fh_loader.exe (from Qualcomm QPST/QFIL) in the firmware payload — this build ships "
-                      "only the Linux binaries, which Windows can't execute. Drop both .exe beside them "
-                      "and retry (the 9008 driver/COM port are fine).")
+                      "only the Linux binaries, which Windows can't execute. Fix: install QPST, then run "
+                      "scripts/install-edl-host-tools.ps1 (fans both .exe into every EDL payload), or drop "
+                      "both .exe beside the Linux tools by hand and retry (the 9008 driver/COM port are fine).")
     edl = Edl(q, f, p, runner=(runner or subprocess_runner), cancel=getattr(fastboot, "cancel", None))
     return edl_flasher(edl, geom, on_critical=on_critical), None
 
