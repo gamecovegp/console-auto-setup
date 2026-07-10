@@ -764,22 +764,46 @@ class Edl:
                     "retry, or set up access once with: bash scripts/setup-linux.sh (installs the udev rule).")
             return False
 
-        log(f"EDL: Firehose writing {label}...")
-        rc, out, err = self.runner(launch + [fh, "--port=" + port, "--sendxml=" + xml.name,
-                                    "--search_path=" + str(workdir), "--memoryname=" + self.memoryname,
-                                    "--noprompt", "--showpercentagecomplete"], **self._runner_kw())
-        blob = (out or "") + (err or "")
-        if "All Finished Successfully" not in blob and "{SUCCESS}" not in blob:
-            said = _tool_tail(blob) or "(the tool printed nothing)"
-            log(f"EDL: Firehose write of {label} FAILED (fh_loader exit {rc}). It said: {said}")
-            return False
-        return True
+        # Loading the Firehose programmer makes the unit RE-ENUMERATE on USB: the 9008 Sahara port detaches
+        # and the Firehose port attaches — usually the same COM, sometimes a NEW number, and briefly absent
+        # in between. fh_loader launched into that window opened a handle to a port the device had just left,
+        # so every ReadFile failed ("Could not read from COMn ... your device is probably *not* on this
+        # port") until it gave up ~2 min later. So before EACH try, RE-ACQUIRE the present port (find_port =
+        # SERIALCOMM, no open), and RETRY the port-lost class of failure a few times: a first try that raced
+        # the re-enumerate then succeeds once it settles. A full-partition write is idempotent -> safe to
+        # retry. Non-transient failures (a real write/geometry error) are NOT retried.
+        PORT_LOST = ("not on this port", "could not read", "readfile", "could not open", "failed to open")
+        rc, blob = 1, ""
+        for attempt in range(3):
+            if self.cancel is not None and self.cancel.is_set():
+                return False
+            fw_port = self.find_port(timeout=30,
+                                     on_tick=lambda s: log(f"  …waiting for the Firehose port ({s}s)")) or port
+            if fw_port != port:
+                log(f"EDL: Firehose port re-enumerated {port} -> {fw_port}")
+            log(f"EDL: Firehose writing {label}..." + (f" (attempt {attempt + 1}/3)" if attempt else ""))
+            rc, out, err = self.runner(self._launcher(fw_port) + [fh, "--port=" + fw_port,
+                                       "--sendxml=" + xml.name, "--search_path=" + str(workdir),
+                                       "--memoryname=" + self.memoryname, "--noprompt",
+                                       "--showpercentagecomplete"], **self._runner_kw())
+            blob = (out or "") + (err or "")
+            if "All Finished Successfully" in blob or "{SUCCESS}" in blob:
+                return True
+            if not any(s in blob.lower() for s in PORT_LOST):   # a non-transient failure won't recover
+                break
+            log("EDL: fh_loader lost the port (re-enumerate race) — re-acquiring and retrying...")
+            time.sleep(3)
+        said = _tool_tail(blob) or "(the tool printed nothing)"
+        log(f"EDL: Firehose write of {label} FAILED (fh_loader exit {rc}). It said: {said}")
+        return False
 
     def reset(self, port, workdir):
         """Reboot the device out of EDL (Firehose <power reset>). `workdir` is a local dir to stage fh_loader
         (the library drive may be noexec — CIFS or a removable FAT/exFAT drive). Best-effort — used to
-        recover a unit so a failed flash never strands it."""
+        recover a unit so a failed flash never strands it. Re-acquire the port first: the unit may have
+        re-enumerated to a different COM during the flash, so the pre-flash port can be stale."""
         fh = self._staged_exec(self.fh, workdir)
+        port = self.find_port(timeout=15) or port
         try:
             return self.runner(self._launcher(port) + [fh, "--port=" + port, "--reset", "--noprompt"])[0] == 0
         except OSError:

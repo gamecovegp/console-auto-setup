@@ -2257,6 +2257,8 @@ class TestEdl(unittest.TestCase):
             img = pathlib.Path(td) / "patched.img"; img.write_bytes(b"x" * 32)
             wd = pathlib.Path(td) / "wd"
             edl = Edl("/x/QSaharaServer", "/x/fh_loader", "/x/prog.elf", runner=runner)
+            # re-acquire step: pin the port so it doesn't poll the real (empty) /dev/ttyUSB* for 30s
+            edl.find_port = lambda timeout=60, on_tick=None, pattern="/dev/ttyUSB*": "/dev/ttyUSB0"
             self.assertTrue(edl.flash_partition("/dev/ttyUSB0", "init_boot_b", str(img), self.GEOM, str(wd)))
             xml = (wd / "rawprogram_init_boot_b.xml").read_text()
             self.assertIn('start_sector="16449552"', xml)
@@ -2264,6 +2266,24 @@ class TestEdl(unittest.TestCase):
             fh = [c for c in calls if c[0].endswith("fh_loader")][0]
             self.assertIn("--port=/dev/ttyUSB0", fh)
             self.assertIn("--memoryname=eMMC", fh)
+
+    def test_flash_partition_reacquires_firehose_port_after_sahara(self):
+        # Regression (MANGMI AIR X bench): loading the Firehose programmer re-enumerates the unit on USB, so
+        # the port can COME BACK AS A DIFFERENT COM. fh_loader must target the RE-ACQUIRED port, not the one
+        # Sahara used - else it opens a dead handle and every ReadFile fails ("device is probably not on
+        # this port"). Sahara runs on COM3; find_port then reports COM4; fh_loader must use COM4.
+        from cas.adb import Edl
+        runner, calls = self._runner()
+        with tempfile.TemporaryDirectory() as td:
+            img = pathlib.Path(td) / "patched.img"; img.write_bytes(b"x" * 32)
+            wd = pathlib.Path(td) / "wd"
+            edl = Edl("/x/QSaharaServer", "/x/fh_loader", "/x/prog.elf", runner=runner)
+            edl.find_port = lambda timeout=60, on_tick=None, pattern="/dev/ttyUSB*": r"\\.\COM4"
+            self.assertTrue(edl.flash_partition(r"\\.\COM3", "init_boot_a", str(img), self.GEOM, str(wd)))
+            sahara = [c for c in calls if c[0].endswith("QSaharaServer")][0]
+            fh = [c for c in calls if c[0].endswith("fh_loader")][0]
+            self.assertIn("-p", sahara); self.assertIn(r"\\.\COM3", sahara)   # Sahara used the original port
+            self.assertIn(r"--port=\\.\COM4", fh)                             # fh_loader used the re-acquired one
 
     def test_flash_partition_fails_when_sahara_cannot_connect(self):
         from cas.adb import Edl
