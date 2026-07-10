@@ -689,7 +689,14 @@ class Edl:
 
     @staticmethod
     def rawprogram_xml(label, image_name, geometry):
-        """A one-entry Firehose rawprogram writing `image_name` to `label` at the firmware's geometry."""
+        """A one-entry Firehose rawprogram writing `image_name` to `label` at the firmware's geometry,
+        FOLLOWED BY a <power value="reset"> so the programmer reboots the unit out of EDL as its final
+        action. Without a terminating tag fh_loader has nothing to do after the last data block: it hangs
+        on a post-write read (the unit re-enumerates once the programmer finishes) — which froze the flash
+        at 100% AND left the unit stuck on the black EDL screen (no auto-reboot). fh_loader runs tags in
+        order <configure>,<erase>,…,<power>, so the reset fires only after the write; the device advertises
+        'power' in its Firehose <configure> capabilities, so it is supported. A small DelayInSeconds lets
+        fh_loader read the ack and print 'All Finished Successfully' before the link drops."""
         return (
             '<?xml version="1.0" ?>\n<data>\n'
             f'<program SECTOR_SIZE_IN_BYTES="{geometry["sector_size"]}" file_sector_offset="0" '
@@ -697,6 +704,7 @@ class Edl:
             f'partofsingleimage="false" physical_partition_number="{geometry["partition"]}" '
             f'readbackverify="false" size_in_KB="0.0" sparse="false" '
             f'start_byte_hex="{geometry["start_byte_hex"]}" start_sector="{geometry["start_sector"]}" />\n'
+            '<power value="reset" DelayInSeconds="3" />\n'
             '</data>\n')
 
     def _staged_exec(self, src, workdir):
@@ -785,9 +793,13 @@ class Edl:
             rc, out, err = self.runner(self._launcher(fw_port) + [fh, "--port=" + fw_port,
                                        "--sendxml=" + xml.name, "--search_path=" + str(workdir),
                                        "--memoryname=" + self.memoryname, "--noprompt",
-                                       "--showpercentagecomplete"], **self._runner_kw())
+                                       "--showpercentagecomplete"], timeout=240, **self._runner_kw())
             blob = (out or "") + (err or "")
-            if "All Finished Successfully" in blob or "{SUCCESS}" in blob:
+            # "files transferred 100" covers the case where the partition is fully written (100%) but the
+            # post-write link drops before fh_loader can print "All Finished Successfully" — the write DID
+            # land, so don't misreport it as a failure.
+            if ("All Finished Successfully" in blob or "{SUCCESS}" in blob
+                    or "files transferred 100" in blob):
                 return True
             if not any(s in blob.lower() for s in PORT_LOST):   # a non-transient failure won't recover
                 break
@@ -801,9 +813,11 @@ class Edl:
         """Reboot the device out of EDL (Firehose <power reset>). `workdir` is a local dir to stage fh_loader
         (the library drive may be noexec — CIFS or a removable FAT/exFAT drive). Best-effort — used to
         recover a unit so a failed flash never strands it. Re-acquire the port first: the unit may have
-        re-enumerated to a different COM during the flash, so the pre-flash port can be stale."""
+        re-enumerated to a different COM during the flash, so the pre-flash port can be stale. Short
+        timeout — a SUCCESSFUL write already power-reset the unit (so the port is gone and there's nothing
+        to reset), while a FAILED write leaves it present in EDL and found immediately."""
         fh = self._staged_exec(self.fh, workdir)
-        port = self.find_port(timeout=15) or port
+        port = self.find_port(timeout=8) or port
         try:
             return self.runner(self._launcher(port) + [fh, "--port=" + port, "--reset", "--noprompt"])[0] == 0
         except OSError:

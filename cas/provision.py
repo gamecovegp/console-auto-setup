@@ -968,9 +968,12 @@ def edl_flasher(edl, geometry, wait=True, on_critical=None):
             finally:
                 if on_critical:
                     on_critical(False)
-            # ALWAYS reboot out of EDL — even on failure — so a failed flash never strands the unit on a
-            # black EDL screen (init_boot is untouched unless the Firehose write actually started).
-            if not edl.reset(port, td):
+            # A SUCCESSFUL write already reboots the unit out of EDL via the <power value="reset"> in the
+            # rawprogram. reset() still runs as a safety net (a hung/killed write may not have reached that
+            # tag) so a failed flash never strands the unit on a black EDL screen — but only warn when it is
+            # genuinely stranded: the flash FAILED and the fallback reset couldn't reboot it either.
+            rebooted = edl.reset(port, td)
+            if not rebooted and not ok:
                 log("  …could not auto-reset out of EDL; hold power ~15s if the screen stays black.")
             return ok
     return _flash

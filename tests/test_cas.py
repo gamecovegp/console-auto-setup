@@ -2249,6 +2249,7 @@ class TestEdl(unittest.TestCase):
         self.assertIn('filename="patched.img"', xml)
         self.assertIn('start_sector="16449552"', xml)
         self.assertIn('physical_partition_number="0"', xml)
+        self.assertIn('<power value="reset"', xml)   # reboots the unit out of EDL as fh_loader's final act
 
     def test_flash_partition_success_targets_real_args(self):
         from cas.adb import Edl
@@ -2284,6 +2285,23 @@ class TestEdl(unittest.TestCase):
             fh = [c for c in calls if c[0].endswith("fh_loader")][0]
             self.assertIn("-p", sahara); self.assertIn(r"\\.\COM3", sahara)   # Sahara used the original port
             self.assertIn(r"--port=\\.\COM4", fh)                             # fh_loader used the re-acquired one
+
+    def test_flash_partition_succeeds_on_full_transfer_without_finished_banner(self):
+        # The MANGMI AIR X write hit 100% ("{percent files transferred 100.00%}") but the USB link dropped
+        # as the unit re-enumerated, before fh_loader could print "All Finished Successfully" (and it exited
+        # nonzero). The partition IS written, so this must count as success, not a false failure.
+        from cas.adb import Edl
+        def runner(args, input_text=None, timeout=900):
+            if args[0].endswith("QSaharaServer"):
+                return 0, "Sahara protocol completed\n", ""
+            if args[0].endswith("fh_loader"):
+                return 1, "{percent files transferred 100.00%}\n", ""   # 100%, but no banner + nonzero rc
+            return 0, "", ""
+        with tempfile.TemporaryDirectory() as td:
+            img = pathlib.Path(td) / "p.img"; img.write_bytes(b"x")
+            edl = Edl("/x/QSaharaServer", "/x/fh_loader", "/x/prog.elf", runner=runner)
+            edl.find_port = lambda timeout=60, on_tick=None, pattern="/dev/ttyUSB*": "/dev/ttyUSB0"
+            self.assertTrue(edl.flash_partition("/dev/ttyUSB0", "init_boot_a", str(img), self.GEOM, str(td)))
 
     def test_flash_partition_fails_when_sahara_cannot_connect(self):
         from cas.adb import Edl
