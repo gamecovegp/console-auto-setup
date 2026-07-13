@@ -672,7 +672,7 @@ class App:
             self.chain_cbs[key] = cb
         self.run_btn = ttk.Button(row2, text="▶ Run", command=self.run_chain)
         self.run_btn.pack(side="left", padx=8, pady=4)
-        _tip(self.run_btn, "Run the ticked actions in order (Root → Download → Lock, or Root → Save), per device, in parallel.")
+        _tip(self.run_btn, "Run the ticked actions in order (Root → Download → Warm up → Lock, or Root → Save), per device, in parallel.")
         self.btns = list(self.chain_cbs.values()) + [self.run_btn]   # disabled together while busy
         # Cancel: aborts the running op. NOT in self.btns (those get disabled while busy) — it's the one
         # control that must stay live during an operation. Enabled only while busy.
@@ -1400,7 +1400,7 @@ class App:
 
     def _on_batch_toggle(self):
         if self.batch_var.get():
-            self.status_var.set("Apply-to-ALL ON — Root, Download & Lock run on EVERY connected device IN "
+            self.status_var.set("Apply-to-ALL ON — Root, Download, Warm up & Lock run on EVERY connected device IN "
                                 "PARALLEL, each with its own assigned profile. Only Save is one device.")
         else:
             self.status_var.set("Selection mode — actions run on the device row(s) you select "
@@ -1939,7 +1939,7 @@ class App:
         return {s: ("ok", "") if s in sset else ("fail", "") for s in serials}
 
     def seal_selected(self):
-        """Operator-only: retail-SEAL the one selected unit on demand (the single-device slice of ③ Lock),
+        """Operator-only: retail-SEAL the one selected unit on demand (the single-device slice of ④ Lock),
         paired with 'Release selected unit'. Runs the full seal via PV.seal_all([one device]) so firmware /
         EDL flasher / model-match brick-guard / golden-guard all behave exactly as the batch Lock."""
         serial = self._selected_serial()
@@ -1951,7 +1951,7 @@ class App:
                 f"Retail-seal {serial}?\n\n"
                 "This un-roots the unit (flashes stock init_boot, ~2-3 min), hides Developer options, "
                 "and disables USB debugging — adb WILL disconnect. The golden is skipped.\n\n"
-                "Use for a one-off / re-seal outside the ③ Lock batch. Assumes the unit is VERIFIED."):
+                "Use for a one-off / re-seal outside the ④ Lock batch. Assumes the unit is VERIFIED."):
             return
         pm, force = self._profile_map([serial])
         def work():
