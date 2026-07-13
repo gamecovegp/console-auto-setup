@@ -65,22 +65,36 @@ sitting inside an emulator.
 
 Devices run in parallel via the existing `_each_device` fan-out; apps run sequentially within a device.
 
-### Which apps
+### Which apps, and in what order
 
-The app set is recomputed **PC-side from the profile manifest**, not read off the device — Download
-deletes the device manifest when it finishes (`provision.py:617`), so there is nothing to read back.
-`_split_manifest_apps()` (`provision.py:96`) already yields exactly what Download installs:
+The app set comes **PC-side from the profile manifest** — `profile.pkgs()` — not from the device.
+Download deletes the device manifest when it finishes (`provision.py:617`), so there is nothing to read
+back off the unit.
 
-    payload apps (captured in the golden) + managed apps (APK axis on, from the store) + Companion
+`profile.pkgs()` is used rather than `_split_manifest_apps()` because it is the *superset* that warm-up
+actually wants: payload apps, store-managed apps, Companion, **and** config-only apps (APK axis off,
+config axis on). A config-only app was already on the unit but just had new settings restored into it —
+it needs the warm-up launch as much as a freshly installed one does.
 
 Two filters apply:
 
-- **Skip-list** — `warmup_skip_pkgs` in `cas-config.json`. Default:
-  `com.topjohnwu.magisk`, `com.gamecove.gamecove_companion`, `org.es_de.frontend`,
-  `com.handheld.launcher`. These gain nothing from a launch (Magisk is a host tool; the Companion is
-  already nudged by the lockdown path at `provision.py:409`; the frontends are the thing being warmed
-  *for*). Editing the list in config is how SteamLink gets added if its 3 seconds are not worth paying.
+- **Skip-list** — `warmup_skip_pkgs` in `cas-config.json`. Default: **`com.topjohnwu.magisk` only.**
+  Magisk is a host tool, not a shipped app, and launching it does nothing for the unit. **Everything
+  else warms** — Companion, SteamLink, every emulator. A blanket "launch it once" is the cheapest rule
+  to reason about, and at 3s an app the cost of an unnecessary launch is 3 seconds. The config key is
+  the escape hatch if a specific app turns out to misbehave on launch.
 - **Presence** — the `pm path` guard in step 1 above.
+
+**The frontends are warmed too, and they go last.** `WARMUP_FRONTENDS = ("org.es_de.frontend",
+"com.handheld.launcher")` is appended to the end of the launch order, so each frontend opens *after*
+every emulator has been initialized and can index against a warm set. They are handled as an explicit
+package list rather than through the manifest because `com.handheld.launcher` is a **system** app on
+MANGMI units — `user_pkgs()` (`lib-root.sh:104`) lists only `-3` packages, so the launcher never appears
+in a golden's manifest and would otherwise never be warmed. A frontend already present in the manifest
+(ES-DE often is) is launched **once**, in the frontend slot at the end, not twice.
+
+Final per-device order: `[manifest apps, minus skip-list, minus frontends] + [frontends present on the
+unit]`.
 
 ### Failure behavior
 
@@ -108,7 +122,7 @@ Two new keys in `cas-config.json`, both with getters in `cas/config.py` followin
 | Key | Default | Meaning |
 |---|---|---|
 | `warmup_dwell_s` | `3` | Seconds to leave each app in the foreground before launching the next. |
-| `warmup_skip_pkgs` | see above | Packages the step never launches. A stored list overrides the default; an empty list means "skip nothing". |
+| `warmup_skip_pkgs` | `["com.topjohnwu.magisk"]` | Packages the step never launches. A stored list overrides the default; an empty list means "skip nothing". |
 
 **Known trade-off of a fixed dwell:** an app whose scan takes longer than the dwell keeps scanning in the
 background (we do not kill it), so the dwell mainly controls *how long we watch*, not how long it gets.
