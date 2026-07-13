@@ -6,6 +6,7 @@ import sys
 import tarfile
 import tempfile
 import threading
+import time
 import unittest
 import pathlib
 from unittest.mock import patch
@@ -15,6 +16,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from cas.adb import Adb, Fastboot, list_devices
 from cas import profiles as P
 from cas import provision as PV
+from cas import warnings as WARN
+from cas import uiauto as UI
 
 
 class FakeRunner:
@@ -1264,6 +1267,18 @@ class TestConfig(unittest.TestCase):
             self.assertEqual(C.warmup_skip_pkgs(), frozenset({"com.foo", "com.bar"}))
             C.save_config({"warmup_skip_pkgs": []})            # stored [] -> skip NOTHING
             self.assertEqual(C.warmup_skip_pkgs(), frozenset())
+
+    def test_warmup_settle_default_and_override(self):
+        from cas import config as C
+        with tempfile.TemporaryDirectory() as t:
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cas-config.json")
+            self.assertEqual(C.warmup_settle_s(), 30.0)        # key absent -> default
+            C.save_config({"warmup_settle_s": 45})
+            self.assertEqual(C.warmup_settle_s(), 45.0)        # int is coerced to float
+            C.save_config({"warmup_settle_s": "bogus"})        # unparseable -> default, never crash
+            self.assertEqual(C.warmup_settle_s(), 30.0)
+            C.save_config({"warmup_settle_s": -5})             # negative is clamped to 0
+            self.assertEqual(C.warmup_settle_s(), 0.0)
 
 
 class TestReleaseToken(unittest.TestCase):
@@ -2801,7 +2816,22 @@ class TestCancel(unittest.TestCase):
 
 
 class TestWarmup(unittest.TestCase):
-    """③ Warm up — launch every manifest app once (frontends last), never force-stop, never block a seal."""
+    """③ Warm up — launch every manifest app once (frontends last); a settle+sweep at the end keeps
+    them out of recents; a pass that warms NOTHING fails; never block a seal on a partial miss."""
+
+    def setUp(self):
+        # F8: isolate CAS_CONFIG so a bench's real cas-config.json (e.g. a custom warmup_skip_pkgs) can
+        # never leak into a case that doesn't pass skip=/dwell=/settle= explicitly and turn it red.
+        self._saved_cas_config = os.environ.get("CAS_CONFIG")
+        self._tmp_cfg = tempfile.TemporaryDirectory()
+        os.environ["CAS_CONFIG"] = str(pathlib.Path(self._tmp_cfg.name) / "cas-config.json")
+
+    def tearDown(self):
+        self._tmp_cfg.cleanup()
+        if self._saved_cas_config is None:
+            os.environ.pop("CAS_CONFIG", None)
+        else:
+            os.environ["CAS_CONFIG"] = self._saved_cas_config
 
     class WarmRunner(FakeRunner):
         """FakeRunner that records launches/foreground polls. `absent` = pkgs `pm path` won't resolve;
@@ -2812,6 +2842,7 @@ class TestWarmup(unittest.TestCase):
             self.absent, self.never_fg = set(absent), set(never_fg)
             self.launched = []          # pkgs launched, in order
             self.fg = ""                # the pkg currently "resumed" on the fake device
+            self.fg_timeouts = []       # each `timeout` passed alongside a topResumedActivity dumpsys call
 
         def __call__(self, args, input_text=None, timeout=900):
             if "shell" in args:
@@ -2828,15 +2859,26 @@ class TestWarmup(unittest.TestCase):
                     return 0, "Events injected: 1\n", ""
                 if "topResumedActivity" in tail:
                     self.calls.append(list(args))
+                    self.fg_timeouts.append(timeout)
                     return 0, (f"topResumedActivity=ActivityRecord{{u0 {self.fg}/.Main}}\n"
                                if self.fg else "topResumedActivity=null\n"), ""
             return super().__call__(args, input_text=input_text, timeout=timeout)
 
     def _warm(self, prof, runner, **kw):
-        """Run warmup() with a zero dwell so tests never actually sleep."""
+        """Run warmup() with a zero dwell/settle by default so tests never actually sleep real seconds;
+        a test can override either via kwargs."""
         logs = []
-        ok = PV.warmup(Adb(runner=runner), prof, log=logs.append, dwell=0, **kw)
+        kw.setdefault("dwell", 0)
+        kw.setdefault("settle", 0)
+        ok = PV.warmup(Adb(runner=runner), prof, log=logs.append, **kw)
         return ok, logs
+
+    def test_hermetic_config_isolation(self):
+        """F8: setUp points CAS_CONFIG at a fresh temp file, so config getters here read DEFAULTS —
+        never a bench's real cas-config.json (which could carry a custom skip-list)."""
+        from cas import config as C
+        self.assertEqual(C.load_config(), {})
+        self.assertEqual(C.warmup_skip_pkgs(), frozenset({"com.topjohnwu.magisk"}))
 
     def test_launches_every_manifest_app_frontends_last(self):
         with tempfile.TemporaryDirectory() as t:
@@ -2849,12 +2891,76 @@ class TestWarmup(unittest.TestCase):
             self.assertEqual(r.launched, ["org.ppsspp.ppsspp", "org.citra.emu",
                                           "org.es_de.frontend", "com.handheld.launcher"])
 
-    def test_never_force_stops(self):
-        """A force-stop after a 3s dwell would kill a scan mid-flight — the bug this step exists to fix."""
+    def test_no_force_stop_interleaved_during_the_pass(self):
+        """A force-stop right after a dwell would kill a scan mid-flight — the bug this step exists to
+        fix. The sweep (F3) does force-stop every launched app, but only ONCE at the very end, after the
+        settle — never interleaved between individual app launches."""
         with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["org.ppsspp.ppsspp", "org.citra.emu"])
             r = self.WarmRunner()
-            self._warm(make_profile(t, apps=["org.ppsspp.ppsspp"]), r)
-            self.assertNotIn("force-stop", "\n".join(" ".join(c) for c in r.calls))
+            self._warm(prof, r)
+            cmds = r.cmds()
+            launch_idxs = [i for i, c in enumerate(cmds) if "monkey -p" in c]
+            fs_idxs = [i for i, c in enumerate(cmds) if "force-stop" in c]
+            self.assertTrue(launch_idxs)
+            self.assertTrue(all(i > launch_idxs[-1] for i in fs_idxs))
+
+    def test_sweep_force_stops_every_launched_app_after_settle_then_home(self):
+        """F3: the pass ends with settle -> sweep -> home. Every app actually launched gets force-
+        stopped, in a block strictly after the last launch, and HOME is the very last call."""
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["org.ppsspp.ppsspp", "org.citra.emu"])
+            r = self.WarmRunner()
+            ok, _ = self._warm(prof, r)
+            self.assertTrue(ok)
+            cmds = r.cmds()
+            for pkg in r.launched:
+                self.assertTrue(any(f"force-stop {pkg}" in c for c in cmds),
+                                f"{pkg} was launched but never swept (force-stop)")
+            self.assertIn("android.intent.category.HOME", cmds[-1])
+
+    def test_settle_runs_before_the_sweep(self):
+        """F3/F7: the settle uses the cancel-aware sleep helper, and runs strictly before the sweep —
+        patch _cancel_sleep to record every duration it was asked to wait on."""
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["org.ppsspp.ppsspp"])
+            r = self.WarmRunner()
+            waited = []
+            def fake_sleep(cancel, seconds):
+                waited.append(seconds)
+                return True
+            with patch.object(PV, "_cancel_sleep", fake_sleep):
+                ok, _ = self._warm(prof, r, settle=17)
+            self.assertTrue(ok)
+            self.assertEqual(waited[-1], 17)          # the settle call is the LAST _cancel_sleep call
+
+    def test_cancel_during_settle_returns_false_and_skips_the_sweep(self):
+        """F7: a cancel that lands during the settle must stop the pass — the sweep (and its force-stop
+        calls) must never run."""
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["org.ppsspp.ppsspp"])
+            r = self.WarmRunner()
+            def fake_sleep(cancel, seconds):
+                return seconds != 999          # the settle call (seconds=999) reports "cancelled"
+            with patch.object(PV, "_cancel_sleep", fake_sleep):
+                ok, logs = self._warm(prof, r, settle=999)
+            self.assertFalse(ok)
+            self.assertNotIn("force-stop", "\n".join(r.cmds()))
+            self.assertIn("cancel", "\n".join(logs).lower())
+
+    def test_dwell_uses_the_cancel_aware_sleep_helper(self):
+        """F7: raising warmup_dwell_s (the design's own tuning lever) must not raise cancel latency by
+        the same amount — the per-app dwell goes through the cancel-aware helper too."""
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["org.ppsspp.ppsspp"])
+            r = self.WarmRunner()
+            waited = []
+            def fake_sleep(cancel, seconds):
+                waited.append(seconds)
+                return True
+            with patch.object(PV, "_cancel_sleep", fake_sleep):
+                self._warm(prof, r, dwell=7, settle=0)
+            self.assertIn(7, waited)
 
     def test_skip_list_pkg_is_never_launched(self):
         with tempfile.TemporaryDirectory() as t:
@@ -2885,6 +2991,37 @@ class TestWarmup(unittest.TestCase):
             self.assertIn("org.ppsspp.ppsspp", joined)
             self.assertIn("org.citra.emu", r.launched)            # the pass carried on to the next app
 
+    def test_substring_collision_does_not_falsely_match_foreground(self):
+        """F6: matching a raw substring (old `pkg in foreground(...)`) let org.ppsspp.ppsspp falsely
+        match a foreground of org.ppsspp.ppssppgold. The fix matches f'{pkg}/' instead."""
+        class CollisionRunner(self.WarmRunner):
+            def __call__(self, args, input_text=None, timeout=900):
+                if "shell" in args and args[-1].startswith("monkey -p org.ppsspp.ppsspp "):
+                    self.calls.append(list(args))
+                    self.launched.append("org.ppsspp.ppsspp")
+                    self.fg = "org.ppsspp.ppssppgold"    # look-alike package becomes the REAL foreground
+                    return 0, "Events injected: 1\n", ""
+                return super().__call__(args, input_text=input_text, timeout=timeout)
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["org.ppsspp.ppsspp"])
+            r = CollisionRunner()
+            with patch.object(PV, "WARMUP_FOREGROUND_TIMEOUT", 0.05):
+                ok, logs = self._warm(prof, r)
+            self.assertTrue(ok)                          # additive: a miss must not fail the whole pass
+            joined = "\n".join(logs)
+            self.assertIn("[warn]", joined)
+            self.assertIn("org.ppsspp.ppsspp", joined)    # correctly reported as a MISS, not a false [ok]
+
+    def test_foreground_poll_uses_a_bounded_timeout(self):
+        """F4: each dumpsys probe inside the wait loop must be bounded — an unbounded call would inherit
+        the runner's 900s default and could blow WARMUP_FOREGROUND_TIMEOUT by 60x on one wedge."""
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["org.ppsspp.ppsspp"])
+            r = self.WarmRunner()
+            self._warm(prof, r)
+            self.assertTrue(r.fg_timeouts)
+            self.assertTrue(all(tmo == PV.WARMUP_FOREGROUND_POLL_TIMEOUT for tmo in r.fg_timeouts))
+
     def test_pass_ends_at_home(self):
         with tempfile.TemporaryDirectory() as t:
             r = self.WarmRunner()
@@ -2897,17 +3034,127 @@ class TestWarmup(unittest.TestCase):
             r = self.WarmRunner()
             ev = threading.Event()
             ev.set()                                              # already cancelled -> launch nothing
-            ok = PV.warmup(Adb(runner=r, cancel=ev), prof, log=lambda m: None, dwell=0)
+            ok = PV.warmup(Adb(runner=r, cancel=ev), prof, log=lambda m: None, dwell=0, settle=0)
             self.assertFalse(ok)
             self.assertEqual(r.launched, [])
+
+    def test_refuses_on_the_golden_master(self):
+        """F5: ticking Warm up + 'Apply to ALL' with the golden on the bench must never open apps on it —
+        the golden is never sealed/scrubbed, so any damage rides the next ① Save into every future unit."""
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["org.ppsspp.ppsspp"])
+            r = self.WarmRunner(golden=True)
+            ok, logs = self._warm(prof, r)
+            self.assertFalse(ok)
+            self.assertEqual(r.launched, [])
+            self.assertTrue(any("REFUSING" in m and "golden" in m for m in logs))
+
+    def test_empty_resolved_app_set_fails_loudly(self):
+        """F1a (first form): manifest empty AND both frontends explicitly skipped -> the resolved order
+        is truly EMPTY. Must FAIL, not report ok over zero apps."""
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["org.ppsspp.ppsspp"])
+            r = self.WarmRunner()
+            ok, logs = self._warm(prof, r, skip=frozenset({"org.ppsspp.ppsspp", *PV.WARMUP_FRONTENDS}))
+            self.assertFalse(ok)
+            self.assertEqual(r.launched, [])
+            self.assertTrue(any("nothing to warm up" in m for m in logs))
+
+    def test_zero_apps_warmed_fails_even_with_a_nonempty_order(self):
+        """F1a (second form): the realistic library-unreachable case — the order is non-empty (the
+        frontends are always appended) but the unit was never provisioned, so EVERY app is absent and
+        warmed stays 0. Must FAIL, not report ok."""
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["org.ppsspp.ppsspp"])
+            r = self.WarmRunner(absent={"org.ppsspp.ppsspp", "org.es_de.frontend", "com.handheld.launcher"})
+            ok, logs = self._warm(prof, r)
+            self.assertFalse(ok)
+            self.assertEqual(r.launched, [])
+            self.assertTrue(any("warmed 0" in m for m in logs))
+
+    def test_homescreen_bundled_apps_are_warmed_too(self):
+        """F2: an app homescreen_install_missing() installed (its APK is NOT in the payload, so it's
+        never in the manifest) must still be warmed — the exact never-opened-emulator bug on the one
+        install path warm-up wouldn't otherwise cover."""
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["org.ppsspp.ppsspp"])
+            hs = prof.payload / "homescreen" / "apps" / "com.retroarch.aarch64"
+            hs.mkdir(parents=True)
+            (hs / "base.apk").write_text("x")
+            r = self.WarmRunner()
+            ok, _ = self._warm(prof, r)
+            self.assertTrue(ok)
+            self.assertIn("com.retroarch.aarch64", r.launched)
+            self.assertEqual(r.launched[-2:], ["org.es_de.frontend", "com.handheld.launcher"])
+
+    def test_missing_homescreen_apps_dir_is_not_a_crash(self):
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["org.ppsspp.ppsspp"])           # no homescreen/apps dir at all
+            r = self.WarmRunner()
+            ok, _ = self._warm(prof, r)
+            self.assertTrue(ok)
+            self.assertEqual(r.launched[0], "org.ppsspp.ppsspp")
+
+    def test_homescreen_app_already_in_manifest_is_not_duplicated(self):
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["org.ppsspp.ppsspp"])
+            hs = prof.payload / "homescreen" / "apps" / "org.ppsspp.ppsspp"
+            hs.mkdir(parents=True)
+            (hs / "base.apk").write_text("x")
+            r = self.WarmRunner()
+            ok, _ = self._warm(prof, r)
+            self.assertTrue(ok)
+            self.assertEqual(r.launched.count("org.ppsspp.ppsspp"), 1)
 
     def test_warmup_all_reports_ok_per_device(self):
         with tempfile.TemporaryDirectory() as t:
             prof = make_profile(t, apps=["org.ppsspp.ppsspp"])
             res = PV.warmup_all(lambda s: Adb(serial=s, runner=self.WarmRunner()),
                                 [("S1", "device"), ("S2", "device")],
-                                log=lambda m: None, profile=prof, parallel=False, dwell=0)
+                                log=lambda m: None, profile=prof, parallel=False, dwell=0, settle=0)
             self.assertEqual({k: v[0] for k, v in res.items()}, {"S1": "ok", "S2": "ok"})
+
+    def test_warmup_all_reports_fail_not_cancelled_when_the_pass_warms_nothing(self):
+        """F1b: an empty/unreachable-library pass must map to ('fail', reason) — not ('cancelled', …),
+        which is what warmup_all assumed before it checked adb.cancel."""
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["org.ppsspp.ppsspp"])
+            absent_all = {"org.ppsspp.ppsspp", "org.es_de.frontend", "com.handheld.launcher"}
+            res = PV.warmup_all(lambda s: Adb(serial=s, runner=self.WarmRunner(absent=absent_all)),
+                                [("S1", "device")], log=lambda m: None, profile=prof, parallel=False,
+                                dwell=0, settle=0)
+            status, detail = res["S1"]
+            self.assertEqual(status, "fail")
+            self.assertIn("warmed 0", detail)
+
+    def test_warmup_all_reports_fail_when_warmup_returns_false_without_a_cancel(self):
+        """F1b, unit-level: whatever reason warmup() bailed for (golden guard / empty set / zero warmed),
+        as long as adb.cancel is NOT set the batch must report 'fail', carrying the last logged line."""
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["org.ppsspp.ppsspp"])
+            def fake_warmup(adb, profile, log=print, **kw):
+                log("FAILING: warmed 0 of 3 app(s) — every one was absent.")
+                return False
+            with patch.object(PV, "warmup", fake_warmup):
+                res = PV.warmup_all(lambda s: Adb(serial=s, runner=self.WarmRunner()),
+                                    [("S1", "device")], log=lambda m: None, profile=prof, parallel=False)
+            status, detail = res["S1"]
+            self.assertEqual(status, "fail")
+            self.assertIn("warmed 0", detail)
+
+    def test_warmup_all_distinguishes_cancel_from_fail_after_the_call(self):
+        """F1b: a cancel that happens INSIDE warmup() (after the pre-call check already passed) must
+        still map to 'cancelled' — mirroring provision_all's post-call check."""
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["org.ppsspp.ppsspp"])
+            ev = threading.Event()
+            def fake_warmup(adb, profile, log=print, **kw):
+                ev.set()               # simulate: the operator hit Cancel WHILE the pass was running
+                return False
+            with patch.object(PV, "warmup", fake_warmup):
+                res = PV.warmup_all(lambda s: Adb(serial=s, runner=self.WarmRunner(), cancel=ev),
+                                    [("S1", "device")], log=lambda m: None, profile=prof, parallel=False)
+            self.assertEqual(res["S1"][0], "cancelled")
 
 
 class TestCliWarmup(unittest.TestCase):
@@ -2933,6 +3180,93 @@ class TestCliWarmup(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             rc = CLI.main(["--library", t, "--adb", "adb", "warmup", "--profile", "nope"])
         self.assertEqual(rc, 1)
+
+
+class TestStageWarmup(unittest.TestCase):
+    """F9: `_stage`'s 'warmup' branch is the ONLY GUI -> PV.warmup_all wiring; TestRunChain stubs
+    `_stage` itself out entirely, so a signature drift here would only be caught on the bench. Exercise
+    the REAL method (App.__new__(App) bypasses Tk __init__, same pattern as TestRunChain._app)."""
+
+    def test_stage_warmup_calls_warmup_all_with_expected_kwargs(self):
+        import cas.gui as G
+        app = G.App.__new__(G.App)
+        app.adb_bin = app.fb_bin = None
+        app.profiles_root = "profiles-root"
+        app.log = lambda m: None
+        seen = {}
+        def fake_warmup_all(mk_adb, devs, **kw):
+            seen["devs"] = list(devs)
+            seen.update(kw)
+            return {"S1": ("ok", "p")}
+        with patch.object(G.PV, "warmup_all", fake_warmup_all):
+            res = app._stage("warmup", ["S1"], {"S1": None}, set(), None)
+        self.assertEqual(res, {"S1": ("ok", "p")})
+        self.assertEqual(seen["devs"], [("S1", "device")])
+        self.assertEqual(seen["root"], "profiles-root")
+        self.assertEqual(seen["profile_map"], {"S1": None})
+        self.assertTrue(seen["parallel"])
+        self.assertIs(seen["log"], app.log)
+
+
+class TestWarningsWarmupGate(unittest.TestCase):
+    """F1c: ③ Warm up reads the library exactly like ② Download does, so it must be gated the same way
+    (both are 'block' — an operator can't override an unreachable library / no assigned profile)."""
+
+    def test_warmup_gated_same_as_download_on_library_and_profile(self):
+        for code in ("library_unreachable", "no_profile"):
+            gates = WARN.CATALOG[code]["gates"]
+            self.assertIn("warmup", gates)
+            self.assertEqual(gates["warmup"], gates["download"])
+            self.assertEqual(gates["warmup"], "block")
+
+
+class TestUiautoForegroundTimeout(unittest.TestCase):
+    """F4: uiauto.foreground() must pass an explicit timeout straight through to adb.shell, so a caller
+    inside a bounded poll loop can prevent one wedged dumpsys call from inheriting the runner's 900s
+    default. The existing caller (grant_shell_root) passes none, so behavior there is unchanged."""
+
+    class _RecordingAdb:
+        def __init__(self):
+            self.seen_timeout = "UNSET"
+
+        def shell(self, cmd, timeout=None):
+            self.seen_timeout = timeout
+            return 0, "topResumedActivity=ActivityRecord{u0 com.foo/.Main}\n", ""
+
+    def test_timeout_passes_through_to_adb_shell(self):
+        adb = self._RecordingAdb()
+        UI.foreground(adb, timeout=7)
+        self.assertEqual(adb.seen_timeout, 7)
+
+    def test_default_timeout_is_none_unbounded(self):
+        adb = self._RecordingAdb()
+        UI.foreground(adb)                    # no timeout passed -> None, adb.shell's own default applies
+        self.assertIsNone(adb.seen_timeout)
+
+
+class TestCancelSleep(unittest.TestCase):
+    """F7: the cancel-aware sleep helper used for both the per-app dwell and the settle."""
+
+    def test_zero_duration_elapses_immediately_when_not_cancelled(self):
+        self.assertTrue(PV._cancel_sleep(None, 0))
+
+    def test_already_cancelled_returns_false_immediately(self):
+        ev = threading.Event()
+        ev.set()
+        self.assertFalse(PV._cancel_sleep(ev, 5))
+
+    def test_cancelled_mid_sleep_returns_false_promptly(self):
+        ev = threading.Event()
+        def canceller():
+            time.sleep(0.05)
+            ev.set()
+        th = threading.Thread(target=canceller)
+        t0 = time.monotonic()
+        th.start()
+        ok = PV._cancel_sleep(ev, 5)
+        th.join()
+        self.assertFalse(ok)
+        self.assertLess(time.monotonic() - t0, 1.0)     # returns promptly, not after the full 5s
 
 
 class TestProvisionLockdown(unittest.TestCase):

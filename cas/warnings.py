@@ -97,7 +97,7 @@ CATALOG = {
         "detail": "This device has no assigned profile. Download has nothing to push; Root would fall back "
                   "to the bundled init_boot.",
         "fix": "Assign a profile (dropdown → 'Assign profile → selected', or double-click the row).",
-        "gates": {"download": "block", "root": "confirm"},
+        "gates": {"download": "block", "root": "confirm", "warmup": "block"},
     },
     "no_golden": {
         "title": "no golden saved for the assigned profile",
@@ -119,7 +119,7 @@ CATALOG = {
         "detail": "The profile library path isn't a reachable directory (external drive unplugged?). "
                   "Download and Save can't read/write goldens.",
         "fix": "Set Settings → Library folder… to the drive, then click 'Refresh devices'.",
-        "gates": {"download": "block", "save": "block"},
+        "gates": {"download": "block", "save": "block", "warmup": "block"},
     },
     "firmware_library_empty": {
         "title": "firmware library is empty",

@@ -204,6 +204,7 @@ def bake_boot_grant():
 
 
 _DEFAULT_WARMUP_DWELL_S = 3.0
+_DEFAULT_WARMUP_SETTLE_S = 30.0
 _DEFAULT_WARMUP_SKIP = ("com.topjohnwu.magisk",)
 
 
@@ -216,6 +217,18 @@ def warmup_dwell_s():
         return max(0.0, float(load_config().get("warmup_dwell_s", _DEFAULT_WARMUP_DWELL_S)))
     except (TypeError, ValueError):
         return _DEFAULT_WARMUP_DWELL_S
+
+
+def warmup_settle_s():
+    """Seconds ③ Warm up waits, once every app has been launched, before the force-stop sweep (default
+    30.0). This is what makes 'they keep indexing in the background' actually TRUE for the LAST apps
+    launched — the frontends: Lock reboots the unit within ~20s of the pass ending, so without this wait
+    a reboot that soon is functionally the same kill as the force-stop the pass otherwise never does
+    mid-pass. A garbage/negative value falls back to the default / 0."""
+    try:
+        return max(0.0, float(load_config().get("warmup_settle_s", _DEFAULT_WARMUP_SETTLE_S)))
+    except (TypeError, ValueError):
+        return _DEFAULT_WARMUP_SETTLE_S
 
 
 def warmup_skip_pkgs():

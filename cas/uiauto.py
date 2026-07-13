@@ -51,7 +51,13 @@ def tap(adb, pattern):
     return True
 
 
-def foreground(adb):
+def foreground(adb, timeout=None):
     """Raw `topResumedActivity=…` line from dumpsys (callers substring-match the package, e.g.
-    `MAGISK_PKG in foreground(adb)`)."""
-    return adb.shell("dumpsys activity activities | grep -m1 topResumedActivity")[1].strip()
+    `MAGISK_PKG in foreground(adb)`).
+
+    `timeout` (seconds) bounds THIS call by passing straight through to `adb.shell`. Pass it from inside
+    a bounded poll loop (e.g. ③ Warm up) so one wedged `dumpsys activity activities` can't silently
+    inherit the runner's 900s default and blow the loop's own wait budget by 60x with no output — exactly
+    the class of hang that once froze wait_boot() on a stale transport. None (default) leaves adb.shell's
+    own default in effect, unchanged for the existing caller (grant_shell_root)."""
+    return adb.shell("dumpsys activity activities | grep -m1 topResumedActivity", timeout=timeout)[1].strip()
