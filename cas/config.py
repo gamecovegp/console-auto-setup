@@ -195,6 +195,32 @@ def auto_grant_shell():
     return bool(load_config().get("auto_grant_shell", True))
 
 
+_DEFAULT_WARMUP_DWELL_S = 3.0
+_DEFAULT_WARMUP_SKIP = ("com.topjohnwu.magisk",)
+
+
+def warmup_dwell_s():
+    """Seconds the ③ Warm up step leaves each app in the foreground before launching the next (default
+    3.0). Apps are never force-stopped, so this bounds how long we WATCH an app, not how long it gets to
+    index — a backgrounded app keeps scanning. Raise it (cas-config.json "warmup_dwell_s") if a unit still
+    ships with an unindexed emulator. A garbage/negative value falls back to the default / 0."""
+    try:
+        return max(0.0, float(load_config().get("warmup_dwell_s", _DEFAULT_WARMUP_DWELL_S)))
+    except (TypeError, ValueError):
+        return _DEFAULT_WARMUP_DWELL_S
+
+
+def warmup_skip_pkgs():
+    """Packages ③ Warm up never launches (frozenset). Default: Magisk ONLY — it's a host tool, not a
+    shipped app, so opening it does nothing for the unit. EVERYTHING else warms (Companion, Steam Link,
+    every emulator): at 3s an app, an unnecessary launch costs 3 seconds, and a blanket rule is cheaper to
+    reason about than a curated list. A stored list overrides; a stored EMPTY list skips nothing."""
+    v = load_config().get("warmup_skip_pkgs")
+    if isinstance(v, list):
+        return frozenset(str(p) for p in v)
+    return frozenset(_DEFAULT_WARMUP_SKIP)
+
+
 # --- per-device profile memory ------------------------------------------------------------------
 # A device is identified by its adb SERIAL (the unit's stable hardware serial — survives reboot/reflash and
 # SD swaps). We remember each device's profile so it sticks across launches: the FIRST time a device is

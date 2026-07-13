@@ -1175,6 +1175,29 @@ class TestConfig(unittest.TestCase):
             C.set_apk_store(str(pathlib.Path(t) / "gone"))                   # nonexistent override
             self.assertEqual(C.apk_store_dir(), pathlib.Path(t) / "lib" / "_apks")  # ignored
 
+    def test_warmup_dwell_default_and_override(self):
+        from cas import config as C
+        with tempfile.TemporaryDirectory() as t:
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cas-config.json")
+            self.assertEqual(C.warmup_dwell_s(), 3.0)          # key absent -> default
+            C.save_config({"warmup_dwell_s": 10})
+            self.assertEqual(C.warmup_dwell_s(), 10.0)         # int is coerced to float
+            C.save_config({"warmup_dwell_s": "bogus"})         # unparseable -> default, never crash
+            self.assertEqual(C.warmup_dwell_s(), 3.0)
+            C.save_config({"warmup_dwell_s": -5})              # negative is clamped to 0
+            self.assertEqual(C.warmup_dwell_s(), 0.0)
+
+    def test_warmup_skip_pkgs_default_override_and_empty(self):
+        from cas import config as C
+        with tempfile.TemporaryDirectory() as t:
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cas-config.json")
+            # key absent -> Magisk only (a host tool, never a shipped app)
+            self.assertEqual(C.warmup_skip_pkgs(), frozenset({"com.topjohnwu.magisk"}))
+            C.save_config({"warmup_skip_pkgs": ["com.foo", "com.bar"]})
+            self.assertEqual(C.warmup_skip_pkgs(), frozenset({"com.foo", "com.bar"}))
+            C.save_config({"warmup_skip_pkgs": []})            # stored [] -> skip NOTHING
+            self.assertEqual(C.warmup_skip_pkgs(), frozenset())
+
 
 class TestReleaseToken(unittest.TestCase):
     def test_default_token_when_no_override(self):
@@ -4100,6 +4123,8 @@ class TestOverlayBootGrant(unittest.TestCase):
             raw = self._overlay(name).read_bytes()
             self.assertNotIn(b"\r", raw, f"{name} must be LF-only (device init/sh consumed)")
             self.assertTrue(raw.endswith(b"\n"), f"{name} must end with a newline")
+            self.assertEqual([b for b in raw if b > 0x7F], [],
+                             f"{name} must be pure ASCII (non-ASCII breaks device init/sh parsing)")
 
     def test_cas_grant_writes_the_shell_allow_policy(self):
         sh = self._overlay("cas-grant.sh").read_text()
