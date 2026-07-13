@@ -8,6 +8,7 @@ import tempfile
 import threading
 import unittest
 import pathlib
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -2876,7 +2877,8 @@ class TestWarmup(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             prof = make_profile(t, apps=["org.ppsspp.ppsspp", "org.citra.emu"])
             r = self.WarmRunner(never_fg={"org.ppsspp.ppsspp"})
-            ok, logs = self._warm(prof, r)
+            with patch.object(PV, "WARMUP_FOREGROUND_TIMEOUT", 0.05):
+                ok, logs = self._warm(prof, r)
             self.assertTrue(ok)                                   # additive: a miss never blocks the seal
             joined = "\n".join(logs)
             self.assertIn("[warn]", joined)
