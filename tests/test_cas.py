@@ -2825,6 +2825,11 @@ class TestWarmup(unittest.TestCase):
         self._saved_cas_config = os.environ.get("CAS_CONFIG")
         self._tmp_cfg = tempfile.TemporaryDirectory()
         os.environ["CAS_CONFIG"] = str(pathlib.Path(self._tmp_cfg.name) / "cas-config.json")
+        # auto_grant_shell defaults ON, and warmup() re-takes a lost shell grant before refusing — so an
+        # unrooted case would call the REAL grant_shell_root, which polls uiautomator with 1s sleeps (it
+        # made this class take 135s). Pin it OFF; the one test that exercises the re-grant turns it back on.
+        from cas import config as C
+        C.save_config({"auto_grant_shell": False})
 
     def tearDown(self):
         self._tmp_cfg.cleanup()
@@ -2874,11 +2879,15 @@ class TestWarmup(unittest.TestCase):
         return ok, logs
 
     def test_hermetic_config_isolation(self):
-        """F8: setUp points CAS_CONFIG at a fresh temp file, so config getters here read DEFAULTS —
-        never a bench's real cas-config.json (which could carry a custom skip-list)."""
+        """F8: setUp points CAS_CONFIG at a fresh temp file, so config getters here read DEFAULTS — never
+        a bench's real cas-config.json (which could carry a custom skip-list). setUp pins exactly ONE key
+        (auto_grant_shell, to keep the real uiautomator re-grant out of the unrooted cases); nothing else
+        may leak in, and every warm-up getter must still read its default."""
         from cas import config as C
-        self.assertEqual(C.load_config(), {})
+        self.assertEqual(set(C.load_config()), {"auto_grant_shell"})   # no bench keys leaked in
         self.assertEqual(C.warmup_skip_pkgs(), frozenset({"com.topjohnwu.magisk"}))
+        self.assertEqual(C.warmup_dwell_s(), 3.0)
+        self.assertEqual(C.warmup_settle_s(), 30.0)
 
     def test_launches_every_manifest_app_frontends_last(self):
         with tempfile.TemporaryDirectory() as t:
@@ -3096,16 +3105,58 @@ class TestWarmup(unittest.TestCase):
             self.assertFalse(ok)
             self.assertEqual(r.launched, [])                    # the master was NOT warmed
 
-    def test_warmup_all_reports_the_golden_as_skip_not_fail(self):
-        """The golden in an Apply-to-ALL batch is a SKIP, like root_all/seal_all report it — it shows as
-        skipped in the chain report, not as a red failure. (It is refused either way; this is about
-        telling the operator the truth.)"""
+    def test_warmup_all_reports_the_golden_as_fail_never_skip_golden(self):
+        """The golden is a FAIL here, NOT the 'skip-golden' root_all/seal_all use — deliberately, and the
+        next test is why. skip-golden SURVIVES the chain; fail drops the unit before Lock. Since is_golden()
+        is fail-closed, only the fail mapping keeps a misread on the safe side."""
         with tempfile.TemporaryDirectory() as t:
             prof = make_profile(t, apps=["org.ppsspp.ppsspp"])
-            res = PV.warmup_all(lambda s: Adb(serial=s, runner=self.WarmRunner(golden=True)),
-                                [("G1", "device")], log=lambda m: None, profile=prof,
-                                parallel=False, dwell=0, settle=0)
-            self.assertEqual(res["G1"][0], "skip-golden")
+            r = self.WarmRunner(golden=True)
+            res = PV.warmup_all(lambda s: Adb(serial=s, runner=r), [("G1", "device")],
+                                log=lambda m: None, profile=prof, parallel=False, dwell=0, settle=0)
+            self.assertEqual(res["G1"][0], "fail")
+            self.assertIn("golden", res["G1"][1].lower())
+            self.assertEqual(r.launched, [])             # the master was not warmed
+
+    def test_a_garbled_golden_probe_fails_safe_and_never_survives_to_lock(self):
+        """is_golden() is FAIL-CLOSED: one garbled `su` on a perfectly NORMAL unit answers 'golden'. That
+        misread must land on the fail-SAFE side. This is the whole reason warm-up reports a golden as `fail`
+        rather than `skip-golden` — skip-golden survives _run_chain_core, so the misread would sail on to
+        Lock, get sealed un-warmed, and be reported GREEN: the exact defect this feature removes. Root is
+        fine here; only the .cas_golden probe garbles."""
+        class GarbledGolden(self.WarmRunner):
+            def __call__(self, args, input_text=None, timeout=900):
+                if "shell" in args and "/debug_ramdisk/su" in args and ".cas_golden" in args[-1]:
+                    return 1, "", "error: closed"        # transport hiccup -> is_golden() reads TRUE
+                return super().__call__(args, input_text=input_text, timeout=timeout)
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["org.ppsspp.ppsspp"])
+            r = GarbledGolden()
+            res = PV.warmup_all(lambda s: Adb(serial=s, runner=r), [("U1", "device")],
+                                log=lambda m: None, profile=prof, parallel=False, dwell=0, settle=0)
+            self.assertEqual(res["U1"][0], "fail")       # NOT skip-golden, NOT ok
+            self.assertEqual(r.launched, [])
+            # and the status the chain drops on: fail/error are the only ones _run_chain_core removes.
+            self.assertIn(res["U1"][0], ("fail", "error"))
+
+    def test_a_shell_grant_lost_to_the_download_reboot_is_re_taken_not_fatal(self):
+        """Warm-up is the first step to call su after the Download reboot, so it is where a MagiskSU shell
+        grant that didn't persist surfaces. Requiring root must NOT mean one non-persistent grant fails
+        EVERY unit in the batch at ③: root() already re-takes the grant with no human tap, so warm-up tries
+        that before refusing. Here su is dead until grant_shell_root runs, then root works."""
+        from cas import config as C
+        C.save_config({"auto_grant_shell": True})        # setUp pins it off; this is the case that wants it
+        r = self.WarmRunner(root=False)
+        def fake_grant(adb, log=print, **kw):
+            r.root = True                                # the grant is re-taken -> su answers again
+            return True
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["org.ppsspp.ppsspp"])
+            with patch.object(PV, "grant_shell_root", fake_grant):
+                ok, logs = self._warm(prof, r)
+            self.assertTrue(ok)                          # rescued, not failed
+            self.assertIn("org.ppsspp.ppsspp", r.launched)
+            self.assertTrue(any("re-taking it" in m for m in logs))
 
     def test_empty_library_app_set_fails_loudly_even_though_frontends_are_present(self):
         """N1 (CRITICAL) — the REAL scenario: an empty manifest (library drive dropped / corrupt profile)

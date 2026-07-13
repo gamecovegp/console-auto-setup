@@ -75,6 +75,21 @@ jobs:
         working-directory: tests
         run: python -m unittest discover -p "test_*.py" -v
 
+      - name: Run device-shell tests (POSIX runners only)
+        # tests/test_*.sh exercise the scripts that run ON the device (lib-root.sh manifest parsing,
+        # install_apks, scrub, the CRLF guards). NO workflow ran them, so the one class of bug that has
+        # bitten this project hardest — a device-side shell script silently breaking — had zero CI cover.
+        # POSIX legs only: Windows has no sh, and these scripts only ever run on the Android device.
+        if: runner.os != 'Windows'
+        working-directory: tests
+        run: |
+          rc=0
+          for f in test_*.sh; do
+            echo "--- $f"
+            sh "$f" || { echo "FAILED: $f"; rc=1; }
+          done
+          exit $rc
+
       - name: Install PyInstaller + Pillow (BUILD-ONLY dependencies)
         # >= 6.11 is the first release with Python 3.14 support; pin the floor so an old
         # cached pip can't grab a wheel that chokes on 3.14 or misses the Tk runtime hook.

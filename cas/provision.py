@@ -885,10 +885,18 @@ def warmup(adb, profile, log=print, dwell=None, skip=None, settle=None):
     # silently-warmed master. Warm-up is the first step to call su after the Download reboot, so this is
     # also where a shell grant that didn't survive that reboot surfaces, with an actionable message.
     if not adb.is_root():
-        log("no root — click '⓪ Root device' first (flashes Magisk from the PC), then retry. "
-            "Warm up needs root only to verify this unit isn't the golden master; without that check "
-            "it could open every app ON the master and poison the next ① Save.")
-        return False
+        # The likely cause is a MagiskSU shell grant that didn't survive the Download reboot — warm-up is
+        # the first step to call su after it. root() already knows how to re-take that grant with no human
+        # tap, so try it before giving up: otherwise ONE non-persistent grant fails EVERY unit in the batch
+        # at ③ and none of them reach Lock.
+        if _cfg.auto_grant_shell():
+            log("no root yet (the shell grant may not have survived the Download reboot) — re-taking it…")
+            grant_shell_root(adb, log=log)
+        if not adb.is_root():
+            log("no root — click '⓪ Root device' first (flashes Magisk from the PC), then retry. "
+                "Warm up needs root only to verify this unit isn't the golden master; without that check "
+                "it could open every app ON the master and poison the next ① Save.")
+            return False
     # NEVER warm up the GOLDEN. Ticking Warm up + 'Apply to ALL' with the master on the bench would open
     # every app on it, dirtying its recents/first-run state — and the golden is never sealed, so it's never
     # scrubbed, and the damage rides the NEXT ① Save into every future unit's payload.
@@ -1005,12 +1013,6 @@ def warmup_all(make_adb, devices, root="profiles", log=print, profile=None, prof
                 if not prof:
                     log(f"[{serial}] no profile matches '{model}'")
                     return ("no-profile", model)
-            # The golden in an Apply-to-ALL batch is a SKIP, not a failure — same as root_all/seal_all, so
-            # the master shows as skipped in the chain report rather than a red ❌. warmup() refuses it
-            # regardless; this only reports it honestly.
-            if adb.is_root() and adb.is_golden():
-                log(f"[{serial}] is the GOLDEN — skipped (never warm up the master)")
-                return ("skip-golden", "")
             msgs = []                                      # remember each line so a failure can report WHY
             def _wlog(m, s=serial):
                 msgs.append(m)
@@ -1020,8 +1022,15 @@ def warmup_all(make_adb, devices, root="profiles", log=print, profile=None, prof
                 return ("ok", prof.name)
             if adb.cancel is not None and adb.cancel.is_set():
                 return ("cancelled", prof.name)            # operator cancelled -> ⏹, not a ❌ failure
-            # warmup() only returns False on the golden guard, an empty library app set, launching NOTHING,
-            # or a cancel (handled above) — the last line it logged before bailing IS the reason.
+            # warmup() returned False on the golden guard, the no-root guard, an empty library app set, or
+            # launching NOTHING — the last line it logged before bailing IS the reason.
+            #
+            # The golden is deliberately reported as a FAIL here, not as the "skip-golden" that root_all
+            # and seal_all use. is_golden() is FAIL-CLOSED: one garbled `su` on a perfectly NORMAL unit
+            # answers "golden". skip-golden SURVIVES the chain, so labelling that misread a skip would let
+            # Lock seal an un-warmed unit and report it GREEN — the exact defect this step exists to
+            # remove. A fail drops the unit before Lock. A red ❌ on the master is a cosmetic cost; a
+            # silently un-warmed customer unit is not, so the misread must land on the fail-SAFE side.
             return ("fail", msgs[-1] if msgs else prof.name)
         except Exception as e:                  # isolate: one device fault must not abort the whole batch
             log(f"[{serial}] ERROR: {e}")
