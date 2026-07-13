@@ -4,3 +4,13 @@
 # and case/heredoc parsing on the device — this is exactly why golden capture/restore failed from
 # the Windows build ("capture.sh[6]: .: .../lib-root.sh: No such file or directory").
 *.sh text eol=lf
+
+# Android init parses the overlay.d boot-grant service file, and it is no more CRLF-tolerant than sh:
+# a checked-out-on-Windows .rc ships into the frozen kit, gets baked into the patched init_boot, and
+# the boot service silently never starts. The rule is the WHOLE overlay payload, not just the .rc, so
+# any file added there later inherits it instead of re-learning this the hard way.
+*.rc text eol=lf
+provision/root/overlay/** text eol=lf
+
+# rish is a device-run shell script with NO extension, so *.sh above does not cover it.
+provision/rish-files/rish text eol=lf
