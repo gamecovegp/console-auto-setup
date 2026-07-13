@@ -73,7 +73,7 @@ class TestConnection(unittest.TestCase):
         self.assertEqual(codes(warns), {"unauthorized"})
         w = by_code(warns, "unauthorized")
         self.assertEqual(w["severity"], "block")
-        self.assertEqual(set(w["gates"]), {"root", "save", "download", "lock"})
+        self.assertEqual(set(w["gates"]), {"root", "save", "download", "warmup", "lock"})
         self.assertTrue(all(v == "block" for v in w["gates"].values()))
 
     def test_offline_states_map_to_offline(self):
@@ -153,10 +153,12 @@ class TestProfileLibrary(unittest.TestCase):
             self.assertEqual(w["gates"].get("root"), "confirm")
             self.assertEqual(w["severity"], "block")
 
-    def test_no_golden_blocks_download_only(self):
+    def test_no_golden_blocks_download_and_warmup(self):
+        # No golden -> no manifest, so ③ Warm up would resolve an EMPTY app set exactly as ② Download
+        # would find nothing to restore. Both are blocked; Root/Save/Lock are unaffected.
         w = by_code(ev([dev(profile_has_golden=False)]), "no_golden")
         self.assertIsNotNone(w)
-        self.assertEqual(w["gates"], {"download": "block"})
+        self.assertEqual(w["gates"], {"download": "block", "warmup": "block"})
 
     def test_identity_incomplete_is_info(self):
         idn = {"serial": "", "flash_target": "init_boot_b"}

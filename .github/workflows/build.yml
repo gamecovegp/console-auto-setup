@@ -70,8 +70,10 @@ jobs:
       - name: Run unit tests (stdlib unittest — no third-party runtime deps)
         # Tests are version-agnostic and must pass before we freeze. Run from tests/ so
         # unittest discovery is unaffected by any glob characters in the checkout path.
+        # DISCOVER every test_*.py, don't name one module: this used to run only test_cas, so
+        # test_warnings / test_uiauto / test_firmware could go red for weeks without CI noticing.
         working-directory: tests
-        run: python -m unittest test_cas -v
+        run: python -m unittest discover -p "test_*.py" -v
 
       - name: Install PyInstaller + Pillow (BUILD-ONLY dependencies)
         # >= 6.11 is the first release with Python 3.14 support; pin the floor so an old
