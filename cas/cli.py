@@ -2,6 +2,8 @@
   python -m cas.cli list
   python -m cas.cli provision      [--profile NAME] [--serial S]
   python -m cas.cli provision-all
+  python -m cas.cli warmup         [--profile NAME] [--serial S]
+  python -m cas.cli warmup-all
   python -m cas.cli capture NAME   [--serial S]
   python -m cas.cli seal           [--profile NAME] [--serial S]
 Global: --adb PATH  --fastboot PATH  (point at windows-kit\\adb.exe / fastboot.exe on Windows).
@@ -47,6 +49,9 @@ def main(argv=None):
     sub.add_parser("root-all", help="root every connected device (auto-matched, from PC)")
     pp = sub.add_parser("provision", help="provision one device"); pp.add_argument("--profile")
     sub.add_parser("provision-all", help="provision every connected device (auto-matched)")
+    wp = sub.add_parser("warmup", help="open every app once so emulators index their games (③)")
+    wp.add_argument("--profile")
+    sub.add_parser("warmup-all", help="warm up every connected device (auto-matched)")
     sub.add_parser("seal-all", help="seal every connected device (auto-matched)")
     cp = sub.add_parser("capture", help="capture a golden into a profile"); cp.add_argument("name")
     sp = sub.add_parser("seal", help="un-root + lock down a verified unit"); sp.add_argument("--profile")
@@ -67,6 +72,11 @@ def main(argv=None):
         res = PV.provision_all(lambda s: Adb(serial=s, adb=a.adb), list_devices(adb=a.adb), root=proot,
                                es_media_src=es_media_src())
         print("batch:", ", ".join(f"{k}={v[0]}" for k, v in res.items()))
+        return 0 if all(v[0] in ("ok", "skip") for v in res.values()) else 1
+
+    if a.cmd == "warmup-all":
+        res = PV.warmup_all(lambda s: Adb(serial=s, adb=a.adb), list_devices(adb=a.adb), root=proot)
+        print("warmup-all:", ", ".join(f"{k}={v[0]}" for k, v in res.items()))
         return 0 if all(v[0] in ("ok", "skip") for v in res.values()) else 1
 
     if a.cmd in ("root-all", "seal-all"):
@@ -94,6 +104,12 @@ def main(argv=None):
         if not prof:
             print("no matching profile — pass --profile NAME"); return 1
         return 0 if PV.provision(adb, prof, es_media_src=es_media_src()) else 1
+
+    if a.cmd == "warmup":
+        prof = _resolve_profile(adb, a.profile, proot)
+        if not prof:
+            print("no matching profile — pass --profile NAME"); return 1
+        return 0 if PV.warmup(adb, prof) else 1
 
     if a.cmd == "capture":
         return 0 if PV.capture_to_pc(adb, a.name, _stamp(), root=proot) else 1

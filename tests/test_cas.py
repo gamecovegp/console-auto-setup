@@ -2910,6 +2910,31 @@ class TestWarmup(unittest.TestCase):
             self.assertEqual({k: v[0] for k, v in res.items()}, {"S1": "ok", "S2": "ok"})
 
 
+class TestCliWarmup(unittest.TestCase):
+    """`cas.cli warmup` resolves the profile and calls PV.warmup — the CLI mirror of the ③ checkbox."""
+
+    def test_warmup_calls_provision_warmup_and_exits_zero(self):
+        from unittest.mock import patch
+        import cas.cli as CLI
+        import cas.provision as PV_mod
+        seen = {}
+        with tempfile.TemporaryDirectory() as t:
+            make_profile(t, name="odin2mini")
+            def fake_warmup(adb, profile, log=print, **kw):
+                seen["profile"] = profile.name
+                return True
+            with patch.object(PV_mod, "warmup", fake_warmup):
+                rc = CLI.main(["--library", t, "--adb", "adb", "warmup", "--profile", "odin2mini"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["profile"], "odin2mini")
+
+    def test_warmup_unknown_profile_exits_one(self):
+        import cas.cli as CLI
+        with tempfile.TemporaryDirectory() as t:
+            rc = CLI.main(["--library", t, "--adb", "adb", "warmup", "--profile", "nope"])
+        self.assertEqual(rc, 1)
+
+
 class TestProvisionLockdown(unittest.TestCase):
     def _profile(self, tmp, flags):
         apps = ["org.es_de.frontend", PV.COMPANION_PKG]
