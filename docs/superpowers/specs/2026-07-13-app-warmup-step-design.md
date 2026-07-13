@@ -54,14 +54,41 @@ For each app, in manifest order:
 4. Sleep `warmup_dwell_s` (default **3**).
 5. Move to the next app.
 
-**Apps are never force-stopped.** Launching app B pushes app A to the background, where it keeps
-indexing. A `force-stop` after a 3-second dwell would kill a scan that had just started — the exact
-failure this step exists to fix. The Lock reboot cleans up; when warm-up runs standalone, the apps are
-simply left running, which is harmless.
+**No app is force-stopped during the pass.** Launching app B pushes app A to the background, where it
+keeps indexing. A `force-stop` right after a 3-second dwell would kill a scan that had just started —
+the exact failure this step exists to fix.
 
-At the end of the pass the step returns the unit to its launcher
-(`am start -a android.intent.action.MAIN -c android.intent.category.HOME`) so a warmed unit is not left
-sitting inside an emulator.
+**The pass then ends with a settle, a sweep, and a home.** (Revised after the whole-branch review.)
+
+1. **Settle** — once every app has been launched, wait `warmup_settle_s` (default **30**). Without this
+   the "they keep indexing in the background" premise is false in a Download → Warm up → Lock chain:
+   `seal()` scrubs, un-roots, flashes and reboots within ~20s of the pass ending, so the *last* apps
+   launched — which are the frontends, placed last precisely so they index against a warm set — would
+   get almost no background time at all. A reboot 20 seconds later is functionally the same kill as the
+   force-stop we rejected. The settle is what makes the premise true.
+2. **Sweep** — force-stop every app the pass launched. This is safe *because* it comes after the settle,
+   and it is what keeps ~14 emulators out of the shipped unit's **Android recents**. Lock's scrub deletes
+   `/data/system_ce/0/recent_tasks/*`, but ActivityManager is still live at that moment and re-persists
+   its in-memory task list on the seal reboot — so without this sweep a customer could unbox the unit,
+   swipe recents, and find every emulator CAS opened.
+3. **Home** — `am start -a android.intent.action.MAIN -c android.intent.category.HOME`, so a warmed unit
+   is never left sitting inside an emulator.
+
+### Refusals and the silent-no-op guard
+
+Warm-up refuses to run on the **golden master** (`adb.is_golden()`), exactly as `provision()` and `seal()`
+do. Without the guard, ticking Warm up + "Apply to ALL" with the golden on the bench would open every app
+on the golden, dirty its recents and first-run state, and the next ① Save would bake that into the payload
+for every future unit.
+
+A pass that warms **nothing** is a hard `fail`, not an `ok`: an empty/unreadable manifest (e.g. the library
+drive is not mounted — `profile.pkgs()` returns `[]` rather than raising) or zero apps successfully opened
+would otherwise report green and let Lock seal a unit carrying the exact defect this feature removes. This
+does not weaken the additive rule below — a warm-up *miss* (some apps failed) still never blocks a seal;
+only warming *nothing at all* does.
+
+`warmup` is also added to the `library_unreachable` and `no_profile` gates in `cas/warnings.py`, so the
+preflight blocks it for the same reasons it blocks Download.
 
 Devices run in parallel via the existing `_each_device` fan-out; apps run sequentially within a device.
 
@@ -93,8 +120,15 @@ MANGMI units — `user_pkgs()` (`lib-root.sh:104`) lists only `-3` packages, so 
 in a golden's manifest and would otherwise never be warmed. A frontend already present in the manifest
 (ES-DE often is) is launched **once**, in the frontend slot at the end, not twice.
 
-Final per-device order: `[manifest apps, minus skip-list, minus frontends] + [frontends present on the
-unit]`.
+**Homescreen-bundled apps count too.** `@homescreen` restores the golden's homescreen layout, and
+`homescreen_install_missing()` (`lib-root.sh:328`) installs an APK for every placed app that is absent on
+the target. By construction those are apps whose APK is *not* in the golden payload — so they are **not in
+the manifest**, and `profile.pkgs()` alone would miss them. That is precisely the un-opened-emulator bug,
+on the one install path warm-up wouldn't cover. The app set therefore unions `profile.pkgs()` with the
+package directories under `payload/homescreen/apps/`.
+
+Final per-device order: `[manifest apps ∪ homescreen-bundled apps, minus skip-list, minus frontends] +
+[frontends present on the unit]`.
 
 ### Failure behavior
 
@@ -122,6 +156,7 @@ Two new keys in `cas-config.json`, both with getters in `cas/config.py` followin
 | Key | Default | Meaning |
 |---|---|---|
 | `warmup_dwell_s` | `3` | Seconds to leave each app in the foreground before launching the next. |
+| `warmup_settle_s` | `30` | Seconds to let every launched app keep indexing in the background after the last one is opened, before the force-stop sweep. |
 | `warmup_skip_pkgs` | `["com.topjohnwu.magisk"]` | Packages the step never launches. A stored list overrides the default; an empty list means "skip nothing". |
 
 **Known trade-off of a fixed dwell:** an app whose scan takes longer than the dwell keeps scanning in the
