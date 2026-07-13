@@ -854,12 +854,18 @@ def warmup(adb, profile, log=print, dwell=None, skip=None, settle=None):
 
     ADDITIVE for individual apps, like scrub.sh: an app that won't launch or never reaches the foreground
     is a [warn] naming the package (and what WAS foreground, so the log localizes it) — a warm-up MISS
-    must never block a seal. But warming NOTHING AT ALL is a hard failure: an empty/unreadable manifest
-    (e.g. the library drive isn't mounted) must not report green and let Lock seal a unit carrying the
-    exact defect this feature removes.
+    must never block a seal, including a pass where every app LAUNCHED but NONE reached the foreground
+    (the foreground probe can degrade on some ROMs — that is a loud [warn], not a failure). But warming
+    NOTHING AT ALL is a hard failure, checked twice: first against the LIBRARY-DERIVED app set itself
+    (profile.pkgs() union homescreen-bundled apps) — independent of device state, because an empty/
+    unreadable manifest (library drive unmounted, corrupt profile) is the defect being guarded against,
+    not a device symptom — and second, after the pass, against how many apps actually LAUNCHED, so a unit
+    where every app is absent or refuses to launch still can't report green.
 
-    Returns False when: the device is the golden master; the resolved app set is empty; the pass warmed
-    ZERO apps; or the operator cancelled. Requires no root (beyond what launching/reading state needs)."""
+    Returns False when: the device is the golden master; the library-derived app set is empty; the pass
+    LAUNCHED zero apps; or the operator cancelled. The golden-master check calls su only once root is
+    already CONFIRMED (mirroring provision()/seal()) — an unrooted device (e.g. a shell grant that hasn't
+    survived the post-Download reboot yet) is never misread as golden."""
     from . import config as _cfg
     from . import uiauto                 # function-local, matching grant_shell_root (provision.py:1177)
     dwell = _cfg.warmup_dwell_s() if dwell is None else dwell
@@ -867,23 +873,35 @@ def warmup(adb, profile, log=print, dwell=None, skip=None, settle=None):
     skip = _cfg.warmup_skip_pkgs() if skip is None else skip
     cancelled = lambda: adb.cancel is not None and adb.cancel.is_set()
 
-    # NEVER warm up the GOLDEN. Ticking Warm up + "Apply to ALL" with the master on the bench would open
-    # every app on it, dirtying its recents/first-run state — and the golden is never sealed/scrubbed, so
-    # the damage rides the NEXT ① Save into every future unit's payload. Same guard as provision()/seal().
-    if adb.is_golden():
+    # NEVER warm up the GOLDEN. is_golden() needs root to read the marker and is FAIL-CLOSED (an ambiguous/
+    # blocked `su` reads as "golden"), so only probe it once root is CONFIRMED — same guard as provision()/
+    # seal(). Warm-up is the FIRST step to call su after the Download reboot: without this gate, a Magisk
+    # shell grant that hasn't survived that reboot (the documented common case) reads as a false golden-
+    # lock refusal and drops every unit in the batch before Lock, contradicting "Requires no root".
+    if adb.is_root() and adb.is_golden():
         log("REFUSING: this device carries the golden lock (.cas_golden).")
         return False
 
-    order = _warmup_order(_warmup_pkgs(profile), skip)
-    if not order:
-        log("FAILING: nothing to warm up — the resolved app set is EMPTY (profile manifest missing/"
-            "unreadable and no homescreen-bundled apps). Is the library drive mounted? Reporting ok over "
-            "zero apps would ship a unit with every emulator un-indexed.")
+    # Gate on the LIBRARY-DERIVED set FIRST, independent of device state. WARMUP_FRONTENDS is appended
+    # unconditionally below (a system launcher + Download-installed ES-DE are normally ALWAYS present), so
+    # checking the resolved `order` for emptiness can never fire on a real unit — an unreadable/empty
+    # manifest would still resolve to just the two frontends and silently report ok. Checking the set
+    # BEFORE the frontends are added is what makes an empty library the loud failure it needs to be.
+    lib_pkgs = _warmup_pkgs(profile)
+    if not lib_pkgs:
+        log("FAILING: the library-derived app set is EMPTY — profile.pkgs() returned nothing and no "
+            "homescreen-bundled apps were found under the payload. Is the library drive mounted, or is "
+            "this profile's manifest missing/corrupt? Reporting ok over zero apps would ship a unit with "
+            "every emulator un-indexed.")
         return False
+    order = _warmup_order(lib_pkgs, skip)
 
     log(f"==> warm up: {len(order)} app(s) to open, {dwell:g}s each (they keep indexing in the background)")
     warmed = 0
-    launched = []                        # pkgs actually opened THIS pass — the sweep targets only these
+    # pkgs the pass LAUNCHED (adb.launch() returned True). The sweep AND the fail-on-nothing check below
+    # both key off THIS, not `warmed`: an app that started but never confirmed foreground is still running,
+    # so it must still be swept out of the customer's recents — and it still counts as "we warmed something".
+    launched = []
     for pkg in order:
         if cancelled():
             log("cancelled — stopping the warm-up pass")
@@ -894,6 +912,7 @@ def warmup(adb, profile, log=print, dwell=None, skip=None, settle=None):
         if not adb.launch(pkg):
             log(f" [warn] {pkg} would not launch (no launcher activity?) — skipping it")
             continue
+        launched.append(pkg)             # STARTED — sweep it later even if it never reaches the foreground
         deadline = time.monotonic() + WARMUP_FOREGROUND_TIMEOUT
         while time.monotonic() < deadline:
             if f"{pkg}/" in uiauto.foreground(adb, timeout=WARMUP_FOREGROUND_POLL_TIMEOUT):
@@ -908,16 +927,18 @@ def warmup(adb, profile, log=print, dwell=None, skip=None, settle=None):
                 f"(foreground was: {fg or 'nothing'}) — moving on")
             continue
         warmed += 1
-        launched.append(pkg)
         log(f" [ok]   {pkg} is up ({warmed}/{len(order)})")
         if not _cancel_sleep(adb.cancel, dwell):
             log("cancelled — stopping the warm-up pass")
             return False
 
-    if warmed == 0:
-        log(f"FAILING: warmed 0 of {len(order)} app(s) — every one was absent, refused to launch, or "
-            "never reached the foreground. This unit would ship with every emulator un-indexed.")
+    if not launched:
+        log(f"FAILING: launched 0 of {len(order)} app(s) — every one was absent or refused to launch. "
+            "This unit would ship with every emulator un-indexed.")
         return False
+    if warmed == 0:
+        log(f" [warn] {len(launched)} app(s) launched but NONE reached the foreground — the foreground "
+            "probe may be unreliable on this ROM; continuing (a warm-up miss never blocks a seal).")
 
     log(f" settling {settle:g}s so the last-launched apps (the frontends) get real background indexing "
         "time before Lock reboots the unit...")
@@ -938,9 +959,11 @@ def warmup_all(make_adb, devices, root="profiles", log=print, profile=None, prof
     provision_all: profile_map[serial] > `profile` > auto-match by model. Returns {serial: (status,
     detail)}; failures isolated.
 
-    A unit FAILS when warmup() returns False for a reason OTHER than a cancel — e.g. it warmed ZERO apps
-    (unreadable manifest / library drive not mounted) or hit the golden-master guard. A warm-up MISS on
-    SOME apps is still just a [warn] inside warmup() and reports 'ok', so a seal is never blocked by it.
+    A unit FAILS when warmup() returns False for a reason OTHER than a cancel — e.g. its library-derived
+    app set was empty, it LAUNCHED zero apps (unreadable manifest / library drive not mounted / nothing
+    installed), or it hit the golden-master guard. A warm-up MISS on SOME apps — or even every launched
+    app failing to reach the foreground — is still just a [warn] inside warmup() and reports 'ok', so a
+    seal is never blocked by it.
     Distinguishing fail from cancelled mirrors provision_all: warmup() itself returns a bare False either
     way, so check adb.cancel AFTER the call to tell them apart."""
     def worker(serial, state):
@@ -973,8 +996,8 @@ def warmup_all(make_adb, devices, root="profiles", log=print, profile=None, prof
                 return ("ok", prof.name)
             if adb.cancel is not None and adb.cancel.is_set():
                 return ("cancelled", prof.name)            # operator cancelled -> ⏹, not a ❌ failure
-            # warmup() only returns False on the golden guard, an empty app set, warming NOTHING, or a
-            # cancel (handled above) — the last line it logged before bailing IS the reason.
+            # warmup() only returns False on the golden guard, an empty library app set, launching NOTHING,
+            # or a cancel (handled above) — the last line it logged before bailing IS the reason.
             return ("fail", msgs[-1] if msgs else prof.name)
         except Exception as e:                  # isolate: one device fault must not abort the whole batch
             log(f"[{serial}] ERROR: {e}")

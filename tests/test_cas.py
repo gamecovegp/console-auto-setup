@@ -2894,7 +2894,11 @@ class TestWarmup(unittest.TestCase):
     def test_no_force_stop_interleaved_during_the_pass(self):
         """A force-stop right after a dwell would kill a scan mid-flight — the bug this step exists to
         fix. The sweep (F3) does force-stop every launched app, but only ONCE at the very end, after the
-        settle — never interleaved between individual app launches."""
+        settle — never interleaved between individual app launches.
+
+        N7: the original assertion only checked that any force-stops PRESENT came after the last launch —
+        vacuously true if the sweep were deleted entirely. Assert the sweep actually happened too, so this
+        test is pinned to "no force-stop happens BEFORE the sweep", not "no force-stop happens at all"."""
         with tempfile.TemporaryDirectory() as t:
             prof = make_profile(t, apps=["org.ppsspp.ppsspp", "org.citra.emu"])
             r = self.WarmRunner()
@@ -2903,6 +2907,8 @@ class TestWarmup(unittest.TestCase):
             launch_idxs = [i for i, c in enumerate(cmds) if "monkey -p" in c]
             fs_idxs = [i for i, c in enumerate(cmds) if "force-stop" in c]
             self.assertTrue(launch_idxs)
+            self.assertTrue(fs_idxs, "the sweep's force-stops never ran (test would pass vacuously "
+                                      "if the sweep were deleted)")
             self.assertTrue(all(i > launch_idxs[-1] for i in fs_idxs))
 
     def test_sweep_force_stops_every_launched_app_after_settle_then_home(self):
@@ -2920,19 +2926,33 @@ class TestWarmup(unittest.TestCase):
             self.assertIn("android.intent.category.HOME", cmds[-1])
 
     def test_settle_runs_before_the_sweep(self):
-        """F3/F7: the settle uses the cancel-aware sleep helper, and runs strictly before the sweep —
-        patch _cancel_sleep to record every duration it was asked to wait on."""
+        """F3/F7: the settle uses the cancel-aware sleep helper, and runs strictly before the sweep.
+
+        N7: the original version only checked that the settle duration was the LAST _cancel_sleep call —
+        it never actually looked at adb calls, so "before the sweep" was asserted in name only. Record the
+        adb call count at the moment the settle-duration sleep fires, then confirm no force-stop appears
+        before that point and the sweep's force-stops appear after it."""
         with tempfile.TemporaryDirectory() as t:
             prof = make_profile(t, apps=["org.ppsspp.ppsspp"])
             r = self.WarmRunner()
             waited = []
+            settle_call_idx = []
             def fake_sleep(cancel, seconds):
                 waited.append(seconds)
+                if seconds == 17:                     # the settle call specifically (dwell defaults to 0)
+                    settle_call_idx.append(len(r.calls))
                 return True
             with patch.object(PV, "_cancel_sleep", fake_sleep):
                 ok, _ = self._warm(prof, r, settle=17)
             self.assertTrue(ok)
             self.assertEqual(waited[-1], 17)          # the settle call is the LAST _cancel_sleep call
+            self.assertTrue(settle_call_idx)
+            idx = settle_call_idx[0]
+            cmds = r.cmds()
+            self.assertFalse(any("force-stop" in c for c in cmds[:idx]),
+                              "a force-stop happened BEFORE the settle sleep was even invoked")
+            self.assertTrue(any("force-stop" in c for c in cmds[idx:]),
+                              "the sweep's force-stops never ran after the settle")
 
     def test_cancel_during_settle_returns_false_and_skips_the_sweep(self):
         """F7: a cancel that lands during the settle must stop the pass — the sweep (and its force-stop
@@ -3049,28 +3069,104 @@ class TestWarmup(unittest.TestCase):
             self.assertEqual(r.launched, [])
             self.assertTrue(any("REFUSING" in m and "golden" in m for m in logs))
 
-    def test_empty_resolved_app_set_fails_loudly(self):
-        """F1a (first form): manifest empty AND both frontends explicitly skipped -> the resolved order
-        is truly EMPTY. Must FAIL, not report ok over zero apps."""
+    def test_golden_probe_gated_on_root_blocked_su_does_not_misread_as_golden(self):
+        """N2: is_golden() is FAIL-CLOSED — an ambiguous/blocked `su` reads as golden. Warm-up is the
+        FIRST step to call su after the Download reboot, so a Magisk shell grant that hasn't survived that
+        reboot (the documented common case — `su_blocked` models it exactly) must read as 'not root',
+        never as a false golden-lock refusal, matching provision()/seal()'s `is_root() and is_golden()`
+        gate. Before the fix (`if adb.is_golden():` bare) this refused every such unit before Lock."""
         with tempfile.TemporaryDirectory() as t:
             prof = make_profile(t, apps=["org.ppsspp.ppsspp"])
-            r = self.WarmRunner()
-            ok, logs = self._warm(prof, r, skip=frozenset({"org.ppsspp.ppsspp", *PV.WARMUP_FRONTENDS}))
-            self.assertFalse(ok)
-            self.assertEqual(r.launched, [])
-            self.assertTrue(any("nothing to warm up" in m for m in logs))
+            r = self.WarmRunner(su_blocked=True)   # su blocks -> is_root() False -> golden probe never runs
+            ok, logs = self._warm(prof, r)
+            self.assertTrue(ok)
+            blob = "\n".join(logs)
+            self.assertNotIn("REFUSING", blob)
+            self.assertNotIn("golden", blob.lower())
+            self.assertIn("org.ppsspp.ppsspp", r.launched)
 
-    def test_zero_apps_warmed_fails_even_with_a_nonempty_order(self):
-        """F1a (second form): the realistic library-unreachable case — the order is non-empty (the
-        frontends are always appended) but the unit was never provisioned, so EVERY app is absent and
-        warmed stays 0. Must FAIL, not report ok."""
+    def test_empty_library_app_set_fails_loudly_even_though_frontends_are_present(self):
+        """N1 (CRITICAL) — the REAL scenario: an empty manifest (library drive dropped / corrupt profile)
+        on an otherwise NORMALLY-provisioned unit where both frontends (the system launcher + the
+        Download-installed ES-DE) ARE present and installed. Before the fix, `_warmup_order` unconditionally
+        appended WARMUP_FRONTENDS, so the resolved order was NEVER empty — this pass would silently launch
+        just the two frontends and report ok, sealing a unit with all 14 emulators un-warmed. The gate must
+        key off the LIBRARY-derived set (`_warmup_pkgs`), independent of what the device happens to carry."""
         with tempfile.TemporaryDirectory() as t:
             prof = make_profile(t, apps=["org.ppsspp.ppsspp"])
-            r = self.WarmRunner(absent={"org.ppsspp.ppsspp", "org.es_de.frontend", "com.handheld.launcher"})
+            # NOT make_profile(apps=[]) — its `apps = apps or [...]` treats an empty list as "unset" and
+            # silently hands back the DEFAULT 3-app manifest, so the profile would not be empty at all.
+            # Rewrite the manifest to one that exists but names no packages (the corrupt/empty case).
+            prof.manifest_path.write_bytes(b"# manifest with no apps\n")
+            self.assertEqual(prof.pkgs(), [])     # the precondition this test rests on
+            r = self.WarmRunner()                 # default: BOTH frontends ARE present on the device
+            ok, logs = self._warm(prof, r)
+            self.assertFalse(ok)
+            self.assertEqual(r.launched, [])      # nothing launched at all -- not even the frontends
+            self.assertTrue(any("library-derived app set is EMPTY" in m for m in logs))
+
+    def test_unreadable_manifest_fails_loudly_even_though_frontends_are_present(self):
+        """N1 (CRITICAL), second real cause named in the finding: the manifest file itself is missing/
+        unreadable (library drive dropped mid-run after preflight passed, or a corrupt profile) rather
+        than merely present-but-empty. profile.pkgs() returns [] either way, and — as above — the device
+        already carries both frontends, so the old order-emptiness check could never have caught this."""
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["org.ppsspp.ppsspp"])
+            prof.manifest_path.unlink()           # the manifest vanished after the profile was resolved
+            r = self.WarmRunner()                 # frontends ARE present on the device
             ok, logs = self._warm(prof, r)
             self.assertFalse(ok)
             self.assertEqual(r.launched, [])
-            self.assertTrue(any("warmed 0" in m for m in logs))
+            self.assertTrue(any("library-derived app set is EMPTY" in m for m in logs))
+
+    def test_launched_zero_fails_even_with_a_nonempty_library_set(self):
+        """N4's second net, isolated from N1's set-level gate: the library-derived set is genuinely
+        non-empty, but the one app it names isn't actually installed on THIS unit (wrong profile assigned,
+        or Download partially failed) — frontends skipped here so only that cause is in play. Launching
+        zero apps must still fail loudly even when the library set itself was fine."""
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["org.ppsspp.ppsspp"])
+            r = self.WarmRunner(absent={"org.ppsspp.ppsspp"})
+            ok, logs = self._warm(prof, r, skip=frozenset(PV.WARMUP_FRONTENDS))
+            self.assertFalse(ok)
+            self.assertEqual(r.launched, [])
+            self.assertTrue(any("launched 0" in m for m in logs))
+
+    def test_swept_even_though_it_never_reaches_the_foreground(self):
+        """N3: a package must be appended to the sweep list right after `adb.launch()` STARTS it, not
+        after a confirmed foreground. An app owned by a first-run SAF/permission dialog (or a slow cold
+        start) that never reaches the foreground within the timeout is still RUNNING and must still be
+        force-stopped at the end, or it survives into the customer's Android recents."""
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["org.ppsspp.ppsspp", "org.citra.emu"])
+            r = self.WarmRunner(never_fg={"org.ppsspp.ppsspp"})
+            with patch.object(PV, "WARMUP_FOREGROUND_TIMEOUT", 0.05):
+                ok, _ = self._warm(prof, r)
+            self.assertTrue(ok)
+            self.assertTrue(any("force-stop org.ppsspp.ppsspp" in c for c in r.cmds()),
+                            "ppsspp launched but never reached the foreground -- must still be swept")
+
+    def test_all_apps_launch_but_none_foreground_is_a_warn_not_a_fail(self):
+        """N4 (IMPORTANT) — the actual reproduced defect: every app monkey-launches fine (launched > 0)
+        but the foreground probe degrades on this ROM (dumpsys not printing topResumedActivity, or a
+        foreign first-run dialog owning focus) so NONE confirm. `warmed` staying 0 must NOT hard-fail the
+        unit — only `len(launched) == 0` may; this must be a loud [warn], not a fail. Also covers N6: the
+        pass must still settle -> sweep -> home rather than bail out early and strand the unit unswept."""
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["org.ppsspp.ppsspp", "org.citra.emu"])
+            r = self.WarmRunner(never_fg={"org.ppsspp.ppsspp", "org.citra.emu",
+                                          "org.es_de.frontend", "com.handheld.launcher"})
+            with patch.object(PV, "WARMUP_FOREGROUND_TIMEOUT", 0.05):
+                ok, logs = self._warm(prof, r)
+            self.assertTrue(ok)                              # a degraded fg probe must never block a seal
+            self.assertEqual(len(r.launched), 4)              # every resolved app DID launch
+            joined = "\n".join(logs)
+            self.assertIn("[warn]", joined)
+            self.assertIn("NONE reached the foreground", joined)
+            cmds = r.cmds()
+            for pkg in r.launched:                            # N3: swept even though none ever foregrounded
+                self.assertTrue(any(f"force-stop {pkg}" in c for c in cmds), f"{pkg} was never swept")
+            self.assertIn("android.intent.category.HOME", cmds[-1])   # N6: still ends at home
 
     def test_homescreen_bundled_apps_are_warmed_too(self):
         """F2: an app homescreen_install_missing() installed (its APK is NOT in the payload, so it's
@@ -3125,7 +3221,7 @@ class TestWarmup(unittest.TestCase):
                                 dwell=0, settle=0)
             status, detail = res["S1"]
             self.assertEqual(status, "fail")
-            self.assertIn("warmed 0", detail)
+            self.assertIn("launched 0", detail)
 
     def test_warmup_all_reports_fail_when_warmup_returns_false_without_a_cancel(self):
         """F1b, unit-level: whatever reason warmup() bailed for (golden guard / empty set / zero warmed),
@@ -3218,6 +3314,13 @@ class TestWarningsWarmupGate(unittest.TestCase):
             self.assertIn("warmup", gates)
             self.assertEqual(gates["warmup"], gates["download"])
             self.assertEqual(gates["warmup"], "block")
+
+    def test_warmup_gated_same_as_download_on_no_golden(self):
+        """N5: a profile with no captured golden has no manifest either — the same silent-empty-app-set
+        path Download would hit — so `no_golden` must gate warmup at the same severity it gates download."""
+        gates = WARN.CATALOG["no_golden"]["gates"]
+        self.assertIn("warmup", gates)
+        self.assertEqual(gates["warmup"], gates["download"])
 
 
 class TestUiautoForegroundTimeout(unittest.TestCase):

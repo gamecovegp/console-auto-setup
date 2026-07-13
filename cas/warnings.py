@@ -103,7 +103,9 @@ CATALOG = {
         "title": "no golden saved for the assigned profile",
         "detail": "The assigned profile has no saved golden, so there's nothing to download.",
         "fix": "Capture a golden first (① Save device → profile) or assign a profile that has one.",
-        "gates": {"download": "block"},
+        # warmup reads the same manifest Download would restore from — no golden means no manifest, the
+        # same silent-empty-app-set path Download would hit, so it gates warmup at the same severity.
+        "gates": {"download": "block", "warmup": "block"},
     },
     "identity_incomplete": {
         "title": "device serial unreadable",
