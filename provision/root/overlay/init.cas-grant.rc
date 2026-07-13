@@ -1,4 +1,4 @@
-# init.cas-grant.rc — injected into the boot ramdisk via overlay.d. Runs cas-grant.sh once as root
+# init.cas-grant.rc -- injected into the boot ramdisk via overlay.d. Runs cas-grant.sh once as root
 # after boot to pre-write the MagiskSU shell-allow policy (zero-touch adb root, no Grant dialog).
 # seclabel u:r:magisk:s0 puts the service in Magisk's unconfined domain so it can talk to magiskd.
 service cas_grant /system/bin/sh /overlay.d/cas-grant.sh
