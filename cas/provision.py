@@ -773,6 +773,113 @@ def provision_all(make_adb, devices, root="profiles", log=print, profile=None, p
     return results
 
 
+# ③ WARM UP — launch every app the unit just received, once, so it initializes against its restored
+# settings and indexes its games. Without this pass an emulator that has NEVER been opened won't launch a
+# game from the frontend, and every unit needs a manual "open each emulator" pass before Lock.
+WARMUP_FRONTENDS = ("org.es_de.frontend", "com.handheld.launcher")   # warmed LAST — see _warmup_order
+WARMUP_FOREGROUND_TIMEOUT = 15    # seconds to wait for a launched app to become the resumed activity
+
+
+def _warmup_order(pkgs, skip):
+    """The launch order for one unit: manifest apps first, then the frontends. PURE (no adb).
+
+    The frontends go LAST because they are what the warm-up is FOR — each must open after every emulator
+    has initialized so it indexes against a warm set. They're an explicit constant, not manifest-derived:
+    com.handheld.launcher is a SYSTEM app on MANGMI units, and user_pkgs() lists only `-3` packages, so it
+    never appears in a golden's manifest. A frontend already in the manifest (ES-DE usually is) is launched
+    ONCE, in the frontend slot at the end — not twice."""
+    skip = set(skip or ())
+    apps = [p for p in pkgs if p not in skip and p not in WARMUP_FRONTENDS]
+    return apps + [f for f in WARMUP_FRONTENDS if f not in skip]
+
+
+def warmup(adb, profile, log=print, dwell=None, skip=None):
+    """Warm up one unit: launch each of its apps once, in _warmup_order, and leave them RUNNING.
+
+    Apps are never force-stopped. Launching app B simply backgrounds app A, where it keeps indexing —
+    a force-stop after the (short) dwell would kill a scan that had just started, which is the very bug
+    this step exists to fix. The Lock reboot cleans the unit up; a standalone warm-up leaves the apps
+    running, which is harmless.
+
+    ADDITIVE, like scrub.sh: an app that won't launch or never reaches the foreground is a [warn] naming
+    the package (and what WAS foreground, so the log localizes it), never a failure — a warm-up miss must
+    not block a seal. Returns False only on cancel. Requires no root."""
+    from . import config as _cfg
+    from . import uiauto                 # function-local, matching grant_shell_root (provision.py:1177)
+    dwell = _cfg.warmup_dwell_s() if dwell is None else dwell
+    skip = _cfg.warmup_skip_pkgs() if skip is None else skip
+    cancelled = lambda: adb.cancel is not None and adb.cancel.is_set()
+
+    order = _warmup_order(profile.pkgs(), skip)
+    log(f"==> warm up: {len(order)} app(s) to open, {dwell:g}s each (they keep indexing in the background)")
+    warmed = 0
+    for pkg in order:
+        if cancelled():
+            log("cancelled — stopping the warm-up pass")
+            return False
+        if not adb.pkg_installed(pkg):
+            log(f"   skip {pkg} (not installed on this unit)")
+            continue
+        if not adb.launch(pkg):
+            log(f" [warn] {pkg} would not launch (no launcher activity?) — skipping it")
+            continue
+        deadline = time.monotonic() + WARMUP_FOREGROUND_TIMEOUT
+        while time.monotonic() < deadline:
+            if pkg in uiauto.foreground(adb):
+                break
+            if cancelled():
+                log("cancelled — stopping the warm-up pass")
+                return False
+            time.sleep(1)
+        else:
+            log(f" [warn] {pkg} never reached the foreground in {WARMUP_FOREGROUND_TIMEOUT}s "
+                f"(foreground was: {uiauto.foreground(adb) or 'nothing'}) — moving on")
+            continue
+        warmed += 1
+        log(f" [ok]   {pkg} is up ({warmed}/{len(order)})")
+        time.sleep(dwell)
+    adb.go_home()                       # never leave a unit sitting inside an emulator
+    log(f" [ok]   warm-up done — {warmed} app(s) opened")
+    return True
+
+
+def warmup_all(make_adb, devices, root="profiles", log=print, profile=None, profile_map=None,
+               parallel=True, dwell=None, skip=None):
+    """Batch WARM UP: open every unit's apps once, in PARALLEL by default. Profile resolution matches
+    provision_all: profile_map[serial] > `profile` > auto-match by model. Returns {serial: (status,
+    detail)}; failures isolated. A unit only FAILS on a dead device or a cancel — a warm-up miss is a
+    [warn] inside warmup(), never a failure, so a seal is never blocked by it."""
+    def worker(serial, state):
+        if state != "device":
+            log(f"[{serial}] skip (state={state})")
+            return ("skip", state)
+        try:
+            adb = make_adb(serial)
+            if adb.cancel is not None and adb.cancel.is_set():
+                return ("cancelled", "")
+            if profile_map is not None and serial in profile_map:
+                prof = profile_map[serial]
+                if prof is None:
+                    log(f"[{serial}] no profile assigned — skip")
+                    return ("no-profile", "")
+            elif profile is not None:
+                prof = profile
+            else:
+                model = adb.getprop("ro.product.model")
+                prof = P.match_profile(model, root)
+                if not prof:
+                    log(f"[{serial}] no profile matches '{model}'")
+                    return ("no-profile", model)
+            ok = warmup(adb, prof, log=lambda m, s=serial: log(f"[{s}] {m}"), dwell=dwell, skip=skip)
+            if ok:
+                return ("ok", prof.name)
+            return ("cancelled", prof.name)     # warmup() returns False ONLY on cancel
+        except Exception as e:                  # isolate: one device fault must not abort the whole batch
+            log(f"[{serial}] ERROR: {e}")
+            return ("error", str(e))
+    return _each_device(devices, worker, parallel)
+
+
 def _append_history(root, stem, rec, log=print, summary=""):
     """Append ONE JSON-line record to <history_dir>/<stem>.<machine>.jsonl — the per-machine run history.
     Namespaced by machine so benches syncing the library by copy-paste never clobber each other's logs.

@@ -5,6 +5,7 @@ import os
 import sys
 import tarfile
 import tempfile
+import threading
 import unittest
 import pathlib
 
@@ -2796,6 +2797,115 @@ class TestCancel(unittest.TestCase):
         PV.fastboot_flasher(Fastboot(serial="SER", runner=fb_ok), on_critical=events.append)(
             Adb(runner=FakeRunner()), "init_boot_a", "/tmp/p.img", lambda *a: None)
         self.assertEqual(events, [True, False])          # marked entering + leaving the partition write
+
+
+class TestWarmup(unittest.TestCase):
+    """③ Warm up — launch every manifest app once (frontends last), never force-stop, never block a seal."""
+
+    class WarmRunner(FakeRunner):
+        """FakeRunner that records launches/foreground polls. `absent` = pkgs `pm path` won't resolve;
+        `never_fg` = pkgs that launch but never become the resumed activity."""
+
+        def __init__(self, absent=(), never_fg=(), **kw):
+            super().__init__(**kw)
+            self.absent, self.never_fg = set(absent), set(never_fg)
+            self.launched = []          # pkgs launched, in order
+            self.fg = ""                # the pkg currently "resumed" on the fake device
+
+        def __call__(self, args, input_text=None, timeout=900):
+            if "shell" in args:
+                tail = args[-1]
+                if tail.startswith("pm path "):
+                    pkg = tail.split()[-1]
+                    self.calls.append(list(args))
+                    return (1, "", "") if pkg in self.absent else (0, f"package:/data/app/{pkg}.apk\n", "")
+                if tail.startswith("monkey -p "):
+                    pkg = tail.split()[2]
+                    self.launched.append(pkg)
+                    self.fg = "" if pkg in self.never_fg else pkg
+                    self.calls.append(list(args))
+                    return 0, "Events injected: 1\n", ""
+                if "topResumedActivity" in tail:
+                    self.calls.append(list(args))
+                    return 0, (f"topResumedActivity=ActivityRecord{{u0 {self.fg}/.Main}}\n"
+                               if self.fg else "topResumedActivity=null\n"), ""
+            return super().__call__(args, input_text=input_text, timeout=timeout)
+
+    def _warm(self, prof, runner, **kw):
+        """Run warmup() with a zero dwell so tests never actually sleep."""
+        logs = []
+        ok = PV.warmup(Adb(runner=runner), prof, log=logs.append, dwell=0, **kw)
+        return ok, logs
+
+    def test_launches_every_manifest_app_frontends_last(self):
+        with tempfile.TemporaryDirectory() as t:
+            # ES-DE is in the manifest; com.handheld.launcher is a SYSTEM app (never in a manifest) but
+            # is present on the unit — both must warm, and both must come AFTER the emulators.
+            prof = make_profile(t, apps=["org.es_de.frontend", "org.ppsspp.ppsspp", "org.citra.emu"])
+            r = self.WarmRunner()
+            ok, _ = self._warm(prof, r)
+            self.assertTrue(ok)
+            self.assertEqual(r.launched, ["org.ppsspp.ppsspp", "org.citra.emu",
+                                          "org.es_de.frontend", "com.handheld.launcher"])
+
+    def test_never_force_stops(self):
+        """A force-stop after a 3s dwell would kill a scan mid-flight — the bug this step exists to fix."""
+        with tempfile.TemporaryDirectory() as t:
+            r = self.WarmRunner()
+            self._warm(make_profile(t, apps=["org.ppsspp.ppsspp"]), r)
+            self.assertNotIn("force-stop", "\n".join(" ".join(c) for c in r.calls))
+
+    def test_skip_list_pkg_is_never_launched(self):
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["com.topjohnwu.magisk", "org.ppsspp.ppsspp"])
+            r = self.WarmRunner()
+            self._warm(prof, r, skip=frozenset({"com.topjohnwu.magisk"}))
+            self.assertNotIn("com.topjohnwu.magisk", r.launched)
+            self.assertIn("org.ppsspp.ppsspp", r.launched)
+
+    def test_absent_pkg_is_skipped_not_launched(self):
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["org.ppsspp.ppsspp", "org.citra.emu"])
+            r = self.WarmRunner(absent={"org.citra.emu", "com.handheld.launcher", "org.es_de.frontend"})
+            ok, logs = self._warm(prof, r)
+            self.assertTrue(ok)                                   # an absent app is a skip, not a failure
+            self.assertEqual(r.launched, ["org.ppsspp.ppsspp"])
+            self.assertIn("org.citra.emu", "\n".join(logs))       # …and it's reported
+
+    def test_app_that_never_foregrounds_warns_and_continues(self):
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["org.ppsspp.ppsspp", "org.citra.emu"])
+            r = self.WarmRunner(never_fg={"org.ppsspp.ppsspp"})
+            ok, logs = self._warm(prof, r)
+            self.assertTrue(ok)                                   # additive: a miss never blocks the seal
+            joined = "\n".join(logs)
+            self.assertIn("[warn]", joined)
+            self.assertIn("org.ppsspp.ppsspp", joined)
+            self.assertIn("org.citra.emu", r.launched)            # the pass carried on to the next app
+
+    def test_pass_ends_at_home(self):
+        with tempfile.TemporaryDirectory() as t:
+            r = self.WarmRunner()
+            self._warm(make_profile(t, apps=["org.ppsspp.ppsspp"]), r)
+            self.assertIn("android.intent.category.HOME", " ".join(r.calls[-1]))
+
+    def test_cancel_stops_the_pass_between_apps(self):
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["org.ppsspp.ppsspp", "org.citra.emu"])
+            r = self.WarmRunner()
+            ev = threading.Event()
+            ev.set()                                              # already cancelled -> launch nothing
+            ok = PV.warmup(Adb(runner=r, cancel=ev), prof, log=lambda m: None, dwell=0)
+            self.assertFalse(ok)
+            self.assertEqual(r.launched, [])
+
+    def test_warmup_all_reports_ok_per_device(self):
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["org.ppsspp.ppsspp"])
+            res = PV.warmup_all(lambda s: Adb(serial=s, runner=self.WarmRunner()),
+                                [("S1", "device"), ("S2", "device")],
+                                log=lambda m: None, profile=prof, parallel=False, dwell=0)
+            self.assertEqual({k: v[0] for k, v in res.items()}, {"S1": "ok", "S2": "ok"})
 
 
 class TestProvisionLockdown(unittest.TestCase):
