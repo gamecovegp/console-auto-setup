@@ -4193,6 +4193,17 @@ class WindowsDriverKitTest(unittest.TestCase):
         self.assertIn("cp -r scripts/drivers dist/cas/drivers", yml)
         self.assertIn("drivers/install-drivers.ps1", yml)                 # the fail-loud presence check
 
+    def test_build_ships_the_overlay_boot_grant_payload(self):
+        # The overlay.d boot-grant (cas.provision.OVERLAY_DIR) is pushed to the device at Root time, so it
+        # MUST be frozen into the bundle AND presence-checked in CI. This repo bundles provision/root/ file-
+        # by-file, so a new file that is not added ships ABSENT: OVERLAY_DIR.is_dir() is False under _MEIPASS
+        # -> inject silently skipped -> the feature is inert in the release while source-run tests stay green.
+        spec = self._read("scripts", "cas.spec")
+        self.assertIn("provision/root/overlay", spec)                 # cas.spec bundles the payload
+        yml = self._read(".github", "workflows", "build.yml")
+        self.assertIn("provision/root/overlay/cas-grant.sh", yml)     # CI frozen-bundle presence guard
+        self.assertIn("provision/root/overlay/init.cas-grant.rc", yml)
+
 
 class TestOverlayBootGrant(unittest.TestCase):
     def _overlay(self, name):

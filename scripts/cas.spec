@@ -68,6 +68,7 @@ datas = [
     (_p('provision/root/lib-root.sh'),     'provision/root'),
     (_p('provision/root/scrub.sh'),        'provision/root'),   # Lock-time ship-clean scrub (cas.provision.SCRUB)
     (_p('provision/root/grant-persist.sh'), 'provision/root'),  # permanent shell-grant writer (cas.provision.GRANT_PERSIST)
+    (_p('provision/root/overlay/*'),       'provision/root/overlay'),  # overlay.d boot-grant baked into the patched init_boot (cas.provision.OVERLAY_DIR)
     # Magisk boot-patch toolkit -> BUNDLE/provision/root/magisk-patch/. cas.provision.patch_init_boot_on_device
     # pushes this whole dir to the device to patch a stock init_boot with Magisk (aarch64 magiskboot +
     # magiskinit + magisk + init-ld + Magisk's boot_patch.sh/util_functions.sh + stub.apk). WITHOUT this the

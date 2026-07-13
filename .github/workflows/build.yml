@@ -140,6 +140,8 @@ jobs:
             provision/root/lib-root.sh
             provision/root/scrub.sh
             provision/root/grant-persist.sh
+            provision/root/overlay/cas-grant.sh
+            provision/root/overlay/init.cas-grant.rc
             provision/root/magisk-patch/boot_patch.sh
             provision/root/magisk-patch/util_functions.sh
             provision/root/magisk-patch/magiskboot
