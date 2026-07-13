@@ -195,6 +195,14 @@ def auto_grant_shell():
     return bool(load_config().get("auto_grant_shell", True))
 
 
+def bake_boot_grant():
+    """Whether root() bakes the overlay.d boot-grant into the Magisk-patched init_boot so the shell
+    su policy is pre-written at boot and no Grant dialog ever appears (default True). Set
+    "bake_boot_grant": false in cas-config.json to flash the plain patched image and rely on the
+    auto-tap fallback instead."""
+    return bool(load_config().get("bake_boot_grant", True))
+
+
 _DEFAULT_WARMUP_DWELL_S = 3.0
 _DEFAULT_WARMUP_SKIP = ("com.topjohnwu.magisk",)
 

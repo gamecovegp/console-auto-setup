@@ -4144,6 +4144,15 @@ class TestOverlayBootGrant(unittest.TestCase):
         self.assertIn("on property:sys.boot_completed=1", rc)
         self.assertIn("start cas_grant", rc)
 
+    def test_bake_boot_grant_default_on(self):
+        from cas import config
+        with tempfile.TemporaryDirectory() as d:
+            os.environ["CAS_CONFIG"] = os.path.join(d, "cas-config.json")  # no file -> default
+            try:
+                self.assertTrue(config.bake_boot_grant())
+            finally:
+                del os.environ["CAS_CONFIG"]
+
 
 if __name__ == "__main__":
     unittest.main()
