@@ -4090,5 +4090,35 @@ class WindowsDriverKitTest(unittest.TestCase):
         self.assertIn("drivers/install-drivers.ps1", yml)                 # the fail-loud presence check
 
 
+class TestOverlayBootGrant(unittest.TestCase):
+    def _overlay(self, name):
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return pathlib.Path(repo) / "provision" / "root" / "overlay" / name
+
+    def test_overlay_files_exist_and_are_lf_only(self):
+        for name in ("cas-grant.sh", "init.cas-grant.rc"):
+            raw = self._overlay(name).read_bytes()
+            self.assertNotIn(b"\r", raw, f"{name} must be LF-only (device init/sh consumed)")
+            self.assertTrue(raw.endswith(b"\n"), f"{name} must end with a newline")
+
+    def test_cas_grant_writes_the_shell_allow_policy(self):
+        sh = self._overlay("cas-grant.sh").read_text()
+        # exact policy rows grant-persist.sh writes: shell uid 2000 = allow, adb+apps root
+        self.assertIn("policies (uid,policy,until,logging,notification) VALUES(2000,2,0,0,0)", sh)
+        self.assertIn("settings (key,value) VALUES('root_access',3)", sh)
+        self.assertIn("/data/adb/magisk/magisk", sh)              # applet resolved off-PATH
+        self.assertIn("/data/local/tmp/cas_boot_grant.done", sh)  # bench diagnostic marker
+        self.assertNotRegex(sh, r"while\s+true")                  # bounded retry, never infinite
+
+    def test_rc_starts_the_service_as_root_at_boot_completed(self):
+        rc = self._overlay("init.cas-grant.rc").read_text()
+        self.assertIn("service cas_grant /system/bin/sh /overlay.d/cas-grant.sh", rc)
+        self.assertIn("user root", rc)
+        self.assertIn("seclabel u:r:magisk:s0", rc)
+        self.assertIn("oneshot", rc)
+        self.assertIn("on property:sys.boot_completed=1", rc)
+        self.assertIn("start cas_grant", rc)
+
+
 if __name__ == "__main__":
     unittest.main()
