@@ -986,6 +986,47 @@ class TestApkPackageId(unittest.TestCase):
             self.assertIsNone(P.apk_package_id(nomani))
 
 
+class TestAdbLaunch(unittest.TestCase):
+    """Adb.launch / go_home / pkg_installed — the three primitives ③ Warm up is built from."""
+
+    def test_launch_uses_monkey_launcher_intent(self):
+        r = FakeRunner()
+        a = Adb(runner=r)
+        self.assertTrue(a.launch("org.ppsspp.ppsspp"))
+        cmd = r.calls[-1][-1]
+        self.assertIn("monkey -p org.ppsspp.ppsspp", cmd)
+        self.assertIn("android.intent.category.LAUNCHER", cmd)
+
+    def test_launch_false_when_monkey_finds_no_activity(self):
+        class NoActivity(FakeRunner):
+            def __call__(self, args, input_text=None, timeout=900):
+                self.calls.append(list(args))
+                if "monkey" in args[-1]:
+                    # real monkey text when a package has no LAUNCHER activity: rc 0, but nothing injected
+                    return 0, "** No activities found to run, monkey aborted.\n", ""
+                return 0, "", ""
+        a = Adb(runner=NoActivity())
+        self.assertFalse(a.launch("com.no.ui.app"))
+
+    def test_go_home_sends_home_intent(self):
+        r = FakeRunner()
+        self.assertTrue(Adb(runner=r).go_home())
+        self.assertIn("android.intent.category.HOME", r.calls[-1][-1])
+
+    def test_pkg_installed_reflects_pm_path(self):
+        class PmPath(FakeRunner):
+            def __init__(self, present):
+                super().__init__()
+                self.present = present
+            def __call__(self, args, input_text=None, timeout=900):
+                self.calls.append(list(args))
+                if args[-1].startswith("pm path "):
+                    return (0, "package:/data/app/base.apk\n", "") if self.present else (1, "", "")
+                return 0, "", ""
+        self.assertTrue(Adb(runner=PmPath(True)).pkg_installed("com.foo"))
+        self.assertFalse(Adb(runner=PmPath(False)).pkg_installed("com.foo"))
+
+
 class TestConfig(unittest.TestCase):
     def setUp(self):
         self._saved = {k: os.environ.get(k) for k in ("CAS_CONFIG", "CAS_PROFILES", "XDG_RUNTIME_DIR")}

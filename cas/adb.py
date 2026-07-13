@@ -311,6 +311,29 @@ class Adb:
     def reboot(self):
         return self.raw("reboot")[0] == 0
 
+    def pkg_installed(self, pkg):
+        """True when `pkg` is present on the device (`pm path` resolves it). The presence guard for
+        ③ Warm up: launching a package the unit doesn't carry is a no-op we'd rather log as a skip."""
+        rc, out, _ = self.shell(f"pm path {pkg}", timeout=30)
+        return rc == 0 and "package:" in out
+
+    def launch(self, pkg):
+        """Start `pkg`'s LAUNCHER activity. True when monkey actually injected the start event.
+
+        `monkey` (not `am start -n pkg/activity`) because CAS does not know each emulator's entry-point
+        class and they all differ — monkey resolves the LAUNCHER activity itself from the package id.
+        Note monkey exits 0 even when a package has NO launcher activity, printing 'No activities found';
+        that string is the real failure signal, so we match on it rather than on rc."""
+        rc, out, err = self.shell(
+            f"monkey -p {pkg} -c android.intent.category.LAUNCHER 1", timeout=60)
+        return rc == 0 and "No activities found" not in (out or "") + (err or "")
+
+    def go_home(self):
+        """Send the unit back to its launcher (ends a warm-up pass so a unit is never left sitting inside
+        an emulator). Backgrounds the foreground app WITHOUT killing it — it keeps indexing."""
+        return self.shell(
+            "am start -a android.intent.action.MAIN -c android.intent.category.HOME", timeout=60)[0] == 0
+
     def is_root(self):
         # short timeout: a real su replies instantly; a su that BLOCKS (MagiskSU grant prompt) must not
         # hang a batch — fail fast as "not root" after the timeout.
