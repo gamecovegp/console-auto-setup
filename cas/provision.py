@@ -622,12 +622,46 @@ def provision(adb, profile, log=print, dry_push=False, es_media_src=None):
 
 MAGISK_PATCH = BUNDLE / "provision" / "root" / "magisk-patch"   # aarch64 magiskboot + Magisk's boot_patch.sh
 DEV_PATCH = "/data/local/tmp/cas_magiskpatch"                   # on-device workdir for the patch
+OVERLAY_DIR = BUNDLE / "provision" / "root" / "overlay"   # overlay.d boot-grant payload (rc + cas-grant.sh)
 
 GRANT_PERSIST = BUNDLE / "provision" / "root" / "grant-persist.sh"   # permanent shell-grant writer (root)
 DEV_GRANT = "/data/local/tmp/cas_grant.sh"                           # where it lands on the device
 GRANT_PROMPT_BTN = r"grant"          # MagiskSU su-request "Grant" button (matched case-insensitively)
 # NOTE: MAGISK_PKG ("com.topjohnwu.magisk") is defined at the top of this module; grant_shell_root's
 # tap gate reuses it to fence taps to the Magisk prompt so we never mis-tap another app.
+
+
+def _inject_boot_grant(adb, dev_patch, log=print):
+    """Bake the overlay.d boot-grant (init.cas-grant.rc + cas-grant.sh) into the already-Magisk-
+    patched {dev_patch}/new-boot.img, repacked to {dev_patch}/cas-boot.img. This is what makes the
+    first `su` prompt-free: at boot magiskinit runs cas-grant.sh as root, which pre-writes the shell
+    ALLOW policy. Best-effort — returns True only when the repack sentinel confirms; on False the
+    caller flashes the plain new-boot.img (root still works via the auto-tap fallback)."""
+    if not OVERLAY_DIR.is_dir():
+        log("  ⚠ overlay payload dir missing — skipping boot-grant inject (auto-tap fallback applies).")
+        return False
+    files = sorted(p for p in OVERLAY_DIR.iterdir() if p.is_file())
+    if not files:
+        log("  ⚠ overlay payload empty — skipping boot-grant inject.")
+        return False
+    for f in files:
+        if not adb.push(str(f), f"{dev_patch}/{f.name}"):
+            log("  ⚠ could not push overlay payload — skipping boot-grant inject.")
+            return False
+    # Separate magiskboot pass so Magisk's own boot_patch.sh stays untouched. ./magiskboot: DEV_PATCH
+    # isn't on PATH. Sentinel (not rc) confirms success — exit codes are unreliable on these units.
+    rc, out, err = adb.shell(
+        f"cd {dev_patch} && ./magiskboot unpack new-boot.img && "
+        f"./magiskboot cpio ramdisk.cpio "
+        f"'mkdir 0750 overlay.d' "
+        f"'add 0644 overlay.d/init.cas-grant.rc init.cas-grant.rc' "
+        f"'add 0755 overlay.d/cas-grant.sh cas-grant.sh' && "
+        f"./magiskboot repack new-boot.img cas-boot.img && echo CAS_INJECT_OK")
+    if "CAS_INJECT_OK" in out:
+        log("  ✓ boot-grant baked into the patched init_boot (overlay.d) — su will be pre-authorized.")
+        return True
+    log(f"  ⚠ boot-grant inject failed: {((err or out) or '').strip()[:160]} — flashing plain image.")
+    return False
 
 
 def patch_init_boot_on_device(adb, stock_init_boot, dest, log=print):
@@ -666,7 +700,11 @@ def patch_init_boot_on_device(adb, stock_init_boot, dest, log=print):
         log(f"ERROR: on-device Magisk patch failed (rc={rc}): {((err or out) or '').strip()[:200]}")
         adb.shell(f"rm -rf {DEV_PATCH}")
         return False
-    ok = adb.pull(f"{DEV_PATCH}/new-boot.img", str(dest))
+    from . import config as _cfg
+    pull_src = f"{DEV_PATCH}/new-boot.img"
+    if _cfg.bake_boot_grant() and _inject_boot_grant(adb, DEV_PATCH, log=log):
+        pull_src = f"{DEV_PATCH}/cas-boot.img"
+    ok = adb.pull(pull_src, str(dest))
     adb.shell(f"rm -rf {DEV_PATCH}")
     if not ok:
         log("ERROR: could not pull the patched init_boot off the device.")

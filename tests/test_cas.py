@@ -125,6 +125,8 @@ class FakeRunner:
                 return 0, "Starting: Intent\n", ""
             if "boot_patch.sh" in tail:                 # on-device Magisk patch -> stdout sentinel
                 return 0, "- Patching ramdisk\n- Repacking boot image\nCAS_PATCH_OK\n", ""
+            if "CAS_INJECT_OK" in tail:                 # overlay.d inject chain -> stdout sentinel
+                return 0, "- Repacking boot image\nCAS_INJECT_OK\n", ""
             if tail.startswith("getprop"):
                 key = tail.split()[-1]
                 val = {"ro.product.model": self.model, "sys.boot_completed": self.boot,
@@ -1655,6 +1657,63 @@ class TestProvision(unittest.TestCase):
             ok = PV.patch_init_boot_on_device(Adb(runner=_NoPatch()), stock,
                                               pathlib.Path(t) / "patched.img", log=lambda m: None)
         self.assertFalse(ok)
+
+    def test_patch_injects_boot_grant_and_pulls_cas_boot(self):
+        # With bake_boot_grant on (default), the overlay.d payload is pushed, magiskboot injects it,
+        # and the repacked cas-boot.img is what gets pulled to the PC.
+        r = FakeRunner()
+        with tempfile.TemporaryDirectory() as t:
+            stock = pathlib.Path(t) / "stock.img"; stock.write_bytes(b"x")
+            os.environ["CAS_CONFIG"] = os.path.join(t, "absent.json")  # default -> bake on
+            try:
+                ok = PV.patch_init_boot_on_device(Adb(runner=r), stock,
+                                                  pathlib.Path(t) / "patched.img", log=lambda *_: None)
+            finally:
+                del os.environ["CAS_CONFIG"]
+        self.assertTrue(ok)
+        cmds = "\n".join(r.cmds())
+        self.assertIn("overlay.d/cas-grant.sh", cmds)      # cpio added the script
+        self.assertIn("overlay.d/init.cas-grant.rc", cmds) # cpio added the rc
+        self.assertIn("magiskboot repack new-boot.img cas-boot.img", cmds)
+        self.assertTrue(any(c[1] == "pull" and c[2].endswith("cas-boot.img") for c in r.calls))
+
+    def test_patch_inject_failure_falls_back_to_plain_image(self):
+        # If the inject chain never emits CAS_INJECT_OK, the patch still succeeds by pulling the plain
+        # patched new-boot.img (never a regression vs. today).
+        class _NoInject(FakeRunner):
+            def __call__(self, args, input_text=None, timeout=900):
+                if "shell" in args and "CAS_INJECT_OK" in args[-1]:
+                    return 1, "- unpack failed\n", "magiskboot: bad ramdisk"
+                return super().__call__(args, input_text, timeout)
+        r = _NoInject()
+        with tempfile.TemporaryDirectory() as t:
+            stock = pathlib.Path(t) / "stock.img"; stock.write_bytes(b"x")
+            os.environ["CAS_CONFIG"] = os.path.join(t, "absent.json")
+            try:
+                ok = PV.patch_init_boot_on_device(Adb(runner=r), stock,
+                                                  pathlib.Path(t) / "patched.img", log=lambda *_: None)
+            finally:
+                del os.environ["CAS_CONFIG"]
+        self.assertTrue(ok)
+        self.assertTrue(any(c[1] == "pull" and c[2].endswith("new-boot.img") for c in r.calls))
+        self.assertFalse(any(c[1] == "pull" and c[2].endswith("cas-boot.img") for c in r.calls))
+
+    def test_patch_skips_inject_when_bake_disabled(self):
+        r = FakeRunner()
+        with tempfile.TemporaryDirectory() as t:
+            stock = pathlib.Path(t) / "stock.img"; stock.write_bytes(b"x")
+            cfg = pathlib.Path(t) / "cas-config.json"
+            cfg.write_text('{"bake_boot_grant": false}')
+            os.environ["CAS_CONFIG"] = str(cfg)
+            try:
+                ok = PV.patch_init_boot_on_device(Adb(runner=r), stock,
+                                                  pathlib.Path(t) / "patched.img", log=lambda *_: None)
+            finally:
+                del os.environ["CAS_CONFIG"]
+        self.assertTrue(ok)
+        cmds = "\n".join(r.cmds())
+        self.assertNotIn("cas-grant.sh", cmds)             # nothing injected
+        self.assertTrue(any(c[1] == "pull" and c[2].endswith("new-boot.img") for c in r.calls))
 
 
 class FbRunner:
