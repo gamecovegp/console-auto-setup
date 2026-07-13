@@ -3069,21 +3069,43 @@ class TestWarmup(unittest.TestCase):
             self.assertEqual(r.launched, [])
             self.assertTrue(any("REFUSING" in m and "golden" in m for m in logs))
 
-    def test_golden_probe_gated_on_root_blocked_su_does_not_misread_as_golden(self):
-        """N2: is_golden() is FAIL-CLOSED — an ambiguous/blocked `su` reads as golden. Warm-up is the
-        FIRST step to call su after the Download reboot, so a Magisk shell grant that hasn't survived that
-        reboot (the documented common case — `su_blocked` models it exactly) must read as 'not root',
-        never as a false golden-lock refusal, matching provision()/seal()'s `is_root() and is_golden()`
-        gate. Before the fix (`if adb.is_golden():` bare) this refused every such unit before Lock."""
+    def test_requires_root_so_the_golden_probe_is_never_skipped(self):
+        """The golden guard needs su, and is_golden() is FAIL-CLOSED (a blocked su reads as 'golden').
+        Both ways of dodging that are broken: probing WITHOUT confirming root gives a false golden-lock
+        refusal on every real unit, and SKIPPING the probe when root is absent warms the MASTER. So warm-up
+        requires root outright, like provision() — an unrooted unit is refused with an actionable message,
+        never warmed on a guess. `su_blocked` models the real cause (a Magisk shell grant that didn't
+        survive the Download reboot)."""
         with tempfile.TemporaryDirectory() as t:
             prof = make_profile(t, apps=["org.ppsspp.ppsspp"])
-            r = self.WarmRunner(su_blocked=True)   # su blocks -> is_root() False -> golden probe never runs
-            ok, logs = self._warm(prof, r)
-            self.assertTrue(ok)
-            blob = "\n".join(logs)
-            self.assertNotIn("REFUSING", blob)
-            self.assertNotIn("golden", blob.lower())
-            self.assertIn("org.ppsspp.ppsspp", r.launched)
+            for r in (self.WarmRunner(su_blocked=True), self.WarmRunner(root=False)):
+                ok, logs = self._warm(prof, r)
+                self.assertFalse(ok)
+                self.assertEqual(r.launched, [])                      # nothing opened on an unverified unit
+                self.assertTrue(any("no root" in m for m in logs), logs)
+
+    def test_an_unrooted_golden_is_never_warmed(self):
+        """The regression this requires-root rule exists to prevent: with the probe merely GATED on root
+        (`is_root() and is_golden()`), an unrooted golden master sails through the guard and gets all ~14
+        of its apps opened — dirtying the master's first-run state and recents. It is never sealed, so it
+        is never scrubbed, and the damage rides the next ① Save into EVERY future unit's payload."""
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["org.ppsspp.ppsspp"])
+            r = self.WarmRunner(golden=True, su_blocked=True)   # the master, its shell grant gone
+            ok, _ = self._warm(prof, r)
+            self.assertFalse(ok)
+            self.assertEqual(r.launched, [])                    # the master was NOT warmed
+
+    def test_warmup_all_reports_the_golden_as_skip_not_fail(self):
+        """The golden in an Apply-to-ALL batch is a SKIP, like root_all/seal_all report it — it shows as
+        skipped in the chain report, not as a red failure. (It is refused either way; this is about
+        telling the operator the truth.)"""
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["org.ppsspp.ppsspp"])
+            res = PV.warmup_all(lambda s: Adb(serial=s, runner=self.WarmRunner(golden=True)),
+                                [("G1", "device")], log=lambda m: None, profile=prof,
+                                parallel=False, dwell=0, settle=0)
+            self.assertEqual(res["G1"][0], "skip-golden")
 
     def test_empty_library_app_set_fails_loudly_even_though_frontends_are_present(self):
         """N1 (CRITICAL) — the REAL scenario: an empty manifest (library drive dropped / corrupt profile)

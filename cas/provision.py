@@ -862,10 +862,17 @@ def warmup(adb, profile, log=print, dwell=None, skip=None, settle=None):
     not a device symptom — and second, after the pass, against how many apps actually LAUNCHED, so a unit
     where every app is absent or refuses to launch still can't report green.
 
-    Returns False when: the device is the golden master; the library-derived app set is empty; the pass
-    LAUNCHED zero apps; or the operator cancelled. The golden-master check calls su only once root is
-    already CONFIRMED (mirroring provision()/seal()) — an unrooted device (e.g. a shell grant that hasn't
-    survived the post-Download reboot yet) is never misread as golden."""
+    Returns False when: the device isn't rooted; it's the golden master; the library-derived app set is
+    empty; the pass LAUNCHED zero apps; or the operator cancelled.
+
+    Root FIRST, exactly like provision(). Warm-up doesn't otherwise NEED root — monkey/am/pm all run as
+    shell — but the golden guard does, and is_golden() is FAIL-CLOSED (an ambiguous/blocked `su` reads as
+    "golden"). Probing it without confirming root first gives a false golden-lock refusal on every unit;
+    SKIPPING the probe when root is absent fails the other way, and warms the MASTER — whose dirtied
+    first-run state then rides the next ① Save into every future unit's payload. Requiring root closes
+    both: the probe always answers honestly, and an unrooted unit gets provision()'s actionable message
+    instead of a wrong one. This costs nothing in the real flow — warm-up runs between Download and Lock,
+    where the unit IS rooted."""
     from . import config as _cfg
     from . import uiauto                 # function-local, matching grant_shell_root (provision.py:1177)
     dwell = _cfg.warmup_dwell_s() if dwell is None else dwell
@@ -873,12 +880,19 @@ def warmup(adb, profile, log=print, dwell=None, skip=None, settle=None):
     skip = _cfg.warmup_skip_pkgs() if skip is None else skip
     cancelled = lambda: adb.cancel is not None and adb.cancel.is_set()
 
-    # NEVER warm up the GOLDEN. is_golden() needs root to read the marker and is FAIL-CLOSED (an ambiguous/
-    # blocked `su` reads as "golden"), so only probe it once root is CONFIRMED — same guard as provision()/
-    # seal(). Warm-up is the FIRST step to call su after the Download reboot: without this gate, a Magisk
-    # shell grant that hasn't survived that reboot (the documented common case) reads as a false golden-
-    # lock refusal and drops every unit in the batch before Lock, contradicting "Requires no root".
-    if adb.is_root() and adb.is_golden():
+    # Root FIRST (see the docstring): is_golden() is fail-closed and needs su, so confirming root is what
+    # makes the golden guard trustworthy in BOTH directions — no false refusal on a real unit, and no
+    # silently-warmed master. Warm-up is the first step to call su after the Download reboot, so this is
+    # also where a shell grant that didn't survive that reboot surfaces, with an actionable message.
+    if not adb.is_root():
+        log("no root — click '⓪ Root device' first (flashes Magisk from the PC), then retry. "
+            "Warm up needs root only to verify this unit isn't the golden master; without that check "
+            "it could open every app ON the master and poison the next ① Save.")
+        return False
+    # NEVER warm up the GOLDEN. Ticking Warm up + 'Apply to ALL' with the master on the bench would open
+    # every app on it, dirtying its recents/first-run state — and the golden is never sealed, so it's never
+    # scrubbed, and the damage rides the NEXT ① Save into every future unit's payload.
+    if adb.is_golden():
         log("REFUSING: this device carries the golden lock (.cas_golden).")
         return False
 
@@ -920,7 +934,9 @@ def warmup(adb, profile, log=print, dwell=None, skip=None, settle=None):
             if cancelled():
                 log("cancelled — stopping the warm-up pass")
                 return False
-            time.sleep(1)
+            # Never sleep PAST the deadline: a plain sleep(1) overshoots a short timeout (and made the
+            # tests that patch WARMUP_FOREGROUND_TIMEOUT down still burn a real second per app).
+            time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
         else:
             fg = uiauto.foreground(adb, timeout=WARMUP_FOREGROUND_POLL_TIMEOUT)
             log(f" [warn] {pkg} never reached the foreground in {WARMUP_FOREGROUND_TIMEOUT}s "
@@ -933,8 +949,10 @@ def warmup(adb, profile, log=print, dwell=None, skip=None, settle=None):
             return False
 
     if not launched:
-        log(f"FAILING: launched 0 of {len(order)} app(s) — every one was absent or refused to launch. "
-            "This unit would ship with every emulator un-indexed.")
+        why = (f"every one of the {len(lib_pkgs)} app(s) in this profile is on the warm-up skip-list"
+               if not order else
+               f"every one of the {len(order)} app(s) was absent from this unit or refused to launch")
+        log(f"FAILING: launched 0 app(s) — {why}. This unit would ship with every emulator un-indexed.")
         return False
     if warmed == 0:
         log(f" [warn] {len(launched)} app(s) launched but NONE reached the foreground — the foreground "
@@ -949,7 +967,7 @@ def warmup(adb, profile, log=print, dwell=None, skip=None, settle=None):
     for pkg in launched:
         adb.shell(f"am force-stop {pkg}")
     adb.go_home()                       # never leave a unit sitting inside an emulator
-    log(f" [ok]   warm-up done — {warmed} app(s) opened")
+    log(f" [ok]   warm-up done — {len(launched)} app(s) launched, {warmed} confirmed in the foreground")
     return True
 
 
@@ -987,6 +1005,12 @@ def warmup_all(make_adb, devices, root="profiles", log=print, profile=None, prof
                 if not prof:
                     log(f"[{serial}] no profile matches '{model}'")
                     return ("no-profile", model)
+            # The golden in an Apply-to-ALL batch is a SKIP, not a failure — same as root_all/seal_all, so
+            # the master shows as skipped in the chain report rather than a red ❌. warmup() refuses it
+            # regardless; this only reports it honestly.
+            if adb.is_root() and adb.is_golden():
+                log(f"[{serial}] is the GOLDEN — skipped (never warm up the master)")
+                return ("skip-golden", "")
             msgs = []                                      # remember each line so a failure can report WHY
             def _wlog(m, s=serial):
                 msgs.append(m)

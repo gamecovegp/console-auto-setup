@@ -76,10 +76,22 @@ the exact failure this step exists to fix.
 
 ### Refusals and the silent-no-op guard
 
-Warm-up refuses to run on the **golden master** (`adb.is_golden()`), exactly as `provision()` and `seal()`
-do. Without the guard, ticking Warm up + "Apply to ALL" with the golden on the bench would open every app
-on the golden, dirty its recents and first-run state, and the next ① Save would bake that into the payload
-for every future unit.
+Warm-up **requires root**, then refuses the **golden master** — root first, exactly like `provision()`.
+
+It does not otherwise need root (`monkey`, `am` and `pm` all run as shell); the *golden guard* needs it.
+`adb.is_golden()` is **fail-closed**: an ambiguous or blocked `su` reads as "golden". Both ways of dodging
+that are broken, and both were tried:
+
+- Probing **without** confirming root first gives a false golden-lock refusal on every real unit whose
+  Magisk shell grant didn't survive the Download reboot — warm-up is the first step to call `su` after it.
+- **Skipping** the probe when root is absent fails the other way and warms the **master**: all ~14 apps
+  opened on the golden, dirtying its first-run state and recents. The golden is never sealed, so it is
+  never scrubbed, and the damage rides the next ① Save into every future unit's payload.
+
+Requiring root closes both: the probe always answers honestly, and an unrooted unit gets `provision()`'s
+actionable "click ⓪ Root first" message instead of a wrong one. This costs nothing in the real flow —
+warm-up runs between Download and Lock, where the unit is rooted. In an "Apply to ALL" batch the golden
+reports `skip-golden`, as it does under `root_all`/`seal_all`, rather than as a red failure.
 
 A pass that warms **nothing** is a hard `fail`, not an `ok`: an empty/unreadable manifest (e.g. the library
 drive is not mounted — `profile.pkgs()` returns `[]` rather than raising) or zero apps successfully opened
