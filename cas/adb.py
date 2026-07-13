@@ -809,16 +809,31 @@ class Edl:
         log(f"EDL: Firehose write of {label} FAILED (fh_loader exit {rc}). It said: {said}")
         return False
 
-    def reset(self, port, workdir):
-        """Reboot the device out of EDL (Firehose <power reset>). `workdir` is a local dir to stage fh_loader
-        (the library drive may be noexec — CIFS or a removable FAT/exFAT drive). Best-effort — used to
-        recover a unit so a failed flash never strands it. Re-acquire the port first: the unit may have
-        re-enumerated to a different COM during the flash, so the pre-flash port can be stale. Short
-        timeout — a SUCCESSFUL write already power-reset the unit (so the port is gone and there's nothing
-        to reset), while a FAILED write leaves it present in EDL and found immediately."""
+    def reset(self, port, workdir, log=print):
+        """Reboot the device out of EDL with `fh_loader --reset` — the mechanism proven to work by hand.
+        `workdir` is a local dir to stage fh_loader (the library drive may be noexec — CIFS or a removable
+        FAT/exFAT drive). Re-acquire the port each try (it can re-enumerate as the programmer finishes),
+        retry a few times, and LOG the port + the tool's own output — a unit that won't leave the black EDL
+        screen must be diagnosable, not a silent no-op (which is exactly why the MANGMI AIR X sat in EDL
+        until it was power-cycled by hand). Success is fh_loader's "All Finished Successfully"/"{SUCCESS}";
+        returns False if no attempt confirmed (caller warns + the operator holds power to recover)."""
         fh = self._staged_exec(self.fh, workdir)
-        port = self.find_port(timeout=8) or port
-        try:
-            return self.runner(self._launcher(port) + [fh, "--port=" + port, "--reset", "--noprompt"])[0] == 0
-        except OSError:
-            return False
+        for attempt in range(3):
+            if self.cancel is not None and self.cancel.is_set():
+                return False
+            p = self.find_port(timeout=10) or port
+            try:
+                rc, out, err = self.runner(self._launcher(p) + [fh, "--port=" + p, "--reset", "--noprompt"],
+                                           timeout=60, **self._runner_kw())
+            except OSError as e:
+                log(f"EDL: reset couldn't launch fh_loader: {e}")
+                return False
+            blob = (out or "") + (err or "")
+            if "All Finished Successfully" in blob or "{SUCCESS}" in blob:
+                log(f"EDL: reset sent on {p} — unit rebooting out of EDL.")
+                return True
+            log(f"EDL: reset attempt {attempt + 1}/3 on {p} didn't confirm (fh_loader exit {rc}): "
+                f"{_tool_tail(blob) or '(no output)'}")
+            if attempt < 2:
+                time.sleep(2)
+        return False

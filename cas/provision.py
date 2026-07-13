@@ -972,7 +972,7 @@ def edl_flasher(edl, geometry, wait=True, on_critical=None):
             # rawprogram. reset() still runs as a safety net (a hung/killed write may not have reached that
             # tag) so a failed flash never strands the unit on a black EDL screen — but only warn when it is
             # genuinely stranded: the flash FAILED and the fallback reset couldn't reboot it either.
-            rebooted = edl.reset(port, td)
+            rebooted = edl.reset(port, td, log=log)
             if not rebooted and not ok:
                 log("  …could not auto-reset out of EDL; hold power ~15s if the screen stays black.")
             return ok

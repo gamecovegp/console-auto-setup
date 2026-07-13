@@ -2548,7 +2548,9 @@ class TestFlashers(unittest.TestCase):
         # GUESS ("install the QDLoader 9008 driver") on a bench whose driver + COM3 were provably fine.
         # The log must instead carry what the tool actually said, plus its exit code.
         from cas.adb import Adb, Edl
+        from cas import adb as A
         from cas import provision as PV
+        from unittest import mock
 
         def runner(args, input_text=None, timeout=900):
             if args[0].endswith("QSaharaServer"):
@@ -2560,7 +2562,8 @@ class TestFlashers(unittest.TestCase):
                 "start_sector": "1", "start_byte_hex": "0x0"}
         lines = []
         flasher = PV.edl_flasher(edl, geom)
-        with tempfile.TemporaryDirectory() as td:
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.object(A.time, "sleep", lambda *_a, **_k: None):   # don't wait out reset() retries
             img = pathlib.Path(td) / "p.img"; img.write_bytes(b"x")
             self.assertFalse(flasher(Adb(runner=FakeRunner()), "init_boot_b", str(img), lines.append))
         blob = "\n".join(lines)
