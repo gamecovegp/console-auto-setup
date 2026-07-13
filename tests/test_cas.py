@@ -271,6 +271,28 @@ class GrantShellRoot(unittest.TestCase):
             self.assertFalse(ok2)
             self.assertTrue(any("REFUSING" in m for m in logs2), logs2)
 
+    def test_root_pre_authorized_boot_skips_autotap(self):
+        # overlay.d pre-wrote the policy -> the unit boots already-root -> root() succeeds WITHOUT
+        # ever invoking the uiautomator auto-tap.
+        import tempfile, pathlib
+        called = {"autotap": False}
+        orig = PV.grant_shell_root
+        PV.grant_shell_root = lambda *a, **k: called.__setitem__("autotap", True) or True
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                stock = pathlib.Path(d) / "init_boot.img"; stock.write_bytes(b"x")
+                os.environ["CAS_CONFIG"] = str(pathlib.Path(d) / "absent.json")
+                try:
+                    ok = PV.root(Adb(runner=FakeRunner(root=True)), Fastboot(runner=FbRunner()), stock,
+                                 magisk_apk=None, log=lambda *_: None, wait=True,
+                                 flasher=lambda adb, target, img, log: True)
+                finally:
+                    del os.environ["CAS_CONFIG"]
+        finally:
+            PV.grant_shell_root = orig
+        self.assertTrue(ok)
+        self.assertFalse(called["autotap"], "auto-tap must not run when su is already pre-authorized")
+
 
 def make_profile(tmp, name="odin2mini", model="Odin2 ?Mini", apps=None):
     apps = apps or ["org.es_de.frontend", "dev.eden.eden_emulator", "org.citra.emu"]

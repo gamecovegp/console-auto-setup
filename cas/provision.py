@@ -1174,7 +1174,8 @@ def root(adb, fastboot, stock_init_boot, magisk_apk=None, log=print, wait=True, 
     if not wait:
         return True
     if adb.is_root():
-        log("✓ ROOTED — adb shell su works. Ready to '② Download to selected device'.")
+        log("✓ ROOTED — shell pre-authorized at boot (zero-touch, no Magisk prompt). "
+            "Ready to '② Download to selected device'.")
         return True
     from . import config as _cfg
     if _cfg.auto_grant_shell():
