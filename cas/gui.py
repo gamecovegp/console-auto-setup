@@ -656,9 +656,13 @@ class App:
         self.chain_cbs = {}                               # action key -> the Checkbutton (for enable/disable)
         for key, label, tip in (
             ("root", "⓪ Root", "Root the target(s): flash the profile's Magisk-patched init_boot + install Magisk from the PC."),
-            ("save", "① Save → profile", "Capture ONE selected device into a profile (golden). Mutually exclusive with Download/Lock."),
+            ("save", "① Save → profile", "Capture ONE selected device into a profile (golden). Mutually exclusive with Download/Warm up/Lock."),
             ("download", "② Download", "Install each device's assigned profile (apps + saves/BIOS/settings/grants/homescreen)."),
-            ("lock", "③ Lock", "Retail-seal verified unit(s): hide Dev options, un-root, disable USB debugging."),
+            ("warmup", "③ Warm up", "Open every installed app once (frontends last) so each emulator initializes "
+                                    "against its restored settings and indexes its games. Without it, a never-opened "
+                                    "emulator won't launch a game from the frontend. Apps are left running to finish "
+                                    "indexing; nothing is force-stopped."),
+            ("lock", "④ Lock", "Retail-seal verified unit(s): hide Dev options, un-root, disable USB debugging."),
         ):
             v = tk.BooleanVar(value=False)
             self.chain_vars[key] = v
@@ -1403,11 +1407,11 @@ class App:
                                 "(Ctrl/Shift-click for several).")
 
     def _on_chain_tick(self):
-        """Save ⟂ Download/Lock: when Save is on, disable+clear Download/Lock; when either of those is on,
-        disable+clear Save. Root stays available in both chains."""
+        """Save ⟂ Download/Warm up/Lock: when Save is on, disable+clear Download/Warm up/Lock; when any of
+        those is on, disable+clear Save. Root stays available in both chains."""
         save_on = self.chain_vars["save"].get()
-        unit_on = self.chain_vars["download"].get() or self.chain_vars["lock"].get()
-        for k in ("download", "lock"):
+        unit_on = any(self.chain_vars[k].get() for k in ("download", "warmup", "lock"))
+        for k in ("download", "warmup", "lock"):
             self.chain_cbs[k].configure(state="disabled" if save_on else "normal")
             if save_on:
                 self.chain_vars[k].set(False)
@@ -1464,16 +1468,16 @@ class App:
             return None
         return serials
 
-    _CHAIN_ORDER = ("root", "save", "download", "lock")
+    _CHAIN_ORDER = ("root", "save", "download", "warmup", "lock")
 
     def _resolve_chain(self, ticked):
         """Turn the ticked action checkboxes into an ordered, validated step list.
-        Returns (steps_in_fixed_order, error_or_None). Save is mutually exclusive with Download/Lock."""
+        Returns (steps_in_fixed_order, error_or_None). Save is mutually exclusive with Download/Warm up/Lock."""
         on = [k for k in App._CHAIN_ORDER if ticked.get(k)]
         if not on:
             return [], "Tick at least one action to run."
-        if "save" in on and ("download" in on or "lock" in on):
-            return [], "Save (golden capture) can't run with Download/Lock — they're opposite directions."
+        if "save" in on and ("download" in on or "warmup" in on or "lock" in on):
+            return [], "Save (golden capture) can't run with Download/Warm up/Lock — they're opposite directions."
         return on, None
 
     def _profile_map(self, serials):
@@ -1880,6 +1884,9 @@ class App:
             return PV.seal_all(mk_adb, mk_fb, devs, profiles_root=self.profiles_root, appdir=APPDIR,
                                log=self.log, profile_map=pm, force_serials=force,
                                on_critical=self._on_flash_critical)
+        if step == "warmup":
+            return PV.warmup_all(mk_adb, devs, root=self.profiles_root, log=self.log, profile_map=pm,
+                                 parallel=True)
         raise ValueError(f"unknown step {step!r}")
 
     def _run_chain_core(self, steps, serials, save_name):
@@ -1912,7 +1919,7 @@ class App:
         if "save" in steps and len(serials) != 1:
             messagebox.showinfo("CAS", "Save captures ONE golden device. Select a single device (or untick Save).")
             return
-        names = {"root": "Root", "save": "Save", "download": "Download", "lock": "Lock"}
+        names = {"root": "Root", "save": "Save", "download": "Download", "warmup": "Warm up", "lock": "Lock"}
         chain = " → ".join(names[s] for s in steps)
         if not messagebox.askyesno("CAS — Run", f"Run {chain} on {len(serials)} device(s)?\nThey run IN PARALLEL per stage."):
             return

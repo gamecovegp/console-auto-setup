@@ -3264,6 +3264,22 @@ class TestRunChain(unittest.TestCase):
         self.assertEqual(survivors, ["S1"])
         self.assertEqual(captured_serials, ["S1"])
 
+    def test_warmup_runs_between_download_and_lock(self):
+        app = self._app()
+        survivors = app._run_chain_core(["root", "download", "warmup", "lock"], ["S1", "S2"], None)
+        # S1 fails root and is dropped; warm-up sits between Download and Lock. Download gets
+        # wait_boot=True because warm-up follows it — a warm-up must never touch a rebooting unit.
+        self.assertEqual(app._stage_calls,
+                         [("root", ["S1", "S2"], False), ("download", ["S2"], True),
+                          ("warmup", ["S2"], False), ("lock", ["S2"], False)])
+        self.assertEqual(survivors, ["S2"])
+
+    def test_download_waits_for_boot_when_only_warmup_follows(self):
+        """Regression guard: wait_boot keys off 'any step follows', not off Lock specifically."""
+        app = self._app()
+        app._run_chain_core(["download", "warmup"], ["S2"], None)
+        self.assertEqual(app._stage_calls, [("download", ["S2"], True), ("warmup", ["S2"], False)])
+
 
 class TestSealSelected(unittest.TestCase):
     """Settings ▸ 'Seal selected unit' — single-device slice of ③ Lock via PV.seal_all."""
@@ -3345,6 +3361,18 @@ class TestResolveChain(unittest.TestCase):
         steps, err = self._r()
         self.assertEqual(steps, [])
         self.assertTrue(err)
+
+    def test_orders_warmup_between_download_and_lock(self):
+        self.assertEqual(self._r(lock=True, warmup=True, download=True, root=True),
+                         (["root", "download", "warmup", "lock"], None))
+
+    def test_warmup_alone_is_valid(self):
+        self.assertEqual(self._r(warmup=True), (["warmup"], None))
+
+    def test_save_excludes_warmup(self):
+        steps, err = self._r(save=True, warmup=True)
+        self.assertEqual(steps, [])
+        self.assertIn("Save", err)
 
 
 class TestModalManifestTransforms(unittest.TestCase):

@@ -13,7 +13,7 @@ Severity (shown in the UI) is the strongest gate any action gets: block ✗ > co
 """
 
 # action keys, in the footer's run order
-ACTIONS = ("root", "save", "download", "lock")
+ACTIONS = ("root", "save", "download", "warmup", "lock")
 
 _BLOCK_ALL = {a: "block" for a in ACTIONS}
 
