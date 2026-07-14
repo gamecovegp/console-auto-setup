@@ -3382,6 +3382,26 @@ class TestCliWarmup(unittest.TestCase):
             rc = CLI.main(["--library", t, "--adb", "adb", "warmup", "--profile", "nope"])
         self.assertEqual(rc, 1)
 
+    def test_help_does_not_crash_on_a_legacy_codepage_console(self):
+        """A Windows console defaults to cp1252, which can't encode the circled step digits (③ etc.) in
+        the CLI help/log text — argparse print_help would die with UnicodeEncodeError (the frozen
+        cas.exe --help smoke test). main() must make stdout/stderr UTF-8 so --help works on any console."""
+        import io, sys as _sys
+        import cas.cli as CLI
+        buf = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict")
+        old_out, old_err = _sys.stdout, _sys.stderr
+        _sys.stdout = _sys.stderr = buf
+        try:
+            with self.assertRaises(SystemExit) as cm:      # --help prints then exits 0
+                CLI.main(["--help"])
+        finally:
+            _sys.stdout, _sys.stderr = old_out, old_err
+        self.assertEqual(cm.exception.code, 0)             # NOT a UnicodeEncodeError
+        buf.flush()
+        out = buf.buffer.getvalue().decode("utf-8", errors="replace")
+        self.assertIn("warmup", out)                       # the help actually printed
+        self.assertIn("③", out)                       # ③ survived to output, not a crash
+
 
 class TestStageWarmup(unittest.TestCase):
     """F9: `_stage`'s 'warmup' branch is the ONLY GUI -> PV.warmup_all wiring; TestRunChain stubs

@@ -33,6 +33,16 @@ def _resolve_profile(adb, name, proot):
 
 
 def main(argv=None):
+    # Windows consoles default to a legacy code page (cp1252) that can't encode the circled step digits
+    # (⓪②③④…) CAS uses in its help + log text — argparse print_help and every provisioning log() would
+    # then die with UnicodeEncodeError (this is what broke the frozen `cas.exe --help` smoke test). Force
+    # UTF-8 on stdout/stderr so output is safe on any console; errors='replace' is a belt-and-braces for
+    # a stream that can't be reconfigured. No-op where stdout is already UTF-8 (Linux/macOS).
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
     ap = argparse.ArgumentParser(prog="cas.cli", description="Console Auto Setup — CLI")
     # Default to None so an explicit --adb/--fastboot override always wins over the sibling
     # platform-tools auto-detect (find_adb) applied below.
@@ -49,7 +59,7 @@ def main(argv=None):
     sub.add_parser("root-all", help="root every connected device (auto-matched, from PC)")
     pp = sub.add_parser("provision", help="provision one device"); pp.add_argument("--profile")
     sub.add_parser("provision-all", help="provision every connected device (auto-matched)")
-    wp = sub.add_parser("warmup", help="open every app once so emulators index their games (③)")
+    wp = sub.add_parser("warmup", help="open the emulators once so the frontends index their games (③)")
     wp.add_argument("--profile")
     sub.add_parser("warmup-all", help="warm up every connected device (auto-matched)")
     sub.add_parser("seal-all", help="seal every connected device (auto-matched)")
