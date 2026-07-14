@@ -26,6 +26,7 @@ from . import dialogs as D
 from .adb import Adb, Fastboot, list_devices
 from . import config
 from .config import library_root
+from . import theme as THEME
 
 
 def _stamp():
@@ -104,11 +105,6 @@ _APP_LABELS = {
     "gamehub.lite": "GameHub  ·  PC games",
     "com.gamecove.gamecove_companion": "GameCove Companion  ·  app",
 }
-
-# The ES-DE front-end package. Its box art only matters when ES-DE itself is installed, so the
-# "ES-DE box art" tab is shown/hidden to follow whether the selected profile's golden has it
-# (see _sync_media_tab).
-_ESDE_PKG = "org.es_de.frontend"
 
 # Behavior @flags shown (as the behavior section) in BOTH app-pick modals — the game frontend's emulator
 # picks (@gamelauncher) and the homescreen layout (@homescreen) are behaviors, NOT app rows; the launcher
@@ -205,30 +201,6 @@ def _state_cell(state):
     return f"● {state or '?'}"
 
 
-def _human_size(nbytes):
-    """Bytes -> '3.4 GB' / '512 MB' / '— ' for 0."""
-    n = float(nbytes or 0)
-    if n <= 0:
-        return "—"
-    for unit in ("B", "KB", "MB", "GB"):
-        if n < 1024:
-            return f"{n:.0f} {unit}" if unit in ("B", "KB") else f"{n:.1f} {unit}"
-        n /= 1024
-    return f"{n:.1f} TB"
-
-
-def _human_eta(secs):
-    """Seconds -> '45s' / '4m 05s' / '1h 12m'."""
-    secs = int(max(0, secs or 0))
-    if secs < 60:
-        return f"{secs}s"
-    m, s = divmod(secs, 60)
-    if m < 60:
-        return f"{m}m {s:02d}s"
-    h, m = divmod(m, 60)
-    return f"{h}h {m:02d}m"
-
-
 class App:
     def __init__(self, win, adb_bin="adb", fb_bin="fastboot"):
         self.win = win
@@ -277,6 +249,7 @@ class App:
         setm.add_command(label="Log folder…", command=self.choose_log_dir)
         setm.add_command(label="Firmware folder…", command=self.choose_firmware_dir)
         setm.add_command(label="Managed APKs…", command=self._open_apk_store)
+        setm.add_command(label="ES-DE box art…", command=self._open_boxart)
         setm.add_separator()
         setm.add_command(label="Seal selected unit (retail lock)…", command=self.seal_selected)
         setm.add_command(label="Release selected unit (un-provision)…", command=self.release_selected)
@@ -456,12 +429,10 @@ class App:
         if d:
             config.set_firmware_dir(d)
             self.log(f"Firmware library → {d}")
-            self.refresh_firmware()
         elif cur and messagebox.askyesno(
                 "CAS", "Clear the firmware-library folder? It will live under the library root instead."):
             config.set_firmware_dir(None)
             self.log("Firmware library → library root/_firmware (shared firmware folder cleared).")
-            self.refresh_firmware()
 
     def choose_library(self):
         """Pick the profile/golden library folder — e.g. the external drive '…/CAS Profiles' so goldens are
@@ -472,7 +443,6 @@ class App:
             self._lib_last_reachable = self._lib_reachable()   # re-baseline: a path change is not a drive edge
             self._update_lib_label()
             self.refresh_profiles()
-            self.refresh_firmware()
             self.refresh_devices()
         cur = config.load_config().get("library")
         d = filedialog.askdirectory(
@@ -560,211 +530,134 @@ class App:
 
     # ---------- layout ----------
     def _build(self):
-        top = ttk.Frame(self.win, padding=8)
-        # `top` is packed LAST (end of this method), AFTER the footer + log — so those pin to the window
-        # bottom and stay visible on a short / non-maximised window; `top` takes the space that's left.
+        """Toolbar (top) · device list (fills) · footer + log (pinned to the bottom).
 
-        # Devices (left-top)
-        devf = ttk.LabelFrame(top, text="Connected devices", padding=6)
-        devf.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 6))
-        self.dev_tree = ttk.Treeview(devf, columns=("model", "sd", "profile", "firmware", "state"),
-                                     show="tree headings", height=7, selectmode="extended")
-        self.dev_tree.heading("#0", text="serial")
-        for c, t, w in (("model", "model", 115), ("sd", "SD card", 125),
-                        ("profile", "profile", 105), ("firmware", "firmware", 140),
-                        ("state", "state", 65)):
-            self.dev_tree.heading(c, text=t)
-            self.dev_tree.column(c, width=w)
-        self.dev_tree.column("#0", width=120)
-        self.dev_tree.pack(fill="both", expand=True)
-        # Double-click a device row to ASSIGN the dropdown profile to it — quick manual override, works even
-        # when auto-match said "(no match)" (e.g. several per-tier profiles share a model). MANUAL ALWAYS WINS.
-        self.dev_tree.bind("<Double-1>", self._assign_on_doubleclick)
-        self.dev_tree.bind("<<TreeviewSelect>>",
-                           lambda e: (self._probe_sd_media(), self._update_fw_status()))  # SD box art + firmware
-        self._build_context_menu()          # right-click: assign profile/firmware, run a step, seal, release…
-        devbtns = ttk.Frame(devf)
-        devbtns.pack(anchor="w", fill="x", pady=(6, 0))
-        _tip(ttk.Button(devbtns, text="Refresh devices", command=self.refresh_devices),
-             "Re-scan for plugged-in devices and re-match each one to its profile by model.") \
-            .pack(side="left")
-        _tip(ttk.Button(devbtns, text="Assign profile → selected",
-                        command=lambda: self.assign_profile(self.prof_var.get(), list(self.dev_tree.selection()))),
-             "Set the profile (the one picked in the dropdown on the right) on the device row(s) selected "
-             "in this list — Ctrl/Shift-click to pick several. OVERRIDES the model auto-match and sticks "
-             "across refreshes. Tip: double-click a row to assign the dropdown profile to it fast.") \
-            .pack(side="left", padx=(6, 0))
-
-        # Profiles + manifest (right-top)
-        prof = ttk.LabelFrame(top, text="Profile", padding=6)
-        prof.grid(row=0, column=1, sticky="nsew", pady=(0, 6))
-        row = ttk.Frame(prof)
-        row.pack(fill="x")
-        ttk.Label(row, text="Profile:").pack(side="left")
-        self.prof_var = tk.StringVar()
-        self.prof_combo = ttk.Combobox(row, textvariable=self.prof_var, state="readonly", width=24)
-        self.prof_combo.pack(side="left", padx=4)
-        self.prof_combo.bind("<<ComboboxSelected>>", lambda e: self.on_select_profile())
-        _tip(ttk.Button(row, text="New…", command=self.new_profile),
-             "Create a NEW empty profile (a saved-setup slot): give it a name and the device model it "
-             "matches. Then plug in that family's master unit and use 'Save device → profile' to fill it.") \
-            .pack(side="left", padx=2)
-        _tip(ttk.Button(row, text="Delete…", command=lambda: self.delete_profile(self.prof_var.get())),
-             "Delete this profile. It's ARCHIVED to profiles/_archive (recoverable) and you must type its "
-             "exact name to confirm — nothing is permanently erased.").pack(side="left", padx=2)
+        The old right-hand panel is GONE: per-device assignment is on the row's context menu, and the
+        libraries live in their own windows (Profiles… / Firmware…). One list, full width, because the
+        device list is the only thing an operator actually watches."""
+        # ── toolbar ───────────────────────────────────────────────────────────────────────────────
+        bar = ttk.Frame(self.win, style="Toolbar.TFrame", padding=(10, 8))
+        bar.pack(side="top", fill="x")
+        _tip(ttk.Button(bar, text="⟳ Refresh", style="Toolbar.TButton", command=self.refresh_devices),
+             "Re-scan for plugged-in devices and re-match each one to its profile.").pack(side="left")
+        _tip(ttk.Button(bar, text="Profiles…", style="Toolbar.TButton", command=self._open_profiles),
+             "The profile library: every saved setup, its golden and when it was captured. Assign one "
+             "to a unit by RIGHT-CLICKING the unit's row.").pack(side="left", padx=(8, 0))
+        _tip(ttk.Button(bar, text="Firmware…", style="Toolbar.TButton", command=self._open_firmware),
+             "The device-root-firmware library. Assign one to a unit by RIGHT-CLICKING the unit's row.") \
+            .pack(side="left", padx=(8, 0))
+        _tip(ttk.Button(bar, text="Managed APKs…", style="Toolbar.TButton", command=self._open_apk_store),
+             "The server APK store: the app builds CAS installs, and which ones are always-installed.") \
+            .pack(side="left", padx=(8, 0))
         self.lib_var = tk.StringVar()
-        ttk.Label(prof, textvariable=self.lib_var, foreground="#555").pack(anchor="w", pady=(2, 0))
+        ttk.Label(bar, textvariable=self.lib_var, style="Toolbar.TLabel").pack(side="right")
         self._update_lib_label()
-        # golden status for the selected profile: none saved, or size + estimated download time
-        self.golden_var = tk.StringVar()
-        ttk.Label(prof, textvariable=self.golden_var, foreground="#555").pack(anchor="w")
 
-        # The rest of the panel lives in TABS so it isn't one tall wall of controls. The profile selector +
-        # library + golden status above stay visible across all tabs.
-        nb = ttk.Notebook(prof)
-        nb.pack(fill="both", expand=True, pady=(6, 0))
-        self.nb = nb
-
-        # App selection (Save = capture / Download = restore) is NOT a sidebar list — it pops as a modal
-        # when you click ▶ Run, detected for that action (the connected device for Save, the golden for
-        # Download). See _app_pick_modal + the Save/Download wrappers in run_chain. The sidebar keeps only
-        # the bench settings below.
-        #
-        # ── Tab 1: ES-DE box art (a BENCH setting persisted in cas-config.json) ──
-        # Only shown when the selected profile's golden contains ES-DE — _sync_media_tab() hides/restores
-        # it as the profile changes; box art is meaningless without the front-end.
-        media_tab = ttk.Frame(nb, padding=8)
-        nb.add(media_tab, text="ES-DE box art")
-        self.media_tab = media_tab
-        self.media_mode = tk.StringVar(value="push" if config.es_media_src() else "sd")
-        self.media_path = tk.StringVar(value=config.es_media_src() or "")
-        ttk.Radiobutton(media_tab, text="Use the SD card  (no transfer — box art rides the SD image)",
-                        value="sd", variable=self.media_mode, command=self._on_media_mode).pack(anchor="w")
-        prow = ttk.Frame(media_tab)
-        prow.pack(fill="x", pady=(6, 0))
-        ttk.Radiobutton(prow, text="Push from PC folder:", value="push",
-                        variable=self.media_mode, command=self._on_media_mode).pack(side="left")
-        ttk.Entry(prow, textvariable=self.media_path, width=30).pack(side="left", padx=(4, 0))
-        ttk.Button(prow, text="Browse…", command=self._browse_media).pack(side="left", padx=4)
-        self.sd_media_var = tk.StringVar(value="")    # auto-detected SD status (filled on refresh/select)
-        ttk.Label(media_tab, textvariable=self.sd_media_var, foreground="#555",
-                  wraplength=440, justify="left").pack(anchor="w", pady=(10, 0))
-
-        # ── Tab 2: Root images (for ⓪ Root) — the init_boot to Magisk-patch per unit comes from the FIRMWARE
-        #    LIBRARY: assign the device's build (uses its OWN init_boot) or "(default kit)" for the bundled
-        #    image. The old per-profile "Stock init_boot" field was removed — it just duplicated "(default kit)". ──
-        root_tab = ttk.Frame(nb, padding=8)
-        nb.add(root_tab, text="Root images")
-
-        # ── Firmware library (DEVICE ROOT firmware: the full OS/boot build per device; library-only —
-        #    CAS stores + suggests it, it does NOT flash. Distinct from emulator BIOS.) ──
-        ttk.Label(root_tab, text="Firmware library (device root firmware)",
-                  font=("", 9, "bold")).pack(anchor="w")
-        # Where the firmware catalog resolves + reachability (mirrors the profile Library line above), so an
-        # empty dropdown is explained — e.g. the library drive's _firmware dir unmounted, falling back to a
-        # local dir.
-        self.fw_lib_var = tk.StringVar()
-        ttk.Label(root_tab, textvariable=self.fw_lib_var, foreground="#555",
-                  wraplength=440, justify="left").pack(anchor="w", pady=(1, 2))
-        fwrow = ttk.Frame(root_tab)
-        fwrow.pack(fill="x", pady=(4, 0))
-        ttk.Label(fwrow, text="Firmware:").pack(side="left")
-        self.fw_var = tk.StringVar()
-        self.fw_combo = ttk.Combobox(fwrow, textvariable=self.fw_var, state="readonly", width=22)
-        self.fw_combo.pack(side="left", padx=4)
-        _tip(ttk.Button(fwrow, text="Assign → selected",
-                        command=lambda: self.assign_firmware(self.fw_var.get(), list(self.dev_tree.selection()))),
-             "Set this firmware on the selected device row(s) as a sticky MANUAL override (always wins over "
-             "the serial-prefix auto-match). Remembered across launches.").pack(side="left", padx=2)
-        _tip(ttk.Button(fwrow, text="Unset",
-                        command=lambda: self.unassign_firmware(list(self.dev_tree.selection()))),
-             "Clear the firmware override on the selected device row(s). Root then auto-matches, or uses "
-             "the DEFAULT init_boot kit when nothing matches — use this when the library only has a "
-             "wrong-platform image for this unit.").pack(side="left", padx=2)
-        _tip(ttk.Button(fwrow, text="Add / update…", command=self._add_firmware),
-             "Ingest a raw firmware BUILD FOLDER into the library as a new version (auto-detects device / "
-             "storage / flash target, keeps history). Pick the folder containing the emmc/ or ufs/ payload.") \
-            .pack(side="left", padx=2)
-        self.fw_status_var = tk.StringVar(value="Select a device to see its firmware suggestion.")
-        ttk.Label(root_tab, textvariable=self.fw_status_var, foreground="#555",
-                  wraplength=440, justify="left").pack(anchor="w", pady=(6, 0))
-        self.refresh_firmware()
-
-        top.columnconfigure(0, weight=1)
-        top.columnconfigure(1, weight=1)
-        top.rowconfigure(0, weight=1)
-
-        # Action area: ONE "apply to ALL connected" toggle + the workflow buttons in order:
-        # Root -> Save a master -> Download -> Lock. Each device carries its OWN assigned profile (the
-        # "profile" column; auto-matched by model, or hand-set via "Assign profile → selected"). Root,
-        # Download and Lock run on the SELECTED row(s) — or EVERY connected device when the toggle is on —
-        # IN PARALLEL, each using its assigned profile. Only Save is always one device.
-        # Footer pinned to the window BOTTOM so the action buttons stay visible even on a short window —
-        # the devices/profile/log areas above shrink instead of pushing the buttons off-screen (the cause
-        # of the "buttons have no text" clip on small screens).
+        # ── footer (pinned BOTTOM, packed before the list so a short window never clips ▶ Run) ─────
         footer = ttk.Frame(self.win)
         footer.pack(side="bottom", fill="x")
-        act = ttk.Frame(footer, padding=(8, 0))
+
+        selrow = ttk.Frame(footer, padding=(10, 6, 10, 0))
+        selrow.pack(side="top", fill="x")
+        self.sel_var = tk.StringVar(value=_selection_summary(0, 0))
+        ttk.Label(selrow, textvariable=self.sel_var).pack(side="left")
+        ttk.Button(selrow, text="Clear", command=self.clear_selection).pack(side="right")
+        ttk.Button(selrow, text="Select all", command=self.select_all_devices).pack(side="right", padx=(0, 6))
+
+        act = ttk.Frame(footer, padding=(10, 4))
         act.pack(side="top", fill="x")
-        self.batch_var = tk.BooleanVar(value=False)
-        _tip(ttk.Checkbutton(act, text="Apply to ALL connected devices  (else: the selected row(s))",
-                             variable=self.batch_var, command=self._on_batch_toggle),
-             "OFF: Root / Download / Lock run on the device ROW(S) you select (Ctrl/Shift-click for "
-             "several).\n"
-             "ON: they run on EVERY connected device.\n"
-             "Either way they run IN PARALLEL, and EACH device uses its OWN assigned profile (the "
-             "'profile' column). The golden is never sealed.") \
-            .pack(anchor="w", pady=(2, 2))
-        row2 = ttk.Frame(act)
-        row2.pack(fill="x")
-        self.chain_vars = {}                              # action key -> BooleanVar
-        self.chain_cbs = {}                               # action key -> the Checkbutton (for enable/disable)
+        self.chain_vars = {}
+        self.chain_cbs = {}
         for key, label, tip in (
-            ("root", "⓪ Root", "Root the target(s): flash the profile's Magisk-patched init_boot + install Magisk from the PC."),
-            ("save", "① Save → profile", "Capture ONE selected device into a profile (golden). Mutually exclusive with Download/Warm up/Lock."),
+            ("root", "⓪ Root", "Root the target(s): flash the assigned firmware's Magisk-patched init_boot + install Magisk."),
+            ("save", "① Save", "Capture ONE selected device into a profile (golden). Mutually exclusive with Download/Warm up/Lock."),
             ("download", "② Download", "Install each device's assigned profile (apps + saves/BIOS/settings/grants/homescreen)."),
-            ("warmup", "③ Warm up", "Open every installed app once (frontends last) so each emulator initializes "
-                                    "against its restored settings and indexes its games. Without it, a never-opened "
-                                    "emulator won't launch a game from the frontend. Apps are left running to finish "
-                                    "indexing; nothing is force-stopped."),
+            ("warmup", "③ Warm up", "Open every installed app once (frontends last) so each emulator initializes against "
+                                    "its restored settings and indexes its games."),
             ("lock", "④ Lock", "Retail-seal verified unit(s): hide Dev options, un-root, disable USB debugging."),
         ):
             v = tk.BooleanVar(value=False)
             self.chain_vars[key] = v
-            cb = ttk.Checkbutton(row2, text=label, variable=v, command=self._on_chain_tick)
-            cb.pack(side="left", padx=4, pady=4)
+            cb = ttk.Checkbutton(act, text=label, variable=v, command=self._on_chain_tick)
+            cb.pack(side="left", padx=(0, 10))
             _tip(cb, tip)
             self.chain_cbs[key] = cb
-        self.run_btn = ttk.Button(row2, text="▶ Run", command=self.run_chain)
-        self.run_btn.pack(side="left", padx=8, pady=4)
-        _tip(self.run_btn, "Run the ticked actions in order (Root → Download → Warm up → Lock, or Root → Save), per device, in parallel.")
-        self.btns = list(self.chain_cbs.values()) + [self.run_btn]   # disabled together while busy
-        # Cancel: aborts the running op. NOT in self.btns (those get disabled while busy) — it's the one
-        # control that must stay live during an operation. Enabled only while busy.
-        self.cancel_btn = ttk.Button(row2, text="✗ Cancel", command=self._cancel_op, state="disabled")
-        self.cancel_btn.pack(side="right", padx=4, pady=4)
+        self.run_btn = ttk.Button(act, text="▶ Run", style="Accent.TButton", command=self.run_chain)
+        self.run_btn.pack(side="left", padx=(8, 0))
+        _tip(self.run_btn, "Run the ticked actions in order on the SELECTED device(s), in parallel.")
+        self.btns = list(self.chain_cbs.values()) + [self.run_btn]
+        self.cancel_btn = ttk.Button(act, text="✗ Cancel", command=self._cancel_op, state="disabled")
+        self.cancel_btn.pack(side="right")
         _tip(self.cancel_btn,
              "Stop the running operation. Safe during the copy/boot phases; during the brief init_boot "
              "WRITE it asks first, since interrupting a flash can brick the unit.")
 
-        # Activity bar: an animated progress strip + live status/elapsed so long jobs (e.g. pulling a
-        # multi-GB golden over USB) visibly show they're WORKING, not frozen.
-        statusf = ttk.Frame(footer, padding=(8, 2))
+        statusf = ttk.Frame(footer, padding=(10, 2, 10, 8))
         statusf.pack(side="top", fill="x")
         self.status_var = tk.StringVar(value="Ready.")
-        ttk.Label(statusf, textvariable=self.status_var).pack(side="left")
+        ttk.Label(statusf, textvariable=self.status_var, style="Muted.TLabel").pack(side="left")
         self.progress = ttk.Progressbar(statusf, mode="indeterminate", length=210)
-        self.progress.pack(side="right", padx=4)
+        self.progress.pack(side="right")
 
-        # Log — a compact pane pinned just above the footer. Packed BEFORE `top` (below) so footer + log
-        # always stay on screen; `top` takes the rest and its app list scrolls when the window is short.
+        # ── log (pinned above the footer) ─────────────────────────────────────────────────────────
         logf = ttk.LabelFrame(self.win, text="Log", padding=6)
-        logf.pack(side="bottom", fill="both", expand=False, padx=8, pady=(0, 8))
-        self.logbox = scrolledtext.ScrolledText(logf, height=6, state="disabled", wrap="word")
+        logf.pack(side="bottom", fill="both", expand=False, padx=10, pady=(0, 8))
+        self.logbox = scrolledtext.ScrolledText(logf, height=6, state="disabled", wrap="word",
+                                                relief="flat", borderwidth=0)
         self.logbox.pack(fill="both", expand=True)
 
-        # finally place the top area — LAST, so the bottom-pinned footer + log reserve their space first.
-        top.pack(side="top", fill="both", expand=True)
+        # ── the selection hint, pinned bottom-wards so it sits directly UNDER the list ────────────
+        # (pack order matters: every side="bottom" widget stacks upward from the window bottom, so
+        # footer → log → hint puts the hint immediately below the list, which is packed last.)
+        hint = ttk.Frame(self.win, padding=(10, 0, 10, 4))
+        hint.pack(side="bottom", fill="x")
+        ttk.Label(hint, style="Muted.TLabel",
+                  text="Right-click a device for its actions  ·  Ctrl-click to add  ·  "
+                       "Shift-click for a range  ·  Ctrl+A selects all").pack(side="left")
+
+        # ── device list (LAST → takes every pixel the pinned areas didn't) ────────────────────────
+        listf = ttk.Frame(self.win, padding=(10, 8))
+        listf.pack(side="top", fill="both", expand=True)
+        cols = ("model", "sd", "profile", "firmware", "state")
+        self.dev_tree = ttk.Treeview(listf, columns=cols, show="tree headings", selectmode="extended")
+        self.dev_tree.heading("#0", text="serial")
+        self.dev_tree.column("#0", width=150, minwidth=110)
+        for c, t, w in (("model", "model", 150), ("sd", "SD card", 170),
+                        ("profile", "profile", 190), ("firmware", "firmware", 190),
+                        ("state", "state", 110)):
+            self.dev_tree.heading(c, text=t)
+            self.dev_tree.column(c, width=w, minwidth=70)
+        vsb = ttk.Scrollbar(listf, orient="vertical", command=self.dev_tree.yview)
+        self.dev_tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        self.dev_tree.pack(side="left", fill="both", expand=True)
+        self.dev_tree.bind("<Double-1>", self._assign_on_doubleclick)
+        self.dev_tree.bind("<<TreeviewSelect>>", lambda e: self._on_tree_select())
+        self.dev_tree.bind("<Control-a>", lambda e: (self.select_all_devices(), "break")[1])
+        self._build_context_menu()
+
+        # Box-art state lives on the App (BoxArtDialog binds to these); no widget in the main window.
+        self.media_mode = tk.StringVar(value="push" if config.es_media_src() else "sd")
+        self.media_path = tk.StringVar(value=config.es_media_src() or "")
+        self.sd_media_var = tk.StringVar(value="")
+
+        self._update_run_state()
+
+    def _on_tree_select(self):
+        self.sel_var.set(_selection_summary(len(self.dev_tree.selection()),
+                                            len(self.dev_tree.get_children())))
+        self._update_run_state()
+
+    def _update_run_state(self):
+        """▶ Run is live only when something is selected AND at least one action is ticked — instead of
+        popping a 'select a device' box AFTER the click."""
+        if self.busy:
+            return                                   # _run_bg owns the button while a job is in flight
+        ready = bool(self.dev_tree.selection()) and any(v.get() for v in self.chain_vars.values())
+        self.run_btn.configure(state="normal" if ready else "disabled")
+
+    def clear_selection(self):
+        self.dev_tree.selection_remove(*self.dev_tree.selection())
 
     # ---------- logging / threading ----------
     def log(self, msg):
@@ -855,6 +748,7 @@ class App:
             self._flash_critical = False
             for b in self.btns:
                 b.configure(state="normal")
+            self._update_run_state()                 # ← an empty selection leaves ▶ Run disabled
             try:
                 self.win.configure(cursor="")
             except tk.TclError:
@@ -940,25 +834,12 @@ class App:
 
     # ---------- data refresh ----------
     def refresh_profiles(self):
+        """Re-read the library (the profile windows/pickers list it live, so there's no combobox to
+        fill any more) and warn when the library drive isn't there."""
         self._update_lib_label()
         if not self._lib_reachable():
             self.log(f"Library not reachable: {self.profiles_root} — is the library drive connected? "
-                     "Use 'Library…' to fix the path.")
-        names = [p.name for p in P.list_profiles(self.profiles_root)]
-        self.prof_combo["values"] = names
-        if names and self.prof_var.get() not in names:
-            self.prof_var.set(names[0])
-        self.on_select_profile()
-
-    def on_select_profile(self):
-        # App selection moved to the ▶ Run modal (see _app_pick_modal). The sidebar only reflects the
-        # profile's bench state now: golden status, stock init_boot, and the ES-DE box-art tab.
-        self._update_golden_status()         # golden: none / size + download ETA
-        name = self.prof_var.get()
-        if not name:
-            self._sync_media_tab()                         # no profile -> no golden -> hide the box-art tab
-            return
-        self._sync_media_tab()                             # box-art tab follows whether the golden has ES-DE
+                     "Use Settings → 'Library folder…' to fix the path.")
 
     def refresh_devices(self):
         self.dev_tree.delete(*self.dev_tree.get_children())
@@ -1031,34 +912,43 @@ class App:
           * AUTO assignment    -> FOLLOWS the live match every refresh, so if something CHANGES (SD card
                                   swapped to a different tier, a better-matching profile added) the device
                                   re-auto-assigns itself.
-        Hand-assigned rows are tinted green."""
+        Hand-assigned rows are marked '(pinned)' in the profile column (row colour now carries device
+        state instead)."""
         self.fw_resolved = fwmap or {}
         snaps = snaps or {}
         self.dev_tree.delete(*self.dev_tree.get_children())
         changes = []                                       # auto-matches that CHANGED for a known device
-        for serial, model, sd, auto, state in rows:
+        for i, (serial, model, sd, auto, state) in enumerate(rows):
             if serial in self.assigned_manual:
-                shown = self.assigned.get(serial, auto)    # operator override: locked + remembered
+                shown = self.assigned.get(serial, auto)    # operator override: pinned + remembered
+                manual = True
             else:
                 shown = auto                               # auto: always reflect the current best match
+                manual = False
                 prev = self._last_auto.get(serial)
-                if prev is not None and prev != auto:      # known device whose auto-match just changed
+                if prev is not None and prev != auto:
                     changes.append((serial, prev, auto))
                 self._last_auto[serial] = auto
                 self.assigned[serial] = auto
-            tags = ("manual",) if serial in self.assigned_manual else ()
+            tags = ("odd" if i % 2 else "even", "st_" + (state or "other"))
             self.dev_tree.insert("", "end", iid=serial, text=serial,
-                                 values=(model, sd, shown, self._fw_cell(serial), state), tags=tags)
-            # complete the snapshot with the EFFECTIVE assigned profile's facts (known only here)
+                                 values=(model, sd, _profile_cell(shown, manual),
+                                         self._fw_cell(serial), _state_cell(state)),
+                                 tags=tags)
             sn = snaps.get(serial)
             if sn is not None and state == "device":
                 gold, mm_ok = self._profile_facts(shown, model)
                 sn.update(profile_name=shown, profile_has_golden=gold, profile_model_match_ok=mm_ok)
-        self.dev_tree.tag_configure("manual", foreground="#1a6f1a")
+        # Zebra stripes + a state-coloured row (amber = unauthorized, red = offline). The manual pin is
+        # shown in TEXT ('(pinned)'), not colour — one row can't carry two tints.
+        self.dev_tree.tag_configure("odd", background=THEME.ZEBRA)
+        self.dev_tree.tag_configure("even", background=THEME.LIGHT["surface"])
+        for st_name, key in THEME.STATE_COLORS.items():
+            self.dev_tree.tag_configure("st_" + st_name, foreground=THEME.LIGHT[key])
+        self._on_tree_select()                             # refresh the counter + ▶ Run after a rescan
         self._evaluate_warnings(snaps)
         self.log("refreshed: " + ", ".join(f"{r[0]} → {self.assigned.get(r[0], '?')}" for r in rows)
                  if rows else "refreshed: 0 device(s)")
-        self._probe_sd_media()                             # auto-detect ES-DE/box art on the connected SD
         if changes:                                        # inform the operator an auto-match changed (e.g. SD swap)
             body = "\n".join(f"  {s}:  {old}  →  {new}" for s, old, new in changes)
             messagebox.showinfo(
@@ -1463,14 +1353,6 @@ class App:
             self.log(f"download selection for {name}: {len(pkgs)} app(s), flags={fl}")
         return True
 
-    def _on_batch_toggle(self):
-        if self.batch_var.get():
-            self.status_var.set("Apply-to-ALL ON — Root, Download, Warm up & Lock run on EVERY connected device IN "
-                                "PARALLEL, each with its own assigned profile. Only Save is one device.")
-        else:
-            self.status_var.set("Selection mode — actions run on the device row(s) you select "
-                                "(Ctrl/Shift-click for several).")
-
     def _on_chain_tick(self):
         """Save ⟂ Download/Warm up/Lock: when Save is on, disable+clear Download/Warm up/Lock; when any of
         those is on, disable+clear Save. Root stays available in both chains."""
@@ -1483,6 +1365,7 @@ class App:
         self.chain_cbs["save"].configure(state="disabled" if unit_on else "normal")
         if unit_on:
             self.chain_vars["save"].set(False)
+        self._update_run_state()                     # ← ticking an action can arm ▶ Run
 
     def run_chain(self):
         steps, err = self._resolve_chain({k: v.get() for k, v in self.chain_vars.items()})
@@ -1530,21 +1413,16 @@ class App:
             warn_overwrite=True, on_new=self.new_profile)
         return pick.result
 
-    def _selected_profile(self):
-        name = self.prof_var.get()
-        return P.Profile(P.pathlib.Path(self.profiles_root) / name) if name else None
-
     def _selected_serials(self):
         return list(self.dev_tree.selection())
 
     def _action_targets(self):
-        """Serials an action runs on: ALL connected if 'Apply to ALL' is ticked, else the selected row(s).
-        Returns None (after a message) when nothing is targeted."""
-        serials = (list(self.dev_tree.get_children()) if self.batch_var.get()
-                   else list(self.dev_tree.selection()))
+        """The serials an action runs on: the SELECTED rows. (There is no apply-to-all mode any more —
+        Select all / Ctrl+A does that job, and the footer states the count before you press ▶ Run.)"""
+        serials = list(self.dev_tree.selection())
         if not serials:
-            messagebox.showinfo("CAS", "Select one or more device rows (Ctrl/Shift-click), or tick "
-                                       "'Apply to ALL connected devices'.")
+            messagebox.showinfo("CAS", "Select one or more device rows first "
+                                       "(Ctrl-click to add, Shift-click for a range, Ctrl+A for all).")
             return None
         return serials
 
@@ -1769,75 +1647,6 @@ class App:
             return "(no match)"
         return r["firmware_id"] + ("" if r.get("ok") else " ⚠")
 
-    def refresh_firmware(self):
-        """Populate the firmware dropdown with every firmware id in the library, and show WHERE the catalog
-        resolves + whether it's reachable — so an empty list is explained instead of silent. When a shared
-        external firmware dir is configured but currently unmounted, firmware_dir() silently falls back to
-        a local dir; we surface that ('points at the library drive, but it's unreachable') so it's clear,
-        not a mystery."""
-        try:
-            root = FW.firmware_root()
-        except Exception:
-            root = None
-        try:
-            ids = [f.id for f in FW.list_firmware(root)] if root else []
-        except Exception:
-            ids = []
-        # Offer the bundled DEFAULT kit init_boot as a first-class, assignable choice (first in the list),
-        # so a unit with no library match can be EXPLICITLY pinned to the default boot instead of "(no match)".
-        choices = [FW.DEFAULT_FW_ID] + ids
-        self.fw_combo["values"] = choices
-        if self.fw_var.get() not in choices:
-            self.fw_var.set(choices[0])
-        if not hasattr(self, "fw_lib_var"):
-            return
-        configured = config.load_config().get("firmware_dir")    # an explicit (e.g. shared drive) override, if any
-        def _isdir(p):
-            try:
-                return bool(p) and pathlib.Path(p).is_dir()
-            except OSError:
-                return False
-        if configured and not _isdir(configured):
-            # the server firmware dir is configured but not mounted right now → using the local fallback
-            self.fw_lib_var.set(f"Library: {configured}   ✗ library drive unreachable (mount dropped?) — "
-                                f"falling back to {root}")
-        elif not _isdir(root):
-            self.fw_lib_var.set(f"Library: {root}   ✗ not reachable (connect the library drive?)")
-        elif not ids:
-            self.fw_lib_var.set(f"Library: {root}   ✓ (no firmware yet)")
-        else:
-            self.fw_lib_var.set(f"Library: {root}   ✓ ({len(ids)} firmware)")
-
-    def _update_fw_status(self):
-        """Show the selected device's resolved firmware + logic-check + payload path under the dropdown."""
-        serial = self._selected_serial()
-        if not serial:
-            self.fw_status_var.set("Select a device to see its firmware suggestion.")
-            return
-        r = self.fw_resolved.get(serial)
-        if not r:
-            self.fw_status_var.set(f"{serial}: no firmware info — click 'Refresh devices'.")
-            return
-        if not r.get("firmware_id"):
-            self.fw_status_var.set(f"{serial}: no match in library — pick one and 'Assign → selected' "
-                                   f"(or assign '{FW.DEFAULT_FW_ID}' to use the bundled init_boot).")
-            return
-        if r.get("firmware_id") == FW.DEFAULT_FW_ID:
-            self.fw_status_var.set(f"{serial}: {FW.DEFAULT_FW_ID} (manual) — Root uses the bundled default "
-                                   f"init_boot.img; no library firmware is flashed.")
-            return
-        kind = "manual override" if r.get("manual") else "auto-suggested"
-        head = f"{serial}: {r['firmware_id']}  v{r.get('version') or '?'}  ({kind})"
-        check = "✓ logic-check OK" if r.get("ok") else "⚠ " + "; ".join(r.get("warnings") or ["mismatch"])
-        path = ""
-        fw = r.get("firmware")
-        try:
-            pd = fw.payload_dir(r.get("version")) if fw is not None else None
-            path = f"\npayload: {pd}" if pd else ""
-        except Exception:
-            path = ""
-        self.fw_status_var.set(f"{head}\n{check}{path}")
-
     def assign_firmware(self, fid, serials):
         """Assign firmware `fid` to `serials` as a sticky MANUAL override (always wins over the
         serial-prefix auto-match)."""
@@ -2034,7 +1843,6 @@ class App:
         def work():
             fw = FW.ingest(folder, FW.firmware_root(), firmware_id=fid.strip(), match=match)
             self.log(f"firmware ingested: {fw.id}  v{fw.current()}  match={fw.match_rules()}")
-            self.win.after(0, self.refresh_firmware)
             self.win.after(0, self.refresh_devices)
             if on_done is not None:
                 self.win.after(0, on_done)
@@ -2229,44 +2037,15 @@ class App:
                 self._lib_last_reachable = True
                 self.log("library drive detected — refreshed")
                 self.refresh_profiles()
-                self.refresh_firmware()
                 self.refresh_devices()
             elif action == "disconnect":
                 self._lib_last_reachable = False
                 self.log("library drive removed")
                 self._update_lib_label()
-                self.refresh_firmware()
             # action in (None, "defer") → leave the baseline untouched
         except tk.TclError:
             return                            # window gone — stop rescheduling
         self.win.after(2000, self._lib_watch)
-
-    def _update_golden_status(self):
-        """Show the selected profile's golden: none saved, or its size + an estimated download time
-        (averaged from past Downloads). Sizing runs off-thread so a slow external library never freezes
-        the UI."""
-        if not hasattr(self, "golden_var"):
-            return
-        name = self.prof_var.get()
-        if not name:
-            self.golden_var.set("")
-            return
-        prof = P.Profile(P.pathlib.Path(self.profiles_root) / name)
-        if not prof.has_golden():
-            self.golden_var.set("Golden: none saved yet — use '① Save device → profile' to capture one.")
-            return
-        self.golden_var.set("Golden: saved · sizing…")
-
-        def work():
-            b = prof.golden_size()
-            mbps = config.download_mbps(prof.name)        # prefer this profile's own download history
-            if mbps and b:
-                eta = f" · ~{_human_eta((b / 1048576.0) / mbps)} to download (avg {mbps:.0f} MB/s)"
-            else:
-                eta = " · download time estimated after the first Download"
-            txt = f"Golden: saved · {_human_size(b)}{eta}"
-            self.win.after(0, lambda: self.golden_var.set(txt))
-        threading.Thread(target=work, daemon=True).start()
 
     def _on_media_mode(self):
         """Inline ES-DE box-art radio changed (use the SD card vs push from a PC folder) — persist + react.
@@ -2341,26 +2120,6 @@ class App:
                 msg = f"SD: could not read ({e})"
             self.win.after(0, lambda m=msg: self.sd_media_var.set(m))
         threading.Thread(target=work, daemon=True).start()
-
-    def _sync_media_tab(self):
-        """Show the 'ES-DE box art' tab only when the SELECTED PROFILE's golden contains ES-DE — its box
-        art is meaningless without the front-end. Hidden tabs keep their config and original position, so
-        add() restores this one where it was. Defensive: no-op before the notebook is built."""
-        nb = getattr(self, "nb", None)
-        tab = getattr(self, "media_tab", None)
-        if nb is None or tab is None:
-            return
-        name = self.prof_var.get()
-        want = False
-        if name:
-            try:
-                want = _ESDE_PKG in P.Profile(P.pathlib.Path(self.profiles_root) / name).all_pkgs()
-            except Exception:
-                want = False
-        try:
-            nb.add(tab) if want else nb.hide(tab)
-        except tk.TclError:
-            pass
 
     def _scroll_tab(self, parent):
         """A vertically-scrollable frame filling `parent` above any bottom-pinned controls; returns the

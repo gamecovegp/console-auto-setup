@@ -293,7 +293,6 @@ class TestAddFirmwareOnDone(unittest.TestCase):
         app = G.App.__new__(G.App)             # bypass Tk __init__
         app.win = _FakeWin()
         app.log = lambda m: None
-        app.refresh_firmware = lambda: None
         app.refresh_devices = lambda: None
         app._bg_calls = []
 
@@ -556,3 +555,32 @@ class TestAssignProfileModelMismatchGuard(unittest.TestCase):
             self.assertNotIn("bootloop", text)
             self.assertNotIn("FLASH", text)
             self.assertIn("p1", text)                        # still a real (plain) confirmation prompt
+
+
+class TestActionTargets(unittest.TestCase):
+    """▶ Run targets the SELECTION, always. The 'Apply to ALL connected devices' toggle is gone — it
+    silently redefined what the main button did."""
+
+    def _app(self, selection):
+        from cas.gui import App
+        import types
+        app = App.__new__(App)
+        app.dev_tree = types.SimpleNamespace(selection=lambda: list(selection),
+                                             get_children=lambda: ["S1", "S2", "S3"])
+        return app
+
+    def test_targets_are_exactly_the_selected_rows(self):
+        app = self._app(["S1", "S3"])
+        self.assertEqual(app._action_targets(), ["S1", "S3"])
+
+    def test_an_empty_selection_targets_nothing(self):
+        from unittest import mock
+        app = self._app([])
+        with mock.patch("cas.gui.messagebox.showinfo") as info:
+            self.assertIsNone(app._action_targets())
+        info.assert_called_once()
+
+    def test_the_batch_toggle_is_gone(self):
+        from cas.gui import App
+        self.assertFalse(hasattr(App, "_on_batch_toggle"),
+                         "the Apply-to-ALL toggle and its handler must be removed")

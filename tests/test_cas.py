@@ -4703,8 +4703,7 @@ class TestLibWatch(unittest.TestCase):
         app.busy = busy
         app._lib_reachable = lambda: now
         calls = []
-        for name in ("refresh_profiles", "refresh_firmware",
-                     "refresh_devices", "_update_lib_label"):
+        for name in ("refresh_profiles", "refresh_devices", "_update_lib_label"):
             setattr(app, name, lambda n=name: calls.append(n))
         app.log = lambda m: None
         after = []
@@ -4717,7 +4716,6 @@ class TestLibWatch(unittest.TestCase):
         app._lib_watch()
         self.assertTrue(app._lib_last_reachable)
         self.assertIn("refresh_profiles", app._calls)
-        self.assertIn("refresh_firmware", app._calls)
         self.assertIn("refresh_devices", app._calls)
         self.assertEqual(app._after, [2000])           # rescheduled once
 
@@ -4734,7 +4732,6 @@ class TestLibWatch(unittest.TestCase):
         app._lib_watch()
         self.assertFalse(app._lib_last_reachable)
         self.assertIn("_update_lib_label", app._calls)
-        self.assertIn("refresh_firmware", app._calls)
         self.assertNotIn("refresh_profiles", app._calls)   # selection preserved
         self.assertEqual(app._after, [2000])
 
