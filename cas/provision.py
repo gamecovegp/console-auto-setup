@@ -810,8 +810,8 @@ def _warmup_pkgs(profile):
 
 
 def _warmup_order(pkgs, skip):
-    """The launch order for one unit: `pkgs` (already the manifest ∪ homescreen-bundled set from
-    `_warmup_pkgs`) first, then the frontends. PURE (no adb).
+    """The launch order for one unit: `pkgs` (the EMULATOR-filtered app set — see warmup()) first, then
+    the frontends. PURE (no adb).
 
     The frontends go LAST because they are what the warm-up is FOR — each must open after every emulator
     has initialized so it indexes against a warm set. They're an explicit constant, not manifest-derived:
@@ -842,9 +842,10 @@ def _cancel_sleep(cancel, seconds):
 
 
 def warmup(adb, profile, log=print, dwell=None, skip=None, settle=None):
-    """Warm up one unit: launch each of its apps once, in _warmup_order, and leave them RUNNING through a
-    settle period so the frontends — launched LAST, right before Lock would otherwise reboot the unit —
-    get real background indexing time; then sweep every launched app out of Android recents.
+    """Warm up one unit: launch each of its EMULATORS once (non-emulator apps are skipped — they need no
+    first-run warming), in _warmup_order, and leave them RUNNING through a settle period so the frontends
+    — launched LAST, right before Lock would otherwise reboot the unit — get real background indexing
+    time; then sweep every launched app out of Android recents.
 
     No app is force-stopped DURING the pass: launching app B simply backgrounds app A, where it keeps
     indexing — a force-stop right after a short dwell would kill a scan that had just started, which is
@@ -916,7 +917,16 @@ def warmup(adb, profile, log=print, dwell=None, skip=None, settle=None):
             "this profile's manifest missing/corrupt? Reporting ok over zero apps would ship a unit with "
             "every emulator un-indexed.")
         return False
-    order = _warmup_order(lib_pkgs, skip)
+    # Warm only the EMULATORS (the apps that do first-run initialization). Non-emulator apps in the
+    # manifest — Steam Link, the Companion, always-install utilities — need no warming, so opening them
+    # is wasted bench time. The empty-library guard above stays on the FULL set (it catches an unmounted
+    # drive / corrupt manifest, unrelated to emulator content); a readable profile that simply has no
+    # emulators is a soft warn, not a failure — the frontends are appended by _warmup_order regardless
+    # (they index against the warmed emulators, which is the point of the pass).
+    emu_pkgs = [p for p in lib_pkgs if p in P.EMULATOR_PKGS]
+    if not emu_pkgs:
+        log(" [warn] no emulators in this profile's app set — warming the frontends only.")
+    order = _warmup_order(emu_pkgs, skip)
 
     log(f"==> warm up: {len(order)} app(s) to open, {dwell:g}s each (they keep indexing in the background)")
     warmed = 0

@@ -3207,6 +3207,36 @@ class TestWarmup(unittest.TestCase):
             self.assertEqual(r.launched, [])
             self.assertTrue(any("launched 0" in m for m in logs))
 
+    def test_warmup_opens_only_emulators_plus_frontends(self):
+        """Warm-up opens the EMULATORS (EMULATOR_PKGS) plus the frontends last — NOT every app. A non-
+        emulator app in the manifest (Steam Link, the Companion, always-install utilities) needs no first-
+        run warming, so opening it is wasted bench time and must be skipped."""
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["org.ppsspp.ppsspp", "com.valvesoftware.steamlink",
+                                         "com.github.stenzek.duckstation"])
+            r = self.WarmRunner()                       # all listed apps + both frontends present
+            ok, logs = self._warm(prof, r)
+            self.assertTrue(ok)
+            self.assertIn("org.ppsspp.ppsspp", r.launched)               # emulator -> warmed
+            self.assertIn("com.github.stenzek.duckstation", r.launched)  # emulator -> warmed
+            self.assertNotIn("com.valvesoftware.steamlink", r.launched)  # NON-emulator -> skipped
+            # frontends still opened LAST — the indexing pass is the point of warm-up
+            self.assertIn("org.es_de.frontend", r.launched)
+            self.assertIn("com.handheld.launcher", r.launched)
+
+    def test_warmup_with_no_emulators_warms_frontends_only_and_warns(self):
+        """A profile whose apps are all non-emulators is not a hard failure (the library set is readable):
+        warm-up opens just the frontends and logs a soft warn, rather than failing the seal."""
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t, apps=["com.valvesoftware.steamlink"])   # non-emulator only
+            r = self.WarmRunner()
+            ok, logs = self._warm(prof, r)
+            self.assertTrue(ok)
+            self.assertNotIn("com.valvesoftware.steamlink", r.launched)    # not an emulator
+            self.assertIn("org.es_de.frontend", r.launched)                # frontends still warmed
+            self.assertIn("com.handheld.launcher", r.launched)
+            self.assertTrue(any("no emulators" in m for m in logs))
+
     def test_swept_even_though_it_never_reaches_the_foreground(self):
         """N3: a package must be appended to the sweep list right after `adb.launch()` STARTS it, not
         after a confirmed foreground. An app owned by a first-run SAF/permission dialog (or a slow cold
