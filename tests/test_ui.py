@@ -221,3 +221,36 @@ class TestOverwriteWarning(unittest.TestCase):
     def test_an_empty_profile_does_not_warn(self):
         from cas.dialogs import overwrite_warning
         self.assertEqual(overwrite_warning({"name": "odin2-mini", "has_golden": False}), "")
+
+
+class TestFirmwareRows(unittest.TestCase):
+    def _library(self, td):
+        """A firmware library shaped the way cas.firmware.ingest() writes it: <root>/<id>/meta.json
+        (not firmware.json — meta.json is what cas.firmware.Firmware.__init__ actually reads) plus a
+        versions/<version>/payload/ tree."""
+        import json
+        root = pathlib.Path(td) / "_firmware"
+        fw = root / "mangmi-air-x-mq66"
+        (fw / "versions" / "v1" / "payload").mkdir(parents=True)
+        (fw / "meta.json").write_text(json.dumps({
+            "id": "mangmi-air-x-mq66", "device": "AIR X", "storage": "emmc",
+            "flash_target": "init_boot", "current": "v1",
+            "match": {"serial_prefix": ["MQ66"]},
+        }))
+        return root
+
+    def test_rows_report_id_version_and_match(self):
+        from cas.dialogs import firmware_rows
+        with tempfile.TemporaryDirectory() as td:
+            rows = firmware_rows(self._library(td))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], "mangmi-air-x-mq66")
+        self.assertEqual(rows[0]["version"], "v1")
+        self.assertIn("MQ66", rows[0]["match"])
+        self.assertEqual(rows[0]["device"], "AIR X")
+        self.assertEqual(rows[0]["target"], "init_boot")
+
+    def test_an_empty_library_yields_no_rows(self):
+        from cas.dialogs import firmware_rows
+        with tempfile.TemporaryDirectory() as td:
+            self.assertEqual(firmware_rows(pathlib.Path(td)), [])

@@ -12,6 +12,8 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 from . import profiles as P
+from . import firmware as FW
+from . import config
 
 
 def profile_rows(profiles_root):
@@ -190,3 +192,227 @@ class ProfilePicker:
             return
         self.result = row["name"]
         self.win.destroy()
+
+
+def firmware_rows(fw_root):
+    """One row per firmware id in the library: id, current version, match rules, device, flash target.
+    Pure (filesystem only). An unreachable/absent root yields [] — the window says so rather than
+    raising."""
+    rows = []
+    try:
+        fws = FW.list_firmware(fw_root)
+    except Exception:
+        return []
+    for fw in fws:
+        rules = fw.match_rules() or {}
+        pref = ", ".join(rules.get("serial_prefix", []) or []) or "—"
+        rows.append({
+            "id": fw.id,
+            "version": fw.current() or "—",
+            "match": pref,
+            "device": fw.device or "—",
+            "target": fw.flash_target or "—",
+        })
+    return rows
+
+
+class ProfilesWindow:
+    """The profile library — what the right panel's Profile box used to hold, minus the per-device
+    assignment (that's on the device row's context menu now). Lists every profile with its golden and
+    capture date; New / Delete / Open folder."""
+
+    def __init__(self, parent, app):
+        self.app = app
+        self.win = win = tk.Toplevel(parent)
+        win.title("CAS — profile library")
+        win.transient(parent)
+        win.geometry("720x420")
+
+        ttk.Label(win, text="Profile library", style="Title.TLabel").pack(anchor="w", padx=12, pady=(12, 0))
+        self.lib_var = tk.StringVar(value=f"Library: {app.profiles_root}")
+        ttk.Label(win, textvariable=self.lib_var, style="Muted.TLabel").pack(anchor="w", padx=12)
+
+        self.tree = ttk.Treeview(win, columns=("model", "golden", "captured"),
+                                 show="tree headings", selectmode="browse")
+        self.tree.heading("#0", text="profile"); self.tree.column("#0", width=200)
+        for c, t, w in (("model", "model", 150), ("golden", "golden", 130), ("captured", "captured", 110)):
+            self.tree.heading(c, text=t); self.tree.column(c, width=w)
+        self.tree.pack(fill="both", expand=True, padx=12, pady=(8, 0))
+        self.tree.bind("<<TreeviewSelect>>", lambda e: self._on_select())
+
+        self.detail_var = tk.StringVar(value="Select a profile to see its golden.")
+        ttk.Label(win, textvariable=self.detail_var, style="Muted.TLabel",
+                  wraplength=680, justify="left").pack(anchor="w", padx=12, pady=(6, 0))
+
+        bar = ttk.Frame(win, padding=(12, 10))
+        bar.pack(fill="x", side="bottom")
+        ttk.Button(bar, text="New…", command=self._new).pack(side="left")
+        ttk.Button(bar, text="Delete…", command=self._delete).pack(side="left", padx=(8, 0))
+        ttk.Button(bar, text="Open folder", command=lambda: app._open_path(app.profiles_root)) \
+            .pack(side="left", padx=(8, 0))
+        ttk.Button(bar, text="Close", command=win.destroy).pack(side="right")
+        win.bind("<Escape>", lambda e: win.destroy())
+        self.refresh()
+
+    def refresh(self, preselect=None):
+        self.tree.delete(*self.tree.get_children())
+        rows = profile_rows(self.app.profiles_root)
+        for r in rows:
+            self.tree.insert("", "end", iid=r["name"], text=r["name"],
+                             values=(r["model"] or "—",
+                                     "saved" if r["has_golden"] else "— none",
+                                     r["captured"] or "—"))
+        if preselect and self.tree.exists(preselect):
+            self.tree.selection_set(preselect)
+
+    def _selected(self):
+        sel = self.tree.selection()
+        return sel[0] if sel else None
+
+    def _on_select(self):
+        """Golden size + download ETA for the highlighted profile — sized off-thread (multi-GB walk)."""
+        name = self._selected()
+        if not name:
+            self.detail_var.set("Select a profile to see its golden.")
+            return
+        prof = P.Profile(pathlib.Path(self.app.profiles_root) / name)
+        if not prof.has_golden():
+            self.detail_var.set(f"{name}: no golden yet — capture one with ① Save.")
+            return
+        self.detail_var.set(f"{name}: golden saved · sizing…")
+
+        def work():
+            b = prof.golden_size()
+            mbps = config.download_mbps(prof.name)
+            eta = (f" · ~{human_eta((b / 1048576.0) / mbps)} to download (avg {mbps:.0f} MB/s)"
+                   if (mbps and b) else " · download time estimated after the first Download")
+            self.win.after(0, lambda: self.detail_var.set(
+                f"{name}: golden saved · {human_size(b)}{eta}"))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _new(self):
+        name = self.app.new_profile()
+        if name:
+            self.refresh(preselect=name)
+
+    def _delete(self):
+        name = self._selected()
+        if not name:
+            messagebox.showinfo("CAS", "Select a profile row to delete.")
+            return
+        self.app.delete_profile(name)
+        self.refresh()
+
+
+class FirmwareWindow:
+    """The device-root-firmware library — the old 'Root images' tab, minus the per-device assignment
+    (that's on the device row's context menu now). CAS stores and suggests firmware here; assigning it
+    to a unit is what makes Root/Lock use it."""
+
+    def __init__(self, parent, app):
+        self.app = app
+        self.win = win = tk.Toplevel(parent)
+        win.title("CAS — firmware library")
+        win.transient(parent)
+        win.geometry("760x400")
+
+        ttk.Label(win, text="Firmware library (device root firmware)",
+                  style="Title.TLabel").pack(anchor="w", padx=12, pady=(12, 0))
+        self.lib_var = tk.StringVar()
+        ttk.Label(win, textvariable=self.lib_var, style="Muted.TLabel",
+                  wraplength=720, justify="left").pack(anchor="w", padx=12)
+
+        self.tree = ttk.Treeview(win, columns=("version", "device", "target", "match"),
+                                 show="tree headings", selectmode="browse")
+        self.tree.heading("#0", text="firmware id"); self.tree.column("#0", width=210)
+        for c, t, w in (("version", "current", 90), ("device", "device", 130),
+                        ("target", "flashes", 100), ("match", "serial prefix", 140)):
+            self.tree.heading(c, text=t); self.tree.column(c, width=w)
+        self.tree.pack(fill="both", expand=True, padx=12, pady=(8, 0))
+
+        ttk.Label(win, text="Assign firmware to a unit by right-clicking its row in the device list.",
+                  style="Muted.TLabel").pack(anchor="w", padx=12, pady=(6, 0))
+
+        bar = ttk.Frame(win, padding=(12, 10))
+        bar.pack(fill="x", side="bottom")
+        ttk.Button(bar, text="Add / update…", command=self._add).pack(side="left")
+        ttk.Button(bar, text="Open folder", command=self._open).pack(side="left", padx=(8, 0))
+        ttk.Button(bar, text="Close", command=win.destroy).pack(side="right")
+        win.bind("<Escape>", lambda e: win.destroy())
+        self.refresh()
+
+    def _root(self):
+        try:
+            return FW.firmware_root()
+        except Exception:
+            return None
+
+    def refresh(self):
+        self.tree.delete(*self.tree.get_children())
+        root = self._root()
+        rows = firmware_rows(root) if root else []
+        for r in rows:
+            self.tree.insert("", "end", iid=r["id"], text=r["id"],
+                             values=(r["version"], r["device"], r["target"], r["match"]))
+        # Explain an EMPTY list instead of leaving it a mystery: the configured (shared/external)
+        # firmware dir may simply be unmounted, in which case firmware_root() silently falls back.
+        configured = config.load_config().get("firmware_dir")
+        def _isdir(p):
+            try:
+                return bool(p) and pathlib.Path(p).is_dir()
+            except OSError:
+                return False
+        if configured and not _isdir(configured):
+            self.lib_var.set(f"Library: {configured}   ✗ unreachable (library drive unmounted?) — "
+                             f"falling back to {root}")
+        elif not _isdir(root):
+            self.lib_var.set(f"Library: {root}   ✗ not reachable (connect the library drive?)")
+        elif not rows:
+            self.lib_var.set(f"Library: {root}   ✓ (no firmware yet — use “Add / update…”)")
+        else:
+            self.lib_var.set(f"Library: {root}   ✓ ({len(rows)} firmware)")
+
+    def _add(self):
+        self.app._add_firmware()                      # threaded ingest; refresh when it lands
+        self.win.after(1500, self.refresh)
+
+    def _open(self):
+        root = self._root()
+        if root:
+            self.app._open_path(str(root))
+
+
+class BoxArtDialog:
+    """The ES-DE box-art source — a BENCH setting (config.es_media_src), not a per-profile one, which
+    is why it left the profile panel. Either each unit's own SD carries the art, or CAS pushes it from
+    a PC folder on Download."""
+
+    def __init__(self, parent, app):
+        self.app = app
+        self.win = win = tk.Toplevel(parent)
+        win.title("CAS — ES-DE box art")
+        win.transient(parent)
+        win.resizable(False, False)
+        frm = ttk.Frame(win, padding=16)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(frm, text="ES-DE box art", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(frm, text="Where the box art comes from when a unit gets ES-DE on Download.",
+                  style="Muted.TLabel").pack(anchor="w", pady=(2, 10))
+
+        ttk.Radiobutton(frm, text="Use the SD card  (no transfer — box art rides the SD image)",
+                        value="sd", variable=app.media_mode,
+                        command=app._on_media_mode).pack(anchor="w")
+        prow = ttk.Frame(frm)
+        prow.pack(fill="x", pady=(6, 0))
+        ttk.Radiobutton(prow, text="Push from PC folder:", value="push",
+                        variable=app.media_mode, command=app._on_media_mode).pack(side="left")
+        ttk.Entry(prow, textvariable=app.media_path, width=30).pack(side="left", padx=(4, 0))
+        ttk.Button(prow, text="Browse…", command=app._browse_media).pack(side="left", padx=4)
+
+        ttk.Label(frm, textvariable=app.sd_media_var, style="Muted.TLabel",
+                  wraplength=430, justify="left").pack(anchor="w", pady=(10, 0))
+        ttk.Button(frm, text="Close", command=win.destroy).pack(anchor="e", pady=(14, 0))
+        win.bind("<Escape>", lambda e: win.destroy())
+        _center(win, parent)
+        app._probe_sd_media()                          # refresh the SD status while the dialog is open

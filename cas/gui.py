@@ -607,7 +607,7 @@ class App:
              "Create a NEW empty profile (a saved-setup slot): give it a name and the device model it "
              "matches. Then plug in that family's master unit and use 'Save device → profile' to fill it.") \
             .pack(side="left", padx=2)
-        _tip(ttk.Button(row, text="Delete…", command=self.delete_profile),
+        _tip(ttk.Button(row, text="Delete…", command=lambda: self.delete_profile(self.prof_var.get())),
              "Delete this profile. It's ARCHIVED to profiles/_archive (recoverable) and you must type its "
              "exact name to confirm — nothing is permanently erased.").pack(side="left", padx=2)
         self.lib_var = tk.StringVar()
@@ -1864,6 +1864,15 @@ class App:
             tk.Button(bar, text=txt, command=cmd).pack(side="left", padx=4)
         refresh()
 
+    def _open_profiles(self):
+        D.ProfilesWindow(self.win, self)
+
+    def _open_firmware(self):
+        D.FirmwareWindow(self.win, self)
+
+    def _open_boxart(self):
+        D.BoxArtDialog(self.win, self)
+
     def _add_firmware(self):
         """Ingest a raw firmware build folder into the library (new version) on a background thread.
         Prompts for the firmware id (variants that share a model — e.g. MQ65 vs MQ66, both 'AIR X' —
@@ -2416,11 +2425,10 @@ class App:
         self.refresh_profiles()
         return name
 
-    def delete_profile(self):
-        name = self.prof_var.get()
+    def delete_profile(self, name=None):
+        """Archive a profile (never delete). Deliberately hard: the operator must type the exact name."""
         if not name:
             return
-        # deliberately hard: require typing the exact name. Archives (moves), never rm.
         typed = simpledialog.askstring(
             "Delete profile (archives it)",
             f"This ARCHIVES '{name}' to profiles/_archive (recoverable).\n"
@@ -2437,6 +2445,7 @@ class App:
             config.set_device_profile(s, None)
         self.log(f"archived '{name}' -> {dst}")
         self.refresh_profiles()
+        self.refresh_devices()
 
 
 def main(adb_bin="adb", fb_bin="fastboot"):
