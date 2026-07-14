@@ -131,6 +131,24 @@ class TestContextActions(unittest.TestCase):
         self.assertFalse(_context_actions(2, "device")["seal"])
         self.assertFalse(_context_actions(1, "offline")["release"])   # release needs adb
 
+    def test_release_is_enabled_for_one_online_device(self):
+        """COVERAGE FINDING 1: release's enabled case was never asserted."""
+        from cas.gui import _context_actions
+        self.assertTrue(_context_actions(1, "device")["release"])
+
+    def test_offline_tolerant_actions_work_in_fastboot_state(self):
+        """COVERAGE FINDING 2: offline-tolerant actions (Root, Lock, firmware/profile assign)
+        must work in fastboot/EDL states, but save and release need adb and must be disabled."""
+        from cas.gui import _context_actions
+        a = _context_actions(1, "fastboot")
+        # These actions do NOT need adb and should be enabled offline
+        for k in ("assign_profile", "assign_firmware", "run_root", "run_download",
+                  "run_warmup", "run_lock", "copy_serial"):
+            self.assertTrue(a[k], f"{k} should be enabled in fastboot state")
+        # These actions NEED adb and should be disabled offline
+        self.assertFalse(a["save"], "save needs adb and should be disabled in fastboot state")
+        self.assertFalse(a["release"], "release needs adb and should be disabled in fastboot state")
+
 
 class TestRowCells(unittest.TestCase):
     def test_a_pinned_profile_is_marked_in_the_cell(self):
