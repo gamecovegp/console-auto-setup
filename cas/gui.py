@@ -182,7 +182,7 @@ def _context_actions(n_selected, state):
         "run_download":    any_,
         "run_warmup":      any_,
         "run_lock":        any_,
-        "seal":            one,
+        "seal":            one and online,       # sealing needs adb too — offline just buys a 2-3 min fail
         "release":         one and online,      # clears the Companion lockdown over adb
         "copy_serial":     any_,
     }
@@ -642,12 +642,29 @@ class App:
         self.media_path = tk.StringVar(value=config.es_media_src() or "")
         self.sd_media_var = tk.StringVar(value="")
 
+        self._sync_save_selection_gate()      # nothing selected yet → ① Save starts disabled
         self._update_run_state()
 
     def _on_tree_select(self):
         self.sel_var.set(_selection_summary(len(self.dev_tree.selection()),
                                             len(self.dev_tree.get_children())))
+        self._sync_save_selection_gate()        # selection changed → re-check the ① Save single-device gate
         self._update_run_state()
+
+    def _sync_save_selection_gate(self):
+        """① Save captures ONE golden device: its checkbox is enabled only when exactly one row is
+        selected, and gets force-unticked the moment that stops being true (e.g. the operator ticks Save
+        with one row selected, then Ctrl-clicks to add another). Called on every selection change AND
+        every chain-checkbox tick, so the checkbox's live state can never promise something ▶ Run would
+        actually refuse (BLOCKING FINDING 1: the footer said '3 of 4 devices selected' while Save silently
+        ran on just the topmost one). This is the proactive half of the fix; run_chain() keeps its own
+        guard as defense-in-depth in case the selection changes between a tick and the click."""
+        if any(self.chain_vars[k].get() for k in ("download", "warmup", "lock")):
+            return                                  # _on_chain_tick already owns Save's state in this case
+        one_selected = len(self.dev_tree.selection()) == 1
+        self.chain_cbs["save"].configure(state="normal" if one_selected else "disabled")
+        if not one_selected and self.chain_vars["save"].get():
+            self.chain_vars["save"].set(False)
 
     def _update_run_state(self):
         """▶ Run is live only when something is selected AND at least one action is ticked — instead of
@@ -955,7 +972,7 @@ class App:
             messagebox.showinfo(
                 "CAS — auto-match updated",
                 f"A device's auto-matched profile changed (SD card or library change):\n\n{body}\n\n"
-                "Kept automatically. Use 'Assign profile → selected' (or double-click a row) to override.")
+                "Kept automatically. Right-click the row → Assign profile (or double-click) to override.")
 
     # ---------- warnings (⚠ Warnings menu + pre-flight gating) ----------
     def _profile_facts(self, name, model):
@@ -1356,7 +1373,9 @@ class App:
 
     def _on_chain_tick(self):
         """Save ⟂ Download/Warm up/Lock: when Save is on, disable+clear Download/Warm up/Lock; when any of
-        those is on, disable+clear Save. Root stays available in both chains."""
+        those is on, disable+clear Save. Root stays available in both chains. Save ALSO requires exactly
+        one selected device — _sync_save_selection_gate() re-applies that on top, so it always has the
+        final say on the checkbox's enabled state."""
         save_on = self.chain_vars["save"].get()
         unit_on = any(self.chain_vars[k].get() for k in ("download", "warmup", "lock"))
         for k in ("download", "warmup", "lock"):
@@ -1366,6 +1385,7 @@ class App:
         self.chain_cbs["save"].configure(state="disabled" if unit_on else "normal")
         if unit_on:
             self.chain_vars["save"].set(False)
+        self._sync_save_selection_gate()
         self._update_run_state()                     # ← ticking an action can arm ▶ Run
 
     def run_chain(self):
@@ -1374,11 +1394,17 @@ class App:
             messagebox.showinfo("CAS", err)
             return
         if "save" in steps:
-            serial = self._selected_serial()
-            if not serial:
-                messagebox.showinfo("CAS", "Select ONE golden device for Save.")
+            # Save captures ONE golden device. `_selected_serial()` returns only the TOPMOST selected
+            # row, so on a 3-device selection this used to silently save just that one — the footer said
+            # "3 of 4 devices selected", ▶ Run touched exactly one, and the other two got nothing with no
+            # warning. The footer's blast-radius promise must never disagree with what Run actually does,
+            # so gate on the SELECTION COUNT (not "is there a topmost row") before it ever reaches a
+            # single-serial call.
+            if len(self.dev_tree.selection()) != 1:
+                messagebox.showinfo(
+                    "CAS", "Save captures ONE golden device. Select a single device (or untick Save).")
                 return
-            self._run_save(steps, serial)
+            self._run_save(steps, self._selected_serial())
         else:
             t = self._action_targets()
             if not t:
@@ -1549,10 +1575,28 @@ class App:
         return "break"
 
     def _post_menu(self, menu, event):
+        """Post a context menu with tk_popup()'s grab HELD until the menu actually goes away — that grab
+        is what makes an outside click dismiss it (Tk delivers the click to the grabbing widget, whose own
+        bindings then unpost it). `tk_popup()` returns immediately on every platform (it never blocks
+        until dismissal); releasing the grab in a `finally` right after — a widely-copied but WRONG
+        recipe — drops it a microsecond after taking it, leaving the menu stuck open with nothing watching
+        for the outside click. So instead: release exactly on <Unmap> (fires however the menu goes away —
+        an item picked, Escape, an outside click, or the explicit unpost() below), plus belt-and-braces
+        <FocusOut>/<Escape> dismissal. A stuck grab would freeze the WHOLE app on a bench, so <Unmap> is
+        the one thing guaranteed to fire whenever the menu disappears — by any route, including the
+        window being destroyed — which makes a stuck grab impossible."""
+        def _release(_e=None):
+            try:
+                menu.grab_release()
+            except tk.TclError:
+                pass
+        menu.bind("<Unmap>", _release)
+        menu.bind("<FocusOut>", lambda _e: menu.unpost())
+        menu.bind("<Escape>", lambda _e: menu.unpost())
         try:
             menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            menu.grab_release()
+        except tk.TclError:
+            _release()
 
     def _row_state(self, serial):
         vals = self.dev_tree.item(serial).get("values") or []
@@ -1561,6 +1605,14 @@ class App:
     def _rebuild_context_menu(self, serials):
         m = self.ctx
         m.delete(0, "end")
+        # DESTROY the previous build's submenu widgets before dropping their refs — tkinter does NOT
+        # destroy the underlying Tcl widget on Python GC, so every right-click leaked 3 orphan Menu
+        # widgets (profile/firmware/run submenus) forever without this.
+        for sub in self._ctx_subs:
+            try:
+                sub.destroy()
+            except tk.TclError:
+                pass
         self._ctx_subs = []
         one = serials[0] if len(serials) == 1 else None
         en = _context_actions(len(serials), self._row_state(one) if one else "device")
@@ -1580,8 +1632,10 @@ class App:
         self._ctx_subs.append(run)
         m.add_cascade(label=f"Run on {len(serials)} device(s)", menu=run)
         m.add_separator()
-        m.add_command(label="Seal (retail lock)…", state=st("seal"), command=self.seal_selected)
-        m.add_command(label="Release (un-provision)…", state=st("release"), command=self.release_selected)
+        m.add_command(label="Seal (retail lock)…", state=st("seal"),
+                      command=lambda s=one: self.seal_selected(s))
+        m.add_command(label="Release (un-provision)…", state=st("release"),
+                      command=lambda s=one: self.release_selected(s))
         m.add_separator()
         m.add_command(label=("Copy serial" if one else f"Copy {len(serials)} serials"),
                       state=st("copy_serial"), command=lambda ss=list(serials): self._copy_serials(ss))
@@ -1946,10 +2000,12 @@ class App:
         return survivors
 
     def _run_chain(self, steps, serials, save_name=None):
-        """Run the resolved chain on serials (one confirm, then background, per-stage survivor folding)."""
-        if "save" in steps and len(serials) != 1:
-            messagebox.showinfo("CAS", "Save captures ONE golden device. Select a single device (or untick Save).")
-            return
+        """Run the resolved chain on serials (one confirm, then background, per-stage survivor folding).
+        NOTE: there is deliberately no "save needs exactly one serial" guard here — every caller already
+        guarantees that (run_chain()'s explicit selection-count check before _run_save(), and _run_save()
+        itself only ever passing a single-element `cleared` list). A guard here could never fire, and dead
+        safety code that LOOKS like protection but never runs is worse than no code at all — see BLOCKING
+        FINDING 1."""
         names = {"root": "Root", "save": "Save", "download": "Download", "warmup": "Warm up", "lock": "Lock"}
         chain = " → ".join(names[s] for s in steps)
         if not messagebox.askyesno("CAS — Run", f"Run {chain} on {len(serials)} device(s)?\nThey run IN PARALLEL per stage."):
@@ -1969,11 +2025,17 @@ class App:
         sset = set(survivors)
         return {s: ("ok", "") if s in sset else ("fail", "") for s in serials}
 
-    def seal_selected(self):
+    def seal_selected(self, serial=None):
         """Operator-only: retail-SEAL the one selected unit on demand (the single-device slice of ④ Lock),
         paired with 'Release selected unit'. Runs the full seal via PV.seal_all([one device]) so firmware /
-        EDL flasher / model-match brick-guard / golden-guard all behave exactly as the batch Lock."""
-        serial = self._selected_serial()
+        EDL flasher / model-match brick-guard / golden-guard all behave exactly as the batch Lock.
+
+        `serial`, when given, PINS the action to that device (the context menu passes it — snapshotted at
+        BUILD time, like every other item there). Left None (the Settings-menu callers), it falls back to
+        _selected_serial() — reading the CURRENT selection at click time — matching the old behaviour.
+        Without the pin, a background refresh between right-click and click could change the selection
+        underneath a bare `self.seal_selected` and fire this destructive action on the wrong device."""
+        serial = serial if serial is not None else self._selected_serial()
         if not serial:
             messagebox.showinfo("CAS", "Select ONE device in the list first.")
             return
@@ -1997,10 +2059,14 @@ class App:
             return res
         self._run_bg(work, label=f"Sealing {serial}")
 
-    def release_selected(self):
+    def release_selected(self, serial=None):
         """Operator-only: un-provision the selected unit (clear the Companion's Device-Owner lockdown so it
-        can be factory-reset / uninstalled). Exceptional RMA action — single device, behind a confirm."""
-        serial = self._selected_serial()
+        can be factory-reset / uninstalled). Exceptional RMA action — single device, behind a confirm.
+
+        `serial`, when given, PINS the action to that device (the context menu passes it — snapshotted at
+        BUILD time). Left None (the Settings-menu callers), it falls back to _selected_serial(), matching
+        the old behaviour. See seal_selected's docstring for why the pin matters."""
+        serial = serial if serial is not None else self._selected_serial()
         if not serial:
             messagebox.showinfo("CAS", "Select ONE device in the list first.")
             return

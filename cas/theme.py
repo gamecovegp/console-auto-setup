@@ -37,6 +37,12 @@ STATE_COLORS = {
     "sideload":     "accent",
 }
 
+# Lock the coupling: gui._populate_devices does THEME.LIGHT[key] for every STATE_COLORS value, on the UI
+# thread, mid device-list refresh. A value that isn't a LIGHT key is a KeyError right there — which empties
+# the whole device list instead of failing loudly here, at import time.
+assert all(v in LIGHT for v in STATE_COLORS.values()), \
+    f"STATE_COLORS value(s) not in LIGHT: {sorted({v for v in STATE_COLORS.values() if v not in LIGHT})}"
+
 STATE_DOT = "●"
 ROW_HEIGHT = 28
 ZEBRA = "#FAFAFB"        # the odd-row tint (barely there — enough to track a row across the width)
