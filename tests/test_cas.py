@@ -2477,18 +2477,19 @@ class TestEdl(unittest.TestCase):
 
     def test_reset_reloads_programmer_via_sahara_when_still_stuck_in_edl(self):
         # ③ Lock MANGMI AIR X: a small stock write re-enumerates before the in-rawprogram <power> reset
-        # fires, leaving the unit in EDL with the programmer UNLOADED. A bare `fh_loader --reset` then can't
-        # reboot it (no Firehose). reset() must RE-LOAD the programmer via Sahara on a retry, then reset.
+        # fires, leaving the unit in EDL with the programmer UNLOADED (Sahara mode). A bare `fh_loader
+        # --reset` fails WITHOUT the port dying; reset() must RE-LOAD the programmer via Sahara on a retry,
+        # then reset. (The failure text must NOT look like a dead port, or it'd be read as already-rebooted.)
         from cas.adb import Edl
         calls = []
-        def runner(args, input_text=None, timeout=900):
+        def runner(args, input_text=None, timeout=900, cwd=None):
             calls.append(list(args))
             if args[0].endswith("QSaharaServer"):
                 return 0, "Sahara protocol completed\n", ""
             if args[0].endswith("fh_loader"):     # --reset succeeds ONLY once the programmer was re-loaded
                 if any(c[0].endswith("QSaharaServer") for c in calls):
                     return 0, "{All Finished Successfully}\n", ""
-                return 0, "FAILED (no programmer)\n", ""
+                return 1, "ERROR: Firehose target sent nak / no response\n", ""   # present, not a dead port
             return 0, "", ""
         with tempfile.TemporaryDirectory() as td:
             edl = Edl("/x/QSaharaServer", "/x/fh_loader", "/x/prog.elf", runner=runner)
@@ -2498,18 +2499,42 @@ class TestEdl(unittest.TestCase):
             self.assertTrue(any(c[0].endswith("QSaharaServer") for c in calls),
                             "reset must re-load the Firehose programmer via Sahara when the unit is stuck")
 
-    def test_reset_skips_sahara_reload_when_unit_already_left_edl(self):
-        # Root's <power> path: after a successful flash the unit already rebooted OUT of EDL, so no port is
-        # present. reset() must NOT waste a Sahara re-load on a device that is gone (keeps Root fast).
+    def test_reset_stops_quietly_when_unit_already_left_edl(self):
+        # ③ Lock on Arch/Linux: the <power> reset already rebooted the unit, so a bare --reset hits a DEAD
+        # port ("could not read ... not on this port"). reset() must read that as rebooted and STOP at the
+        # first attempt — not retry 3x, spewing fh_loader errors + port_trace.txt writes into the dead port.
         from cas.adb import Edl
-        runner, calls = self._runner(fh_ok=False)          # --reset never confirms (no device)
+        calls = []
+        def runner(args, input_text=None, timeout=900, cwd=None):
+            calls.append(list(args))
+            if args[0].endswith("fh_loader"):
+                return 1, "ERROR: Could not read from '/dev/ttyUSB0', device is probably *not* on this port\n", ""
+            return 0, "", ""
         with tempfile.TemporaryDirectory() as td:
             edl = Edl("/x/QSaharaServer", "/x/fh_loader", "/x/prog.elf", runner=runner)
-            edl.find_port = lambda timeout=10, on_tick=None, pattern="/dev/ttyUSB*": None  # gone (rebooted)
+            edl.find_port = lambda timeout=10, on_tick=None, pattern="/dev/ttyUSB*": "/dev/ttyUSB0"  # stale node
             with patch("cas.adb.time.sleep", lambda *_a, **_k: None):
-                self.assertFalse(edl.reset("/dev/ttyUSB0", td, log=lambda *_: None))
+                self.assertTrue(edl.reset("/dev/ttyUSB0", td, log=lambda *_: None))   # dead port = rebooted
+            self.assertEqual(sum(1 for c in calls if c[0].endswith("fh_loader")), 1,
+                             "one fh_loader call only — stopped instead of retrying into the dead port")
             self.assertFalse(any(c[0].endswith("QSaharaServer") for c in calls),
-                             "no port present => unit already rebooted => don't re-load the programmer")
+                             "no Sahara re-load once the unit has already left EDL")
+
+    def test_reset_points_fh_loader_at_the_workdir_for_its_port_trace(self):
+        # fh_loader dumps a port_trace.txt into its CWD on error; a prior pkexec run can leave a root-owned
+        # one in the app's CWD ("Could not append"). reset() must run the tools with cwd=<workdir>.
+        from cas.adb import Edl
+        seen = {}
+        def runner(args, input_text=None, timeout=900, cwd=None):
+            if args[0].endswith("fh_loader"):
+                seen["cwd"] = cwd
+            return 1, "could not read from port\n", ""
+        with tempfile.TemporaryDirectory() as td:
+            edl = Edl("/x/QSaharaServer", "/x/fh_loader", "/x/prog.elf", runner=runner)
+            edl.find_port = lambda timeout=10, on_tick=None, pattern="/dev/ttyUSB*": "/dev/ttyUSB0"
+            with patch("cas.adb.time.sleep", lambda *_a, **_k: None):
+                edl.reset("/dev/ttyUSB0", td, log=lambda *_: None)
+            self.assertEqual(seen.get("cwd"), td)      # trace goes to the temp dir, not the repo/app CWD
 
     @unittest.skipUnless(os.name == "posix", "staging (copy + chmod) is POSIX-only; Windows runs in place")
     def test_staged_exec_makes_a_local_executable_copy(self):
@@ -2727,7 +2752,7 @@ class TestFlashers(unittest.TestCase):
         from cas.adb import Adb, Edl
         from cas import provision as PV
 
-        def runner(args, input_text=None, timeout=900):
+        def runner(args, input_text=None, timeout=900, cwd=None):
             if args[0].endswith("QSaharaServer"):
                 return 0, "Sahara protocol completed\n", ""
             if args[0].endswith("fh_loader"):
@@ -2752,7 +2777,7 @@ class TestFlashers(unittest.TestCase):
         from cas import provision as PV
         from unittest import mock
 
-        def runner(args, input_text=None, timeout=900):
+        def runner(args, input_text=None, timeout=900, cwd=None):
             if args[0].endswith("QSaharaServer"):
                 return 3, "Sahara: Cannot open port \\\\.\\COM3 (access denied)\n", ""   # err EMPTY on purpose
             return 0, "", ""

@@ -53,17 +53,19 @@ def is_cancelled(rc):
     return rc == CANCELLED
 
 
-def subprocess_runner(args, input_text=None, timeout=900, cancel=None):
+def subprocess_runner(args, input_text=None, timeout=900, cancel=None, cwd=None):
     """Default runner: run a command, return (returncode, stdout, stderr).
     On timeout returns (124, "", "timeout…") instead of raising — so a hung device (e.g. a MagiskSU grant
     prompt nobody tapped) fails FAST and never blocks a batch for the full timeout window.
+    `cwd` sets the child's working directory (fh_loader dumps a port_trace.txt into its CWD on error, so
+    EDL calls point it at a writable temp dir rather than the app's — maybe non-writable — CWD).
     If `cancel` (a threading.Event) is given, poll it ~5x/s and, when set, terminate→kill the child and
     return (CANCELLED, output-so-far, 'cancelled'). Output goes to a temp FILE (not a PIPE) so a verbose
     child like fh_loader can't deadlock on a full pipe buffer while we poll."""
     if cancel is None:
         try:
             p = subprocess.run(args, capture_output=True, text=True, input=input_text,
-                               timeout=timeout, creationflags=_NO_WINDOW)
+                               timeout=timeout, creationflags=_NO_WINDOW, cwd=cwd)
             return p.returncode, p.stdout, p.stderr
         except subprocess.TimeoutExpired:
             return 124, "", f"timeout after {timeout}s"
@@ -72,7 +74,7 @@ def subprocess_runner(args, input_text=None, timeout=900, cancel=None):
         try:
             p = subprocess.Popen(args, stdout=outf, stderr=subprocess.STDOUT,
                                  stdin=(subprocess.PIPE if input_text is not None else None),
-                                 text=True, creationflags=_NO_WINDOW)
+                                 text=True, creationflags=_NO_WINDOW, cwd=cwd)
         except OSError as e:
             return 1, "", str(e)
         if input_text is not None:
@@ -833,36 +835,40 @@ class Edl:
         return False
 
     def reset(self, port, workdir, log=print):
-        """Reboot the device out of EDL with `fh_loader --reset`. If a small/fast write's link RE-ENUMERATED
-        before the in-rawprogram <power> reset could fire, the unit is left in EDL with the Firehose
-        programmer UNLOADED (raw Sahara/9008 mode) — a bare `fh_loader --reset` then has no Firehose channel
-        and the unit sits on the black EDL screen. That is the ③ Lock symptom on the MANGMI AIR X: its small
-        STOCK init_boot writes faster than Root's larger Magisk-patched image, so it loses that race. So on a
-        retry, RE-LOAD the programmer via Sahara FIRST — exactly what flash_partition does — then reset. Only
-        when a port is actually present, so a unit that ALREADY rebooted (Root's <power> path, no port) is not
-        slowed by a doomed re-load. `workdir` stages the tools locally (the library drive may be noexec).
-        Success is fh_loader's "All Finished Successfully"/"{SUCCESS}"; returns False if none confirmed."""
+        """Reboot the device out of EDL. The PRIMARY reboot is the in-rawprogram <power value="reset"> that
+        flash_partition writes as fh_loader's last act; this is the BACKUP for when it didn't fire. Three
+        post-write device states, each handled so we neither SPAM a unit that already rebooted nor abandon a
+        genuinely stuck one:
+          * GONE — the unit already left EDL (the <power> reset fired). A bare `fh_loader --reset` then can't
+            read the port ("not on this port" / "could not read"). STOP: retrying just spews errors and
+            port_trace.txt writes into a dead port (the AIR X ③ Lock log that prompted this).
+          * FIREHOSE (programmer still loaded) — a bare `fh_loader --reset` succeeds.
+          * SAHARA (programmer unloaded after a re-enumerate — the small STOCK-image race) — the bare reset
+            fails WITHOUT the port dying; on a retry, RE-LOAD the programmer via Sahara (as the flash does)
+            then reset. wait_boot() is the ultimate backstop, so a wrong GONE guess just fails the seal, not
+            bricks it. Tools run from `workdir` so fh_loader's port_trace.txt lands there, not in a CWD that
+            may hold a root-owned trace from a prior pkexec run (the 'Could not append' error)."""
         fh = self._staged_exec(self.fh, workdir)
         qsahara = self._staged_exec(self.qsahara, workdir)
+        wd = str(workdir)
+        GONE = ("not on this port", "could not read", "could not open")   # port unreadable => unit left EDL
         for attempt in range(3):
             if self.cancel is not None and self.cancel.is_set():
                 return False
-            found = self.find_port(timeout=10)
-            p = found or port
-            # Port present + a bare --reset already failed => the programmer isn't loaded (the unit fell back
-            # to Sahara after the write). Re-establish Firehose via Sahara (the flash's own first step), then
-            # reset. Best-effort: a failure here just means the follow-up --reset tries on the current port.
-            if attempt >= 1 and found:
-                log("EDL: still in EDL — re-loading the Firehose programmer (Sahara) before reset…")
+            p = self.find_port(timeout=10) or port
+            # A prior bare reset failed with the port still ALIVE => Sahara mode (programmer unloaded). Re-
+            # establish Firehose via Sahara (the flash's own first step) before this attempt's reset.
+            if attempt >= 1:
+                log("EDL: unit still in EDL — re-loading the Firehose programmer (Sahara) before reset…")
                 try:
                     self.runner(self._launcher(p) + [qsahara, "-p", p, "-s",
-                                "13:" + os.path.abspath(self.programmer)], **self._runner_kw())
+                                "13:" + os.path.abspath(self.programmer)], cwd=wd, **self._runner_kw())
                 except OSError:
                     pass
                 p = self.find_port(timeout=10) or p
             try:
                 rc, out, err = self.runner(self._launcher(p) + [fh, "--port=" + p, "--reset", "--noprompt"],
-                                           timeout=60, **self._runner_kw())
+                                           timeout=60, cwd=wd, **self._runner_kw())
             except OSError as e:
                 log(f"EDL: reset couldn't launch fh_loader: {e}")
                 return False
@@ -870,8 +876,11 @@ class Edl:
             if "All Finished Successfully" in blob or "{SUCCESS}" in blob:
                 log(f"EDL: reset sent on {p} — unit rebooting out of EDL.")
                 return True
-            log(f"EDL: reset attempt {attempt + 1}/3 on {p} didn't confirm (fh_loader exit {rc}): "
-                f"{_tool_tail(blob) or '(no output)'}")
+            if any(s in blob.lower() for s in GONE):
+                log("EDL: unit no longer answers on the EDL port — it already rebooted out of EDL "
+                    "(the rawprogram <power> reset fired). Done.")
+                return True
+            log(f"EDL: reset attempt {attempt + 1}/3 on {p} didn't confirm (fh_loader exit {rc}).")
             if attempt < 2:
                 time.sleep(2)
         return False
