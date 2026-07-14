@@ -2475,6 +2475,42 @@ class TestEdl(unittest.TestCase):
             edl = Edl("/x/QSaharaServer", "/x/fh_loader", "/x/prog.elf", runner=runner)
             self.assertFalse(edl.flash_partition("/dev/ttyUSB0", "init_boot_b", str(img), self.GEOM, td))
 
+    def test_reset_reloads_programmer_via_sahara_when_still_stuck_in_edl(self):
+        # ③ Lock MANGMI AIR X: a small stock write re-enumerates before the in-rawprogram <power> reset
+        # fires, leaving the unit in EDL with the programmer UNLOADED. A bare `fh_loader --reset` then can't
+        # reboot it (no Firehose). reset() must RE-LOAD the programmer via Sahara on a retry, then reset.
+        from cas.adb import Edl
+        calls = []
+        def runner(args, input_text=None, timeout=900):
+            calls.append(list(args))
+            if args[0].endswith("QSaharaServer"):
+                return 0, "Sahara protocol completed\n", ""
+            if args[0].endswith("fh_loader"):     # --reset succeeds ONLY once the programmer was re-loaded
+                if any(c[0].endswith("QSaharaServer") for c in calls):
+                    return 0, "{All Finished Successfully}\n", ""
+                return 0, "FAILED (no programmer)\n", ""
+            return 0, "", ""
+        with tempfile.TemporaryDirectory() as td:
+            edl = Edl("/x/QSaharaServer", "/x/fh_loader", "/x/prog.elf", runner=runner)
+            edl.find_port = lambda timeout=10, on_tick=None, pattern="/dev/ttyUSB*": "/dev/ttyUSB0"  # still in EDL
+            with patch("cas.adb.time.sleep", lambda *_a, **_k: None):
+                self.assertTrue(edl.reset("/dev/ttyUSB0", td, log=lambda *_: None))
+            self.assertTrue(any(c[0].endswith("QSaharaServer") for c in calls),
+                            "reset must re-load the Firehose programmer via Sahara when the unit is stuck")
+
+    def test_reset_skips_sahara_reload_when_unit_already_left_edl(self):
+        # Root's <power> path: after a successful flash the unit already rebooted OUT of EDL, so no port is
+        # present. reset() must NOT waste a Sahara re-load on a device that is gone (keeps Root fast).
+        from cas.adb import Edl
+        runner, calls = self._runner(fh_ok=False)          # --reset never confirms (no device)
+        with tempfile.TemporaryDirectory() as td:
+            edl = Edl("/x/QSaharaServer", "/x/fh_loader", "/x/prog.elf", runner=runner)
+            edl.find_port = lambda timeout=10, on_tick=None, pattern="/dev/ttyUSB*": None  # gone (rebooted)
+            with patch("cas.adb.time.sleep", lambda *_a, **_k: None):
+                self.assertFalse(edl.reset("/dev/ttyUSB0", td, log=lambda *_: None))
+            self.assertFalse(any(c[0].endswith("QSaharaServer") for c in calls),
+                             "no port present => unit already rebooted => don't re-load the programmer")
+
     @unittest.skipUnless(os.name == "posix", "staging (copy + chmod) is POSIX-only; Windows runs in place")
     def test_staged_exec_makes_a_local_executable_copy(self):
         # POSIX behavior: NAS/CIFS forces file_mode=0664 (non-exec), so tools are copied local + chmod +x.

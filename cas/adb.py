@@ -833,18 +833,33 @@ class Edl:
         return False
 
     def reset(self, port, workdir, log=print):
-        """Reboot the device out of EDL with `fh_loader --reset` — the mechanism proven to work by hand.
-        `workdir` is a local dir to stage fh_loader (the library drive may be noexec — CIFS or a removable
-        FAT/exFAT drive). Re-acquire the port each try (it can re-enumerate as the programmer finishes),
-        retry a few times, and LOG the port + the tool's own output — a unit that won't leave the black EDL
-        screen must be diagnosable, not a silent no-op (which is exactly why the MANGMI AIR X sat in EDL
-        until it was power-cycled by hand). Success is fh_loader's "All Finished Successfully"/"{SUCCESS}";
-        returns False if no attempt confirmed (caller warns + the operator holds power to recover)."""
+        """Reboot the device out of EDL with `fh_loader --reset`. If a small/fast write's link RE-ENUMERATED
+        before the in-rawprogram <power> reset could fire, the unit is left in EDL with the Firehose
+        programmer UNLOADED (raw Sahara/9008 mode) — a bare `fh_loader --reset` then has no Firehose channel
+        and the unit sits on the black EDL screen. That is the ③ Lock symptom on the MANGMI AIR X: its small
+        STOCK init_boot writes faster than Root's larger Magisk-patched image, so it loses that race. So on a
+        retry, RE-LOAD the programmer via Sahara FIRST — exactly what flash_partition does — then reset. Only
+        when a port is actually present, so a unit that ALREADY rebooted (Root's <power> path, no port) is not
+        slowed by a doomed re-load. `workdir` stages the tools locally (the library drive may be noexec).
+        Success is fh_loader's "All Finished Successfully"/"{SUCCESS}"; returns False if none confirmed."""
         fh = self._staged_exec(self.fh, workdir)
+        qsahara = self._staged_exec(self.qsahara, workdir)
         for attempt in range(3):
             if self.cancel is not None and self.cancel.is_set():
                 return False
-            p = self.find_port(timeout=10) or port
+            found = self.find_port(timeout=10)
+            p = found or port
+            # Port present + a bare --reset already failed => the programmer isn't loaded (the unit fell back
+            # to Sahara after the write). Re-establish Firehose via Sahara (the flash's own first step), then
+            # reset. Best-effort: a failure here just means the follow-up --reset tries on the current port.
+            if attempt >= 1 and found:
+                log("EDL: still in EDL — re-loading the Firehose programmer (Sahara) before reset…")
+                try:
+                    self.runner(self._launcher(p) + [qsahara, "-p", p, "-s",
+                                "13:" + os.path.abspath(self.programmer)], **self._runner_kw())
+                except OSError:
+                    pass
+                p = self.find_port(timeout=10) or p
             try:
                 rc, out, err = self.runner(self._launcher(p) + [fh, "--port=" + p, "--reset", "--noprompt"],
                                            timeout=60, **self._runner_kw())
