@@ -286,9 +286,14 @@ class ProfilesWindow:
             mbps = config.download_mbps(prof.name)
             eta = (f" · ~{human_eta((b / 1048576.0) / mbps)} to download (avg {mbps:.0f} MB/s)"
                    if (mbps and b) else " · download time estimated after the first Download")
-            self.win.after(0, lambda: self.detail_var.set(
-                f"{name}: golden saved · {human_size(b)}{eta}"))
+            self.win.after(0, lambda: self._set_detail(name, b, eta))
         threading.Thread(target=work, daemon=True).start()
+
+    def _set_detail(self, name, nbytes, eta):
+        try:
+            self.detail_var.set(f"{name}: golden saved · {human_size(nbytes)}{eta}")
+        except tk.TclError:
+            pass                                          # window closed mid-size — nothing to update
 
     def _new(self):
         name = self.app.new_profile()
@@ -373,8 +378,13 @@ class FirmwareWindow:
             self.lib_var.set(f"Library: {root}   ✓ ({len(rows)} firmware)")
 
     def _add(self):
-        self.app._add_firmware()                      # threaded ingest; refresh when it lands
-        self.win.after(1500, self.refresh)
+        self.app._add_firmware(on_done=self._on_ingest_done)   # threaded ingest; refresh when it actually lands
+
+    def _on_ingest_done(self):
+        try:
+            self.refresh()
+        except tk.TclError:
+            pass                                      # window closed mid-ingest — nothing to refresh
 
     def _open(self):
         root = self._root()

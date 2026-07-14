@@ -7,6 +7,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
@@ -254,3 +255,163 @@ class TestFirmwareRows(unittest.TestCase):
         from cas.dialogs import firmware_rows
         with tempfile.TemporaryDirectory() as td:
             self.assertEqual(firmware_rows(pathlib.Path(td)), [])
+
+
+class _FakeWin:
+    """Stands in for the Tk root in App.__new__(App) tests. Records every after() call and — since
+    there's no real Tk mainloop here — invokes the callback immediately, the same way a real
+    `after(0, fn)` fires once the event loop next ticks."""
+
+    def __init__(self):
+        self.after_calls = []          # list of (delay, fn)
+
+    def after(self, delay, fn=None):
+        self.after_calls.append((delay, fn))
+        if fn is not None:
+            fn()
+
+
+class TestAddFirmwareOnDone(unittest.TestCase):
+    """Important-finding regression: FirmwareWindow._add() used to guess completion with a fixed
+    `self.win.after(1500, self.refresh)` after kicking off App._add_firmware()'s background ingest —
+    a multi-GB shutil.copytree that is virtually never done at 1.5s, so the window refreshed to
+    nothing new and never refreshed again. The fix threads an `on_done` callback through
+    App._add_firmware() that fires on the UI thread only once the ingest's work() closure — which
+    already signals completion via `self.win.after(0, ...)` — actually finishes."""
+
+    class _FakeFw:
+        id = "mangmi-air-x-mq66"
+
+        def current(self):
+            return "v1"
+
+        def match_rules(self):
+            return {"serial_prefix": ["MQ66"]}
+
+    def _app(self):
+        import cas.gui as G
+        app = G.App.__new__(G.App)             # bypass Tk __init__
+        app.win = _FakeWin()
+        app.log = lambda m: None
+        app.refresh_firmware = lambda: None
+        app.refresh_devices = lambda: None
+        app._bg_calls = []
+
+        def fake_run_bg(fn, label="Working"):
+            app._bg_calls.append(label)
+            fn()                                # run the work() closure synchronously, like the real
+        app._run_bg = fake_run_bg               # background thread would, minus the threading
+        return app
+
+    def test_on_done_fires_after_ingest_completes_not_on_a_timer(self):
+        import cas.gui as G
+        app = self._app()
+        events = []
+
+        def fake_ingest(*a, **kw):
+            events.append("ingest")             # the (stand-in for a) multi-GB copy happening
+            return self._FakeFw()
+
+        def on_done():
+            events.append("on_done")
+
+        with mock.patch.object(G.filedialog, "askdirectory", return_value="/tmp/build"), \
+             mock.patch.object(G.simpledialog, "askstring", side_effect=["mangmi-air-x-mq66", ""]), \
+             mock.patch.object(G.FW, "ingest", side_effect=fake_ingest):
+            app._add_firmware(on_done=on_done)
+
+        # completion is signalled AFTER the ingest actually ran — never guessed ahead of it
+        self.assertEqual(events, ["ingest", "on_done"])
+        # every after() call along this path is a completion signal (delay 0), never a guessed
+        # fixed delay like the old `after(1500, self.refresh)`
+        delays = [d for d, _fn in app.win.after_calls]
+        self.assertTrue(delays, "expected at least one after() call")
+        self.assertNotIn(1500, delays)
+        self.assertTrue(all(d == 0 for d in delays), f"expected only delay=0 after() calls, got {delays}")
+
+    def test_on_done_is_optional_and_backward_compatible(self):
+        import cas.gui as G
+        app = self._app()
+        with mock.patch.object(G.filedialog, "askdirectory", return_value="/tmp/build"), \
+             mock.patch.object(G.simpledialog, "askstring", side_effect=["x", ""]), \
+             mock.patch.object(G.FW, "ingest", return_value=self._FakeFw()):
+            app._add_firmware()                 # no on_done passed — must not raise
+        self.assertEqual(app._bg_calls, ["Ingesting firmware"])
+
+
+class TestFirmwareWindowAddWiring(unittest.TestCase):
+    """FirmwareWindow._add() must hand App._add_firmware() a real completion callback (not a fixed
+    delay), and that callback must be safe if the operator closed the Firmware window while the
+    ingest was still running (tk.TclError from a destroyed widget)."""
+
+    def _win(self):
+        import cas.dialogs as D
+        return D.FirmwareWindow.__new__(D.FirmwareWindow)          # bypass Tk __init__
+
+    def test_add_passes_on_ingest_done_as_the_callback(self):
+        win = self._win()
+        captured = {}
+
+        def fake_add_firmware(on_done=None):
+            captured["on_done"] = on_done
+        win.app = mock.Mock(_add_firmware=fake_add_firmware)
+
+        win._add()
+
+        # bound methods aren't `is`-identical across accesses; compare by equality (same instance+func)
+        self.assertEqual(captured.get("on_done"), win._on_ingest_done)
+
+    def test_on_ingest_done_refreshes_the_list(self):
+        win = self._win()
+        calls = []
+        win.refresh = lambda: calls.append(1)
+
+        win._on_ingest_done()
+
+        self.assertEqual(calls, [1])
+
+    def test_on_ingest_done_is_safe_if_the_window_was_closed_mid_ingest(self):
+        import tkinter as tk
+        win = self._win()
+
+        def boom():
+            raise tk.TclError("window closed")
+        win.refresh = boom
+
+        win._on_ingest_done()                   # must not raise
+
+
+class TestProfilesWindowOnSelectClosedMidWalk(unittest.TestCase):
+    """Minor: ProfilesWindow._on_select()'s worker thread marshals its result back with
+    `self.win.after(0, ...)`; if the operator closes the Profiles window mid-walk, updating a
+    destroyed StringVar raises tk.TclError. `_set_detail` must swallow that quietly, matching
+    ProfilePicker._set_size's pattern."""
+
+    def test_set_detail_is_safe_if_the_window_was_closed(self):
+        import tkinter as tk
+        import cas.dialogs as D
+        win = D.ProfilesWindow.__new__(D.ProfilesWindow)
+
+        class _BoomVar:
+            def set(self, v):
+                raise tk.TclError("window closed")
+        win.detail_var = _BoomVar()
+
+        win._set_detail("some-profile", 12345, " · ~1m to download")   # must not raise
+
+    def test_set_detail_updates_the_label_when_the_window_is_still_open(self):
+        import cas.dialogs as D
+        win = D.ProfilesWindow.__new__(D.ProfilesWindow)
+
+        class _Var:
+            def __init__(self):
+                self.value = None
+
+            def set(self, v):
+                self.value = v
+        win.detail_var = _Var()
+
+        win._set_detail("some-profile", 12345, " · ~1m to download")
+
+        self.assertIn("some-profile", win.detail_var.value)
+        self.assertIn("~1m to download", win.detail_var.value)

@@ -1873,10 +1873,14 @@ class App:
     def _open_boxart(self):
         D.BoxArtDialog(self.win, self)
 
-    def _add_firmware(self):
+    def _add_firmware(self, on_done=None):
         """Ingest a raw firmware build folder into the library (new version) on a background thread.
         Prompts for the firmware id (variants that share a model — e.g. MQ65 vs MQ66, both 'AIR X' —
-        need DISTINCT ids) and an optional serial prefix that drives the per-device auto-match."""
+        need DISTINCT ids) and an optional serial prefix that drives the per-device auto-match.
+
+        `on_done`, if given, is invoked on the UI thread once the ingest actually finishes — the copy
+        can be multi-GB over USB/NAS, so callers must never guess a fixed delay (a caller-owned window
+        may have to refresh its own list once the real data has landed)."""
         folder = filedialog.askdirectory(title="Select a firmware build folder (contains emmc/ or ufs/)")
         if not folder:
             return
@@ -1902,6 +1906,8 @@ class App:
             self.log(f"firmware ingested: {fw.id}  v{fw.current()}  match={fw.match_rules()}")
             self.win.after(0, self.refresh_firmware)
             self.win.after(0, self.refresh_devices)
+            if on_done is not None:
+                self.win.after(0, on_done)
             return True
         self._run_bg(work, label="Ingesting firmware")
 
