@@ -415,8 +415,15 @@ class TestFlashMethod(unittest.TestCase):
 
     def test_flasher_for_firmware_picks_edl_vs_fastboot(self):
         from cas import provision as PV
-        edl_fw = FW.ingest(fake_edl_build(self.tmp, "MANGMI_la2.0.l.user.20260507.165105"),
-                           self.root, firmware_id="air-x")
+        # This test verifies the SELECTION logic (edl vs fastboot), so the EDL build must carry tools the
+        # CURRENT host can run — otherwise flasher_for_firmware correctly returns (None, reason) on Windows,
+        # where a Linux ELF can't execute (see test_edl_tools_prefers_windows_exe / the os.name=='nt' guard).
+        # Add the .exe host tools alongside the ELF so the build is runnable on every runner; the ELF-only
+        # Windows honest-error path is covered separately.
+        edl_src = fake_edl_build(self.tmp, "MANGMI_la2.0.l.user.20260507.165105")
+        (edl_src / "QSaharaServer.exe").write_bytes(b"MZ")
+        (edl_src / "fh_loader.exe").write_bytes(b"MZ")
+        edl_fw = FW.ingest(edl_src, self.root, firmware_id="air-x")
         flasher, reason = PV.flasher_for_firmware(edl_fw, fastboot=None, slot="_b",
                                                   runner=lambda *a, **k: (0, "", ""))
         self.assertIsNotNone(flasher)
