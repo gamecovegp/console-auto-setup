@@ -68,12 +68,13 @@ class _Tooltip:
         if self.tip or not self.text:
             return
         x = self.widget.winfo_rootx() + 14
-        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
         self.tip = tk.Toplevel(self.widget)
         self.tip.wm_overrideredirect(True)            # no title bar
         self.tip.wm_geometry(f"+{x}+{y}")
-        tk.Label(self.tip, text=self.text, justify="left", background="#ffffe0",
-                 relief="solid", borderwidth=1, wraplength=380, padx=7, pady=5).pack()
+        tk.Label(self.tip, text=self.text, justify="left",
+                 background=THEME.LIGHT["text"], foreground="#FFFFFF",
+                 relief="flat", borderwidth=0, wraplength=380, padx=10, pady=7).pack()
 
     def _hide(self, _e=None):
         if self.tip:
@@ -1774,8 +1775,9 @@ class App:
             refresh()
 
         def install_to_devices():
-            # Ad-hoc: push the selected store app to the SAME devices Run targets (Apply-to-ALL or the
-            # selected rows). Plain user install — no profile/golden/root. Off-thread so the UI never freezes.
+            # Ad-hoc: push the selected store app to the currently SELECTED device row(s) in the main
+            # window (same target resolution as ▶ Run — see _action_targets). Plain user install — no
+            # profile/golden/root. Off-thread so the UI never freezes.
             pkg = _sel()
             if not pkg:
                 messagebox.showinfo("CAS", "Select a package row to install to the device(s).")
@@ -2345,10 +2347,7 @@ class App:
 
 def main(adb_bin="adb", fb_bin="fastboot"):
     win = tk.Tk()
-    try:
-        ttk.Style().theme_use("clam")
-    except tk.TclError:
-        pass
+    THEME.apply(win)                    # restyle ttk BEFORE the widgets are built
     try:    # GameCove logo in the titlebar/taskbar (keep a ref on win so Tk doesn't GC the image)
         win._cas_icon = tk.PhotoImage(file=str(BUNDLE / "assets" / "cas-window.png"))
         win.iconphoto(True, win._cas_icon)

@@ -584,3 +584,35 @@ class TestActionTargets(unittest.TestCase):
         from cas.gui import App
         self.assertFalse(hasattr(App, "_on_batch_toggle"),
                          "the Apply-to-ALL toggle and its handler must be removed")
+
+
+class TestMainAppliesTheTheme(unittest.TestCase):
+    def test_main_calls_theme_apply(self):
+        """main() must theme the root BEFORE App builds its widgets — a ttk restyle applied after the
+        fact doesn't reach widgets that already read their options."""
+        import inspect
+        from cas import gui
+        src = inspect.getsource(gui.main)
+        self.assertIn("theme.apply", src.replace("THEME.apply", "theme.apply"))
+        self.assertLess(src.index("apply("), src.index("App("),
+                        "theme must be applied before App() builds the widgets")
+
+    def test_theme_actually_reaches_the_built_widgets(self):
+        """Runtime check (guarded — skips headless): build the REAL App against a themed root and
+        confirm the styling actually landed on a real widget, not just that main() calls apply()
+        textually. Catches the case where apply() runs too late to matter."""
+        root = _tk_or_skip()
+        try:
+            from tkinter import ttk
+            from cas import theme
+            from cas.gui import App
+            palette, _fonts = theme.apply(root)
+            # Bogus binaries: refresh_devices() spawns a background thread that shells out to
+            # list_devices(); a nonexistent path fails fast (FileNotFoundError, caught + logged) instead
+            # of racing root.destroy() below against a real `adb devices` subprocess call.
+            app = App(root, adb_bin="/nonexistent/adb-for-tests", fb_bin="/nonexistent/fastboot-for-tests")
+            st = ttk.Style(root)
+            self.assertEqual(st.lookup("Accent.TButton", "background"), palette["accent"])
+            self.assertEqual(str(app.run_btn.cget("style")), "Accent.TButton")
+        finally:
+            root.destroy()
