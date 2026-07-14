@@ -22,6 +22,7 @@ from . import profiles as P
 from . import provision as PV
 from . import firmware as FW
 from . import warnings as WARN
+from . import dialogs as D
 from .adb import Adb, Fastboot, list_devices
 from . import config
 from .config import library_root
@@ -1489,16 +1490,7 @@ class App:
             if not serial:
                 messagebox.showinfo("CAS", "Select ONE golden device for Save.")
                 return
-            cleared = self._preflight(steps, [serial])    # gate before prompting for the profile name
-            if not cleared:
-                return
-            name = simpledialog.askstring("Save → profile", "Profile name to capture into:",
-                                          initialvalue=self.prof_var.get())
-            if not name:
-                return
-            if not self._pick_capture(serial, name):       # modal: choose what to capture (or cancel)
-                return
-            self._run_chain(steps, cleared, save_name=name)
+            self._run_save(steps, serial)
         else:
             t = self._action_targets()
             if not t:
@@ -1509,6 +1501,30 @@ class App:
             if "download" in steps and not self._pick_downloads(cleared):  # modal(s): choose apps (or cancel)
                 return
             self._run_chain(steps, cleared)
+
+    def _run_save(self, steps, serial):
+        """Save = preflight → pick the DESTINATION PROFILE (modal) → pick what to capture (modal) → run.
+        Both entry points (the ① Save tick and the context menu) land here, so they can't drift."""
+        cleared = self._preflight(steps, [serial])        # gate before either modal
+        if not cleared:
+            return
+        name = self._ask_save_profile(serial)
+        if not name:
+            return
+        if not self._pick_capture(serial, name):          # modal: choose what to capture (or cancel)
+            return
+        self._run_chain(steps, cleared, save_name=name)
+
+    def _ask_save_profile(self, serial):
+        """Step 1 of Save: pick the destination profile, pre-selecting the device's assigned one.
+        Replaces the old 'type the profile name' text prompt."""
+        cur = self.assigned.get(serial)
+        pick = D.ProfilePicker(
+            self.win, self.profiles_root,
+            title=f"Save — capture {self._row_model(serial)} into which profile?",
+            preselect=(cur if cur and cur != "(no match)" else None),
+            warn_overwrite=True, on_new=self.new_profile)
+        return pick.result
 
     def _selected_profile(self):
         name = self.prof_var.get()
@@ -2375,6 +2391,8 @@ class App:
         return img
 
     def new_profile(self):
+        """Create an empty profile and RETURN its name (the ProfilePicker selects the result), or None
+        if the operator cancelled / the name was taken."""
         # No regex needed — the profile auto-matches by NAME similarity + SD size. Put the device model and
         # the SD capacity in the name (e.g. 'retroid-pocket-6-512', 'retroid-pocket-6-256') and CAS matches
         # a Retroid Pocket 6 with a ~512 GB card to the -512 profile, a ~256 GB card to the -256 profile.
@@ -2383,11 +2401,11 @@ class App:
             "New profile name — include the device model and SD size so it auto-matches, e.g.:\n"
             "   retroid-pocket-6-512   ·   retroid-pocket-6-256   ·   odin2-mini")
         if not name:
-            return
+            return None
         d = P.pathlib.Path(self.profiles_root) / name
         if d.exists():
             messagebox.showerror("CAS", "A profile with that name already exists.")
-            return
+            return None
         d.mkdir(parents=True)
         # model_match left blank on purpose — name-similarity handles it. (Set it by hand only for odd model
         # strings the name can't capture; an explicit model_match still takes precedence.)
@@ -2396,8 +2414,7 @@ class App:
         self.log(f"created profile '{name}' — auto-matches by name + SD size, no regex needed. "
                  "Select the golden device, then 'Save device → profile'.")
         self.refresh_profiles()
-        self.prof_var.set(name)
-        self.on_select_profile()
+        return name
 
     def delete_profile(self):
         name = self.prof_var.get()

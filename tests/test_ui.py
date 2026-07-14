@@ -167,3 +167,57 @@ class TestRowCells(unittest.TestCase):
         from cas.gui import _state_cell
         self.assertEqual(_state_cell("device"), "● device")
         self.assertEqual(_state_cell(""), "● ?")
+
+
+class TestHumanSize(unittest.TestCase):
+    def test_zero_bytes_is_an_em_dash(self):
+        from cas.dialogs import human_size
+        self.assertEqual(human_size(0), "—")
+
+    def test_mb_scale_value(self):
+        from cas.dialogs import human_size
+        self.assertEqual(human_size(5 * 1024 * 1024), "5.0 MB")
+
+    def test_gb_scale_value(self):
+        from cas.dialogs import human_size
+        self.assertEqual(human_size(3 * 1024 * 1024 * 1024), "3.0 GB")
+
+
+class TestProfileRows(unittest.TestCase):
+    def _library(self, td):
+        """A profile library with one golden-bearing profile and one empty one."""
+        root = pathlib.Path(td)
+        a = root / "air-x-128"
+        (a / "golden_root_payload").mkdir(parents=True)
+        (a / "profile.meta").write_text("model_match=AIR X\ncaptured=2026-07-11\n")
+        (a / "golden_root_payload" / "global.meta").write_text("x=1\n")   # has_golden() looks for this
+        b = root / "odin2-mini"
+        b.mkdir(parents=True)
+        (b / "profile.meta").write_text("model_match=\ncaptured=\n")
+        return str(root)
+
+    def test_rows_report_the_golden_and_the_model(self):
+        from cas.dialogs import profile_rows
+        with tempfile.TemporaryDirectory() as td:
+            rows = profile_rows(self._library(td))
+        self.assertEqual([r["name"] for r in rows], ["air-x-128", "odin2-mini"])
+        self.assertTrue(rows[0]["has_golden"])
+        self.assertEqual(rows[0]["model"], "AIR X")
+        self.assertEqual(rows[0]["captured"], "2026-07-11")
+        self.assertFalse(rows[1]["has_golden"])
+
+    def test_a_missing_library_yields_no_rows(self):
+        from cas.dialogs import profile_rows
+        self.assertEqual(profile_rows("/nonexistent/library"), [])
+
+
+class TestOverwriteWarning(unittest.TestCase):
+    def test_a_profile_with_a_golden_warns_that_save_replaces_it(self):
+        from cas.dialogs import overwrite_warning
+        msg = overwrite_warning({"name": "air-x-128", "has_golden": True})
+        self.assertIn("air-x-128", msg)
+        self.assertIn("REPLACE", msg.upper())
+
+    def test_an_empty_profile_does_not_warn(self):
+        from cas.dialogs import overwrite_warning
+        self.assertEqual(overwrite_warning({"name": "odin2-mini", "has_golden": False}), "")
