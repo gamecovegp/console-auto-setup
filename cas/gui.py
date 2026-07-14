@@ -144,6 +144,66 @@ def _manifest_from_axes(axes):
     return pkgs, {p: axes[p] for p in pkgs}
 
 
+def _selection_summary(n_sel, n_total):
+    """The footer's blast-radius line. ▶ Run always targets the SELECTION, so the operator must be
+    able to read what that is without counting rows. Pure (no Tk)."""
+    if n_total == 0:
+        return "No devices connected"
+    if n_sel == 0:
+        return f"No devices selected  ·  {n_total} connected"
+    if n_sel == n_total:
+        return f"ALL {n_total} devices selected"
+    return f"{n_sel} of {n_total} devices selected"
+
+
+def _rightclick_selection(clicked, current):
+    """File-manager rule for a right-click: a click OUTSIDE the selection replaces it with the clicked
+    row; a click INSIDE a multi-selection keeps the whole selection (so 'Run ▸ Download' hits all of
+    them); a click on empty space leaves the selection alone. Tk's Treeview does none of this by
+    itself — without it, right-clicking one of five selected rows would silently drop the other four.
+    Returns the selection to apply. Pure (no Tk)."""
+    cur = tuple(current)
+    if not clicked:
+        return cur
+    if clicked in cur:
+        return cur
+    return (clicked,)
+
+
+def _context_actions(n_selected, state):
+    """Which context-menu items are enabled for the current selection. `state` is the adb state of the
+    focused row (only the single-device items care). Pure (no Tk) so the gating is unit-tested."""
+    one = n_selected == 1
+    any_ = n_selected >= 1
+    online = state == "device"
+    return {
+        "save":            one and online,      # capture reads the device over adb
+        "assign_profile":  any_,
+        "assign_firmware": any_,
+        "run_root":        any_,                # a fastboot/EDL unit is a legitimate Root target
+        "run_download":    any_,
+        "run_warmup":      any_,
+        "run_lock":        any_,
+        "seal":            one,
+        "release":         one and online,      # clears the Companion lockdown over adb
+        "copy_serial":     any_,
+    }
+
+
+def _profile_cell(name, manual):
+    """The 'profile' column text. A MANUAL (sticky, operator-set) assignment is marked in TEXT rather
+    than by row colour, because row colour now carries the device STATE — two signals, one row, so
+    they can't both be a tint."""
+    if not name or name == "(no match)":
+        return name or ""
+    return f"{name}  (pinned)" if manual else name
+
+
+def _state_cell(state):
+    """The 'state' column text: a dot + the adb state (the dot's COLOUR comes from the row tag)."""
+    return f"● {state or '?'}"
+
+
 def _human_size(nbytes):
     """Bytes -> '3.4 GB' / '512 MB' / '— ' for 0."""
     n = float(nbytes or 0)
