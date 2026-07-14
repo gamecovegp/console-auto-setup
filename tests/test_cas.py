@@ -4019,6 +4019,60 @@ class TestRunChain(unittest.TestCase):
         self.assertEqual(app._stage_calls, [("download", ["S2"], True), ("warmup", ["S2"], False)])
 
 
+class TestRunChainSaveSelectionGuard(unittest.TestCase):
+    """BLOCKING FINDING 1 regression: ▶ Run with ① Save ticked on a MULTI-selection used to silently
+    target only `_selected_serial()` (the topmost row) — the footer said 'N of M devices selected', but
+    Save ran on exactly ONE of them with no warning, and the rest got nothing. The footer's blast-radius
+    promise must never disagree with what ▶ Run actually does, so this must refuse (not proceed on one
+    device) whenever the selection isn't exactly one row."""
+
+    def _app(self, selection):
+        from cas.gui import App
+        from unittest import mock
+        import types
+        app = App.__new__(App)                              # bypass Tk __init__
+        app.dev_tree = types.SimpleNamespace(selection=lambda: list(selection))
+        # Only ① Save is ticked (root/download/warmup/lock all off) — mirrors chain_vars' BooleanVars.
+        app.chain_vars = {k: types.SimpleNamespace(get=lambda k=k: k == "save")
+                           for k in ("root", "save", "download", "warmup", "lock")}
+        app._run_save_calls = []
+        app._run_save = lambda steps, serial: app._run_save_calls.append((list(steps), serial))
+        # The non-save branch (_action_targets/_preflight/_run_chain) must NEVER be reached from here —
+        # assert_not_called() below proves it.
+        app._action_targets = mock.Mock(side_effect=AssertionError("must not reach the non-save branch"))
+        return app
+
+    def test_multi_selection_with_save_ticked_refuses_to_run_on_one_device(self):
+        from unittest import mock
+        import cas.gui as G
+        app = self._app(["S1", "S2", "S3"])
+        with mock.patch.object(G.messagebox, "showinfo") as info:
+            app.run_chain()
+        info.assert_called_once()
+        self.assertIn("ONE", info.call_args[0][1])
+        self.assertEqual(app._run_save_calls, [],
+                         "Save must NOT silently proceed on just the topmost device of a multi-selection")
+        app._action_targets.assert_not_called()
+
+    def test_zero_selection_with_save_ticked_refuses_to_run(self):
+        from unittest import mock
+        import cas.gui as G
+        app = self._app([])
+        with mock.patch.object(G.messagebox, "showinfo") as info:
+            app.run_chain()
+        info.assert_called_once()
+        self.assertEqual(app._run_save_calls, [])
+
+    def test_single_selection_with_save_ticked_runs_on_that_one_device(self):
+        from unittest import mock
+        import cas.gui as G
+        app = self._app(["S1"])
+        with mock.patch.object(G.messagebox, "showinfo") as info:
+            app.run_chain()
+        info.assert_not_called()
+        self.assertEqual(app._run_save_calls, [(["save"], "S1")])
+
+
 class TestSealSelected(unittest.TestCase):
     """Settings ▸ 'Seal selected unit' — single-device slice of ③ Lock via PV.seal_all."""
 

@@ -109,12 +109,19 @@ class TestIdentity(unittest.TestCase):
 
 class TestDeviceFirmware(unittest.TestCase):
     def setUp(self):
+        # CAS_CONFIG isolation: save whatever it was (the module default from setUpModule) so tearDown can
+        # RESTORE it instead of assuming it was unset — a bare pop() here re-opens the bug commit 1492ce8
+        # closed (the suite falling through to the operator's real, gitignored cas-config.json).
+        self._saved_cas_config = os.environ.get("CAS_CONFIG")
         self.tmp = tempfile.mkdtemp()
         os.environ["CAS_CONFIG"] = os.path.join(self.tmp, "cas-config.json")
         os.environ["CAS_PROFILES"] = self.tmp   # pins library_root() to tmp
 
     def tearDown(self):
-        os.environ.pop("CAS_CONFIG", None)
+        if self._saved_cas_config is None:
+            os.environ.pop("CAS_CONFIG", None)
+        else:
+            os.environ["CAS_CONFIG"] = self._saved_cas_config
         os.environ.pop("CAS_PROFILES", None)
 
     def test_firmware_root_under_library(self):
@@ -314,6 +321,8 @@ class TestIngest(unittest.TestCase):
 
 class TestResolve(unittest.TestCase):
     def setUp(self):
+        # CAS_CONFIG isolation: save+restore (not a bare pop) — see TestDeviceFirmware.setUp above.
+        self._saved_cas_config = os.environ.get("CAS_CONFIG")
         self.tmp = tempfile.mkdtemp()
         os.environ["CAS_CONFIG"] = os.path.join(self.tmp, "cas-config.json")
         self.root = pathlib.Path(self.tmp) / "_firmware"
@@ -324,7 +333,10 @@ class TestResolve(unittest.TestCase):
                 match={"serial_prefix": ["MQ65"], "device": "AIR_X"})
 
     def tearDown(self):
-        os.environ.pop("CAS_CONFIG", None)
+        if self._saved_cas_config is None:
+            os.environ.pop("CAS_CONFIG", None)
+        else:
+            os.environ["CAS_CONFIG"] = self._saved_cas_config
 
     def _idn(self, serial):
         return {"serial": serial, "device": "AIR_X", "soc": "SM6115",
@@ -375,12 +387,17 @@ class TestResolve(unittest.TestCase):
 
 class TestAuditLog(unittest.TestCase):
     def setUp(self):
+        # CAS_CONFIG isolation: save+restore (not a bare pop) — see TestDeviceFirmware.setUp above.
+        self._saved_cas_config = os.environ.get("CAS_CONFIG")
         self.tmp = tempfile.mkdtemp()
         os.environ["CAS_CONFIG"] = os.path.join(self.tmp, "cas-config.json")
         os.environ["CAS_PROFILES"] = self.tmp
 
     def tearDown(self):
-        os.environ.pop("CAS_CONFIG", None)
+        if self._saved_cas_config is None:
+            os.environ.pop("CAS_CONFIG", None)
+        else:
+            os.environ["CAS_CONFIG"] = self._saved_cas_config
         os.environ.pop("CAS_PROFILES", None)
 
     def test_log_event_appends_jsonl(self):
@@ -391,6 +408,45 @@ class TestAuditLog(unittest.TestCase):
         self.assertEqual(len(lines), 2)
         self.assertEqual(lines[0]["serial"], "S1")
         self.assertEqual(lines[1]["action"], "update")
+
+
+class TestCasConfigIsolationRestoresNotPops(unittest.TestCase):
+    """Regression guard: TestDeviceFirmware / TestResolve / TestAuditLog's tearDown() used to
+    unconditionally `os.environ.pop("CAS_CONFIG", None)` instead of restoring whatever CAS_CONFIG was
+    before their own setUp() overrode it — leaving it UNSET for whatever test runs next in the module
+    (re-opening the bug commit 1492ce8 closed: a test without CAS_CONFIG pointed at a temp file falls
+    straight through to the operator's real, gitignored cas-config.json). Drives each class's
+    setUp()/tearDown() directly and proves CAS_CONFIG comes back to its PRE-setUp value, not gone."""
+
+    def _check(self, test_case_cls):
+        before = os.environ.get("CAS_CONFIG")
+        tc = test_case_cls.__new__(test_case_cls)      # bypass __init__ (no test method needed)
+        try:
+            tc.setUp()
+            try:
+                self.assertIn("CAS_CONFIG", os.environ)    # setUp DOES override it — expected
+            finally:
+                tc.tearDown()
+            got = os.environ.get("CAS_CONFIG")
+        finally:
+            # Force CAS_CONFIG back to `before` ourselves regardless of what tc.tearDown() actually did —
+            # otherwise a FAILING case here leaks its own contamination onto whatever test runs next
+            # (silently re-committing the very bug this guard exists to catch).
+            if before is None:
+                os.environ.pop("CAS_CONFIG", None)
+            else:
+                os.environ["CAS_CONFIG"] = before
+        self.assertEqual(got, before,
+                         f"{test_case_cls.__name__}.tearDown() must RESTORE CAS_CONFIG, not just pop it")
+
+    def test_device_firmware_restores_cas_config(self):
+        self._check(TestDeviceFirmware)
+
+    def test_resolve_restores_cas_config(self):
+        self._check(TestResolve)
+
+    def test_audit_log_restores_cas_config(self):
+        self._check(TestAuditLog)
 
 
 def fake_edl_build(tmp, name):

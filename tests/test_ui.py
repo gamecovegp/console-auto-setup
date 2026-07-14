@@ -54,6 +54,14 @@ class TestPalette(unittest.TestCase):
         from cas.theme import LIGHT
         self.assertEqual(LIGHT["accent"].upper(), "#A855F7")
 
+    def test_state_colors_values_are_all_light_keys(self):
+        """BLOCKING FINDING 5: gui._populate_devices does THEME.LIGHT[key] for every STATE_COLORS value,
+        on the UI thread, mid device-list refresh. A value that isn't a LIGHT key is a KeyError that
+        empties the whole device list. Locks the coupling so drift is caught here, not on the bench."""
+        from cas.theme import STATE_COLORS, LIGHT
+        for state, key in STATE_COLORS.items():
+            self.assertIn(key, LIGHT, f"STATE_COLORS[{state!r}] -> {key!r} is not a LIGHT key")
+
 
 class TestApplyTheme(unittest.TestCase):
     def test_apply_configures_the_accent_button_and_taller_rows(self):
@@ -132,6 +140,14 @@ class TestContextActions(unittest.TestCase):
         self.assertFalse(_context_actions(2, "device")["seal"])
         self.assertFalse(_context_actions(1, "offline")["release"])   # release needs adb
 
+    def test_seal_needs_an_online_device_too(self):
+        """E5: sealing goes over adb — an offline/unauthorized row can only ever fail after a guaranteed
+        2-3 min flash-and-wait, so it must be gated exactly like save/release."""
+        from cas.gui import _context_actions
+        self.assertTrue(_context_actions(1, "device")["seal"])
+        self.assertFalse(_context_actions(1, "offline")["seal"])
+        self.assertFalse(_context_actions(1, "unauthorized")["seal"])
+
     def test_release_is_enabled_for_one_online_device(self):
         """COVERAGE FINDING 1: release's enabled case was never asserted."""
         from cas.gui import _context_actions
@@ -149,6 +165,7 @@ class TestContextActions(unittest.TestCase):
         # These actions NEED adb and should be disabled offline
         self.assertFalse(a["save"], "save needs adb and should be disabled in fastboot state")
         self.assertFalse(a["release"], "release needs adb and should be disabled in fastboot state")
+        self.assertFalse(a["seal"], "seal needs adb and should be disabled in fastboot state")
 
 
 class TestRowCells(unittest.TestCase):
@@ -454,6 +471,94 @@ class TestContextMenuWiring(unittest.TestCase):
         self.assertNotIn("S1", app.assigned_manual)
 
 
+class _FakeCtxTree:
+    """Stand-in for the real Treeview, just enough for App._popup_context: identify_row maps a y-coord
+    to a row id (empty string = empty space, matching the real Treeview), selection()/selection_set()/
+    focus() model Tk's actual semantics (selection_set REPLACES the whole selection) — and every mutating
+    call is recorded so a test can assert exactly what _popup_context told the tree to do."""
+
+    def __init__(self, row_at_y, initial_selection=()):
+        self._row_at_y = row_at_y
+        self._selection = tuple(initial_selection)
+        self._focus = None
+        self.selection_set_calls = []
+        self.focus_calls = []
+
+    def identify_row(self, y):
+        return self._row_at_y.get(y, "")
+
+    def selection(self):
+        return self._selection
+
+    def selection_set(self, items):
+        items = tuple(items)
+        self._selection = items
+        self.selection_set_calls.append(items)
+
+    def focus(self, item=None):
+        if item is None:
+            return self._focus
+        self._focus = item
+        self.focus_calls.append(item)
+
+
+class TestPopupContext(unittest.TestCase):
+    """BLOCKING FINDING 2 regression: App._popup_context is the CALL SITE that applies the pure
+    _rightclick_selection() rule to the real tree. The pure rule already had coverage, but the wiring
+    that actually calls it (selection_set + which serials the menu gets built for) had NONE — a reviewer
+    mutant that built the menu from the STALE selection (dropping selection_set entirely) sailed through
+    the full 466-test suite. That mutant fires an action on devices the operator never clicked — the
+    brick scenario. These tests pin the real Treeview call site, not just the pure helper."""
+
+    def _app(self, row_at_y, initial_selection=()):
+        from cas.gui import App
+        app = App.__new__(App)                              # bypass Tk __init__ (no display in CI)
+        app.dev_tree = _FakeCtxTree(row_at_y, initial_selection)
+        app.ctx = "CTX_MENU"                                # sentinel objects — identity-compared below
+        app.ctx_empty = "CTX_EMPTY_MENU"
+        app._posted = []
+        app._post_menu = lambda menu, event: app._posted.append(menu)
+        app._built_for = []
+        app._rebuild_context_menu = lambda serials: app._built_for.append(list(serials))
+        return app
+
+    def _event(self, y):
+        import types
+        return types.SimpleNamespace(y=y, x_root=0, y_root=0)
+
+    def test_rightclick_outside_the_selection_narrows_to_the_clicked_row(self):
+        app = self._app(row_at_y={10: "C"}, initial_selection=("A", "B"))
+        app._popup_context(self._event(10))
+        self.assertEqual(app.dev_tree.selection_set_calls, [("C",)])
+        self.assertEqual(app.dev_tree.focus_calls, ["C"])
+        self.assertEqual(app._built_for, [["C"]])
+        self.assertEqual(app._posted, [app.ctx])
+
+    def test_rightclick_inside_a_multiselection_preserves_it(self):
+        app = self._app(row_at_y={10: "B"}, initial_selection=("A", "B"))
+        app._popup_context(self._event(10))
+        self.assertEqual(app.dev_tree.selection_set_calls, [("A", "B")])
+        self.assertEqual(app._built_for, [["A", "B"]])
+        self.assertEqual(app._posted, [app.ctx])
+
+    def test_rightclick_empty_space_with_nothing_selected_posts_the_empty_menu(self):
+        app = self._app(row_at_y={}, initial_selection=())
+        app._popup_context(self._event(999))                # no row at y=999 -> empty space
+        self.assertEqual(app.dev_tree.selection_set_calls, [])   # selection NEVER touched
+        self.assertEqual(app.dev_tree.focus_calls, [])
+        self.assertEqual(app._built_for, [])                     # the real menu is never rebuilt
+        self.assertEqual(app._posted, [app.ctx_empty])
+
+    def test_rightclick_empty_space_with_an_existing_selection_leaves_it_alone(self):
+        """_rightclick_selection's rule: empty space never CLEARS a selection — it's a no-op on whatever
+        was already selected, so the real menu (not the empty one) is built for it."""
+        app = self._app(row_at_y={}, initial_selection=("A", "B"))
+        app._popup_context(self._event(999))
+        self.assertEqual(app.dev_tree.selection_set_calls, [("A", "B")])
+        self.assertEqual(app._built_for, [["A", "B"]])
+        self.assertEqual(app._posted, [app.ctx])
+
+
 class _FakeDevTree:
     """Just enough of a ttk.Treeview for assign_profile: item(serial) reads the row's `values`
     (values[0] is the model column), item(serial, values=...) rewrites it, exists() checks presence."""
@@ -586,16 +691,73 @@ class TestActionTargets(unittest.TestCase):
                          "the Apply-to-ALL toggle and its handler must be removed")
 
 
+class _FakeVar:
+    """Stands in for a tk.BooleanVar — just get()/set() over a plain attribute."""
+    def __init__(self, value=False):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+    def set(self, v):
+        self.value = v
+
+
+class _FakeCheckbutton:
+    """Stands in for a ttk.Checkbutton — records the last state configure() set."""
+    def __init__(self):
+        self.state = "normal"
+
+    def configure(self, state=None, **kw):
+        if state is not None:
+            self.state = state
+
+
+class TestSaveSelectionGate(unittest.TestCase):
+    """BLOCKING FINDING 1 (the proactive half of the fix): the ① Save checkbox itself must reflect
+    'exactly one device selected' — not just refuse at ▶ Run time — so the operator sees the constraint
+    BEFORE ticking it, the same way Download/Warm up/Lock already grey out while Save is ticked."""
+
+    def _app(self, selection, save_ticked=False, unit_ticked=False):
+        from cas.gui import App
+        import types
+        app = App.__new__(App)
+        app.dev_tree = types.SimpleNamespace(selection=lambda: list(selection))
+        app.chain_vars = {"save": _FakeVar(save_ticked), "download": _FakeVar(unit_ticked),
+                          "warmup": _FakeVar(False), "lock": _FakeVar(False)}
+        app.chain_cbs = {"save": _FakeCheckbutton()}
+        return app
+
+    def test_disabled_and_unticked_when_selection_is_not_exactly_one(self):
+        app = self._app(["S1", "S2"], save_ticked=True)
+        app._sync_save_selection_gate()
+        self.assertEqual(app.chain_cbs["save"].state, "disabled")
+        self.assertFalse(app.chain_vars["save"].get())
+
+    def test_disabled_when_nothing_selected(self):
+        app = self._app([], save_ticked=True)
+        app._sync_save_selection_gate()
+        self.assertEqual(app.chain_cbs["save"].state, "disabled")
+        self.assertFalse(app.chain_vars["save"].get())
+
+    def test_enabled_when_exactly_one_selected(self):
+        app = self._app(["S1"])
+        app._sync_save_selection_gate()
+        self.assertEqual(app.chain_cbs["save"].state, "normal")
+
+    def test_leaves_a_unit_chain_disabled_gate_alone(self):
+        """_on_chain_tick already disabled Save because Download/Warm up/Lock is ticked — the selection
+        gate must defer to that (early-return), not fight it."""
+        app = self._app(["S1"], unit_ticked=True)
+        app.chain_cbs["save"].state = "disabled"      # what _on_chain_tick would have already set
+        app._sync_save_selection_gate()
+        self.assertEqual(app.chain_cbs["save"].state, "disabled")
+
+
 class TestMainAppliesTheTheme(unittest.TestCase):
-    def test_main_calls_theme_apply(self):
-        """main() must theme the root BEFORE App builds its widgets — a ttk restyle applied after the
-        fact doesn't reach widgets that already read their options."""
-        import inspect
-        from cas import gui
-        src = inspect.getsource(gui.main)
-        self.assertIn("theme.apply", src.replace("THEME.apply", "theme.apply"))
-        self.assertLess(src.index("apply("), src.index("App("),
-                        "theme must be applied before App() builds the widgets")
+    # test_main_calls_theme_apply (inspect.getsource text-matching) removed — E6: it was redundant with
+    # TestGuiMainOrdering below, which is a real behavioural test of the same ordering guarantee and is
+    # already proven non-vacuous.
 
     def test_a_themed_root_reaches_the_built_widgets(self):
         """Runtime check (guarded — skips headless): applying the theme directly to a root and THEN
