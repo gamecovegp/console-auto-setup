@@ -217,12 +217,22 @@ fi
 #    Source order: $CAS_CORES (pushed from the PC) > $SD/retroarch-cores (legacy, SD). The app's own
 #    cores already arrive inside data.tar; this step tops the set up to the full curated library.
 CORES="${CAS_CORES:-$SD/retroarch-cores}"; RAUID="$(app_uid com.retroarch.aarch64)"
-if [ -d "$CORES" ] && [ -n "$RAUID" ]; then
-  mkdir -p /data/data/com.retroarch.aarch64/cores
-  cp "$CORES"/*.so /data/data/com.retroarch.aarch64/cores/ 2>/dev/null
-  chown -R "$RAUID:$RAUID" /data/data/com.retroarch.aarch64/cores
-  relabel -R /data/data/com.retroarch.aarch64/cores
-  ok "installed $(ls "$CORES"/*.so 2>/dev/null | grep -c .) cores"
+if [ -n "$RAUID" ]; then                       # RetroArch IS installed on this unit
+  if [ -d "$CORES" ]; then
+    mkdir -p /data/data/com.retroarch.aarch64/cores
+    cp "$CORES"/*.so /data/data/com.retroarch.aarch64/cores/ 2>/dev/null
+    chown -R "$RAUID:$RAUID" /data/data/com.retroarch.aarch64/cores
+    relabel -R /data/data/com.retroarch.aarch64/cores
+  fi
+  # capture.sh DROPS cores from the golden's data.tar (the PC repushes the full set), so a fresh unit
+  # depends ENTIRELY on this step. If it lands ZERO cores, RetroArch shows "no core" and games won't
+  # launch -- a silent 0 is worse than a loud warning. Count the DESTINATION (what RetroArch actually sees).
+  N_CORES="$(ls /data/data/com.retroarch.aarch64/cores/*.so 2>/dev/null | grep -c .)"
+  if [ "$N_CORES" -gt 0 ]; then
+    ok "installed RetroArch cores: $N_CORES"
+  else
+    warn "RetroArch installed but ZERO cores present (source: $CORES) -- it will show 'no core' and games won't launch. Populate the PC's data/retroarch-cores/ (gitignored, ~2.4GB of .so) or the SD's retroarch-cores/, then re-Download."
+  fi
 fi
 
 # 4) SAF folder grants. /data/system/urigrants.xml is ABX; each <uri-grant> embeds the SD serial,
