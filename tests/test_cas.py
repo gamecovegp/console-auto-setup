@@ -1755,6 +1755,8 @@ class TestProvision(unittest.TestCase):
         self.assertIn("overlay.d/cas-grant.sh", cmds)      # cpio added the script
         self.assertIn("overlay.d/init.cas-grant.rc", cmds) # cpio added the rc
         self.assertIn("magiskboot repack new-boot.img cas-boot.img", cmds)
+        # r.calls records the FULL adb argv [adb, "pull", src, dst] (no serial in tests), so the verb
+        # is c[1] and the pulled SOURCE image is c[2] — asserting c[2] pins cas-boot.img vs new-boot.img.
         self.assertTrue(any(c[1] == "pull" and c[2].endswith("cas-boot.img") for c in r.calls))
 
     def test_patch_inject_failure_falls_back_to_plain_image(self):
@@ -4941,7 +4943,11 @@ class TestOverlayBootGrant(unittest.TestCase):
         self.assertIn("settings (key,value) VALUES('root_access',3)", sh)
         self.assertIn("/data/adb/magisk/magisk", sh)              # applet resolved off-PATH
         self.assertIn("/data/local/tmp/cas_boot_grant.done", sh)  # bench diagnostic marker
-        self.assertNotRegex(sh, r"while\s+true")                  # bounded retry, never infinite
+        # Bounded retry: a COUNTED loop with a numeric default cap, never an open loop. (The dynamic
+        # proof that it actually exhausts is tests/test_cas_grant.sh's daemon-not-ready scenario.)
+        self.assertRegex(sh, r'while \[ "\$i" -lt ')             # counted, not `while true`/`while :`
+        self.assertRegex(sh, r"CAS_GRANT_TRIES:-\d+")            # numeric default cap on the retry
+        self.assertNotRegex(sh, r"while\s+(true|:)")
 
     def test_rc_starts_the_service_as_root_at_boot_completed(self):
         rc = self._overlay("init.cas-grant.rc").read_text()
