@@ -4547,11 +4547,10 @@ class TestAssignFirmware(unittest.TestCase):
             try:
                 app = App.__new__(App)
                 app.dev_tree = types.SimpleNamespace(selection=lambda: ["2ee078bd"])
-                app.fw_var = types.SimpleNamespace(get=lambda: "ayn-m2")
                 app.log = lambda m: None
                 app.refresh_devices = lambda: None
                 with mock.patch("cas.gui.messagebox.askyesno", return_value=True):
-                    app.assign_firmware()
+                    app.assign_firmware("ayn-m2", ["2ee078bd"])
                 df = FW.get_device_firmware()
                 self.assertIn("2ee078bd", df)
                 self.assertEqual(df["2ee078bd"]["firmware_id"], "ayn-m2")
@@ -4576,7 +4575,7 @@ class TestAssignFirmware(unittest.TestCase):
                 app.log = lambda m: None
                 app.refresh_devices = lambda: None
                 with mock.patch("cas.gui.messagebox.askyesno", return_value=True):
-                    app.unassign_firmware()
+                    app.unassign_firmware(["2ee078bd"])
                 self.assertNotIn("2ee078bd", FW.get_device_firmware())       # override cleared
             finally:
                 for k, v in saved.items():

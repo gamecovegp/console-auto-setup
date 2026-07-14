@@ -582,12 +582,14 @@ class App:
         self.dev_tree.bind("<Double-1>", self._assign_on_doubleclick)
         self.dev_tree.bind("<<TreeviewSelect>>",
                            lambda e: (self._probe_sd_media(), self._update_fw_status()))  # SD box art + firmware
+        self._build_context_menu()          # right-click: assign profile/firmware, run a step, seal, release…
         devbtns = ttk.Frame(devf)
         devbtns.pack(anchor="w", fill="x", pady=(6, 0))
         _tip(ttk.Button(devbtns, text="Refresh devices", command=self.refresh_devices),
              "Re-scan for plugged-in devices and re-match each one to its profile by model.") \
             .pack(side="left")
-        _tip(ttk.Button(devbtns, text="Assign profile → selected", command=self.assign_profile),
+        _tip(ttk.Button(devbtns, text="Assign profile → selected",
+                        command=lambda: self.assign_profile(self.prof_var.get(), list(self.dev_tree.selection()))),
              "Set the profile (the one picked in the dropdown on the right) on the device row(s) selected "
              "in this list — Ctrl/Shift-click to pick several. OVERRIDES the model auto-match and sticks "
              "across refreshes. Tip: double-click a row to assign the dropdown profile to it fast.") \
@@ -670,10 +672,12 @@ class App:
         self.fw_var = tk.StringVar()
         self.fw_combo = ttk.Combobox(fwrow, textvariable=self.fw_var, state="readonly", width=22)
         self.fw_combo.pack(side="left", padx=4)
-        _tip(ttk.Button(fwrow, text="Assign → selected", command=self.assign_firmware),
+        _tip(ttk.Button(fwrow, text="Assign → selected",
+                        command=lambda: self.assign_firmware(self.fw_var.get(), list(self.dev_tree.selection()))),
              "Set this firmware on the selected device row(s) as a sticky MANUAL override (always wins over "
              "the serial-prefix auto-match). Remembered across launches.").pack(side="left", padx=2)
-        _tip(ttk.Button(fwrow, text="Unset", command=self.unassign_firmware),
+        _tip(ttk.Button(fwrow, text="Unset",
+                        command=lambda: self.unassign_firmware(list(self.dev_tree.selection()))),
              "Clear the firmware override on the selected device row(s). Root then auto-matches, or uses "
              "the DEFAULT init_boot kit when nothing matches — use this when the library only has a "
              "wrong-platform image for this unit.").pack(side="left", padx=2)
@@ -1571,27 +1575,30 @@ class App:
         return pm, force
 
     def _assign_on_doubleclick(self, event):
-        """Double-click a device row → assign the dropdown profile to THAT row (fast manual override)."""
+        """Double-click a device row → pick a profile for THAT row (the fast manual-override path)."""
         row = self.dev_tree.identify_row(event.y)
         if not row:
             return
-        if not self.prof_var.get():
-            messagebox.showinfo("CAS", "Pick a profile in the dropdown on the right first, then "
-                                       "double-click a device row to assign it.")
-            return
-        self.dev_tree.selection_set(row)        # assign_profile works on the current selection
-        self.assign_profile()
+        self.dev_tree.selection_set(row)
+        self._ctx_pick_profile([row])
 
-    def assign_profile(self):
-        """Assign the dropdown profile to the selected device row(s), with a Yes/No confirm (+ a warning if
-        the profile's model_match doesn't fit a selected device)."""
-        serials = list(self.dev_tree.selection())
-        if not serials:
-            messagebox.showinfo("CAS", "Select one or more device rows first (Ctrl/Shift-click).")
-            return
-        name = self.prof_var.get()
-        if not name:
-            messagebox.showinfo("CAS", "Pick a profile in the dropdown on the right first.")
+    def _ctx_pick_profile(self, serials):
+        """Open the profile picker and assign the result to `serials` (no overwrite warning — nothing
+        is being captured here)."""
+        cur = self.assigned.get(serials[0]) if len(serials) == 1 else None
+        pick = D.ProfilePicker(
+            self.win, self.profiles_root,
+            title=f"Assign a profile to {len(serials)} device(s)",
+            preselect=(cur if cur and cur != "(no match)" else None),
+            warn_overwrite=False, on_new=self.new_profile, ok_text="Assign")
+        if pick.result:
+            self.assign_profile(pick.result, serials)
+
+    def assign_profile(self, name, serials):
+        """Assign profile `name` to `serials` as a sticky MANUAL override (always wins over the model
+        auto-match, remembered across launches). Warns first when the profile's model_match doesn't fit
+        a selected device — Root/Lock FLASH that profile's init_boot, so a wrong pairing can bootloop."""
+        if not serials or not name:
             return
         mm = P.Profile(P.pathlib.Path(self.profiles_root) / name).meta.get("model_match")
         mismatched = []
@@ -1613,12 +1620,144 @@ class App:
         for s in serials:
             self.assigned[s] = name
             self.assigned_manual.add(s)
-            config.set_device_profile(s, name, manual=True)   # remember across launches (sticky override)
+            config.set_device_profile(s, name, manual=True)      # sticky across launches
             if self.dev_tree.exists(s):
                 vals = list(self.dev_tree.item(s).get("values") or ["", "", "", "", ""])
-                vals[2] = name
-                self.dev_tree.item(s, values=vals, tags=("manual",))
-        self.log(f"assigned profile '{name}' to: {', '.join(serials)} (remembered for next time)")
+                vals[2] = _profile_cell(name, True)
+                self.dev_tree.item(s, values=vals)
+        self.log(f"assigned profile '{name}' to: {', '.join(serials)} (pinned, remembered)")
+
+    def unassign_profile(self, serials):
+        """Clear the MANUAL profile override on `serials` — they go back to auto-matching by model +
+        SD tier on every refresh."""
+        if not serials:
+            return
+        if not messagebox.askyesno(
+                "CAS — clear profile override",
+                f"Clear the pinned profile on {len(serials)} device(s)?\n  " + "\n  ".join(serials)
+                + "\n\nThey go back to auto-matching by model + SD size."):
+            return
+        for s in serials:
+            self.assigned_manual.discard(s)
+            config.set_device_profile(s, None)
+        self.log(f"cleared the profile override on: {', '.join(serials)} (re-matching…)")
+        self.refresh_devices()
+
+    # ---------- right-click context menu (per-device actions on the SELECTION) ----------
+    def _build_context_menu(self):
+        """Two menus: one for a row (rebuilt per right-click, since the items depend on the selection)
+        and a small one for empty space."""
+        self.ctx = tk.Menu(self.win, tearoff=0)
+        self._ctx_subs = []                      # live submenu refs — Tk GCs an unreferenced Menu
+        self.ctx_empty = tk.Menu(self.win, tearoff=0)
+        self.ctx_empty.add_command(label="⟳ Refresh devices", command=self.refresh_devices)
+        self.ctx_empty.add_command(label="Select all", command=self.select_all_devices)
+        self.dev_tree.bind("<Button-3>", self._popup_context)
+        self.dev_tree.bind("<Shift-F10>", lambda e: self._popup_context(e, keyboard=True))
+        if sys.platform == "darwin":
+            self.dev_tree.bind("<Button-2>", self._popup_context)     # the mac right button
+
+    def _popup_context(self, event, keyboard=False):
+        row = self.dev_tree.focus() if keyboard else self.dev_tree.identify_row(event.y)
+        sel = _rightclick_selection(row, self.dev_tree.selection())
+        if not sel:
+            self._post_menu(self.ctx_empty, event)
+            return "break"
+        self.dev_tree.selection_set(sel)
+        self.dev_tree.focus(sel[0])
+        self._rebuild_context_menu(list(sel))
+        self._post_menu(self.ctx, event)
+        return "break"
+
+    def _post_menu(self, menu, event):
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _row_state(self, serial):
+        vals = self.dev_tree.item(serial).get("values") or []
+        return str(vals[4]).replace("● ", "") if len(vals) > 4 else ""
+
+    def _rebuild_context_menu(self, serials):
+        m = self.ctx
+        m.delete(0, "end")
+        self._ctx_subs = []
+        one = serials[0] if len(serials) == 1 else None
+        en = _context_actions(len(serials), self._row_state(one) if one else "device")
+        st = lambda k: ("normal" if en[k] else "disabled")           # noqa: E731 — a local alias
+
+        m.add_command(label=(f"Save “{one}” → profile…" if one else "Save → profile…  (select ONE device)"),
+                      state=st("save"), command=lambda s=one: self._run_save(["save"], s))
+        m.add_separator()
+        m.add_cascade(label="Assign profile", menu=self._profile_submenu(serials))
+        m.add_cascade(label="Assign firmware", menu=self._firmware_submenu(serials))
+        m.add_separator()
+        run = tk.Menu(m, tearoff=0)
+        for key, label in (("root", "⓪ Root"), ("download", "② Download"),
+                           ("warmup", "③ Warm up"), ("lock", "④ Lock")):
+            run.add_command(label=label, state=st("run_" + key),
+                            command=lambda k=key, ss=list(serials): self._ctx_run(k, ss))
+        self._ctx_subs.append(run)
+        m.add_cascade(label=f"Run on {len(serials)} device(s)", menu=run)
+        m.add_separator()
+        m.add_command(label="Seal (retail lock)…", state=st("seal"), command=self.seal_selected)
+        m.add_command(label="Release (un-provision)…", state=st("release"), command=self.release_selected)
+        m.add_separator()
+        m.add_command(label=("Copy serial" if one else f"Copy {len(serials)} serials"),
+                      state=st("copy_serial"), command=lambda ss=list(serials): self._copy_serials(ss))
+
+    def _profile_submenu(self, serials):
+        sub = tk.Menu(self.ctx, tearoff=0)
+        current = {self.assigned.get(s) for s in serials}
+        shown = current.pop() if len(current) == 1 else None      # a common assignment gets the ●
+        names = [p.name for p in P.list_profiles(self.profiles_root)]
+        for name in names:
+            sub.add_command(label=("●  " if name == shown else "○  ") + name,
+                            command=lambda n=name, ss=list(serials): self.assign_profile(n, ss))
+        if not names:
+            sub.add_command(label="(no profiles — open Profiles…)", state="disabled")
+        sub.add_separator()
+        sub.add_command(label="Auto-match (clear the pin)",
+                        command=lambda ss=list(serials): self.unassign_profile(ss))
+        sub.add_command(label="＋ New profile…", command=lambda ss=list(serials): self._ctx_pick_profile(ss))
+        self._ctx_subs.append(sub)
+        return sub
+
+    def _firmware_submenu(self, serials):
+        sub = tk.Menu(self.ctx, tearoff=0)
+        current = {(self.fw_resolved.get(s) or {}).get("firmware_id") for s in serials}
+        shown = current.pop() if len(current) == 1 else None
+        try:
+            ids = [f.id for f in FW.list_firmware(FW.firmware_root())]
+        except Exception:
+            ids = []
+        for fid in [FW.DEFAULT_FW_ID] + ids:                 # the bundled kit is a first-class choice
+            sub.add_command(label=("●  " if fid == shown else "○  ") + fid,
+                            command=lambda f=fid, ss=list(serials): self.assign_firmware(f, ss))
+        sub.add_separator()
+        sub.add_command(label="Clear override (auto-match)",
+                        command=lambda ss=list(serials): self.unassign_firmware(ss))
+        self._ctx_subs.append(sub)
+        return sub
+
+    def _ctx_run(self, step, serials):
+        """Run ONE chain step on the selection — the same preflight, report and retry as ▶ Run (it goes
+        through _run_chain), just without ticking a box first."""
+        cleared = self._preflight([step], serials)
+        if not cleared:
+            return
+        if step == "download" and not self._pick_downloads(cleared):
+            return
+        self._run_chain([step], cleared)
+
+    def _copy_serials(self, serials):
+        self.win.clipboard_clear()
+        self.win.clipboard_append("\n".join(serials))
+        self.log(f"copied {len(serials)} serial(s) to the clipboard.")
+
+    def select_all_devices(self):
+        self.dev_tree.selection_set(self.dev_tree.get_children())
 
     # ---------- firmware library (DEVICE ROOT firmware; library-only — never flashes) ----------
     def _fw_cell(self, serial):
@@ -1699,16 +1838,10 @@ class App:
             path = ""
         self.fw_status_var.set(f"{head}\n{check}{path}")
 
-    def assign_firmware(self):
-        """Assign the dropdown firmware to the selected device row(s) as a sticky MANUAL override."""
-        serials = list(self.dev_tree.selection())
-        if not serials:
-            messagebox.showinfo("CAS", "Select one or more device rows first (Ctrl/Shift-click).")
-            return
-        fid = self.fw_var.get()
-        if not fid:
-            messagebox.showinfo("CAS", "Pick a firmware in the dropdown (Root images tab) first. "
-                                       "Use 'Add / update…' if the library is empty.")
+    def assign_firmware(self, fid, serials):
+        """Assign firmware `fid` to `serials` as a sticky MANUAL override (always wins over the
+        serial-prefix auto-match)."""
+        if not serials or not fid:
             return
         if not messagebox.askyesno(
                 "CAS — assign firmware",
@@ -1716,19 +1849,16 @@ class App:
                 + "\n  ".join(serials)):
             return
         for s in serials:
-            FW.set_device_firmware(s, fid, manual=True)       # sticky; always wins over the auto-match
+            FW.set_device_firmware(s, fid, manual=True)
             FW.log_event(s, fid, None, "assign", True)
         self.log(f"assigned firmware '{fid}' to: {', '.join(serials)} (remembered). Re-resolving…")
-        self.refresh_devices()                                # re-resolve so the column + status reflect it
+        self.refresh_devices()
 
-    def unassign_firmware(self):
-        """Clear the firmware override on the selected device row(s) so Root no longer flashes that
-        firmware's image. Resolution then falls back to the serial-prefix auto-match, and — when nothing
-        matches — Root uses the bundled DEFAULT init_boot kit (the right move when the only library match
-        is a wrong-platform image, e.g. an AYN 'boot'/qssi build on a Retroid 'init_boot'/kalama unit)."""
-        serials = list(self.dev_tree.selection())
+    def unassign_firmware(self, serials):
+        """Clear the firmware override on `serials`. Root then auto-matches, or uses the bundled
+        DEFAULT init_boot kit when nothing matches — the right move when the only library match is a
+        wrong-platform image."""
         if not serials:
-            messagebox.showinfo("CAS", "Select one or more device rows first (Ctrl/Shift-click).")
             return
         if not messagebox.askyesno(
                 "CAS — clear firmware override",
@@ -1736,7 +1866,7 @@ class App:
                 + "\n\nRoot then uses the auto-match, or the DEFAULT init_boot kit if nothing matches."):
             return
         for s in serials:
-            FW.set_device_firmware(s, None)                   # falsy id -> forget the override
+            FW.set_device_firmware(s, None)
             FW.log_event(s, None, None, "clear", False)
         self.log(f"cleared firmware override on: {', '.join(serials)} (re-resolving…)")
         self.refresh_devices()

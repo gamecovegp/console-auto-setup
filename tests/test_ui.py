@@ -415,3 +415,41 @@ class TestProfilesWindowOnSelectClosedMidWalk(unittest.TestCase):
 
         self.assertIn("some-profile", win.detail_var.value)
         self.assertIn("~1m to download", win.detail_var.value)
+
+
+class TestContextMenuWiring(unittest.TestCase):
+    """The context menu builds from the PURE gating (no Tk). These tests pin the wiring contract the
+    menu relies on: assign_* take their target explicitly now, so a menu item can act on a selection
+    the combobox never knew about."""
+
+    def _app(self):
+        from cas.gui import App
+        app = App.__new__(App)                             # bypass Tk __init__ (no display in CI)
+        app.assigned = {"S1": "p1", "S2": "p2"}
+        app.assigned_manual = set()
+        app.profiles_root = "."
+        app.log = lambda m: None
+        app.refresh_devices = lambda: None
+        return app
+
+    def test_assign_profile_takes_the_name_and_the_serials(self):
+        import inspect
+        from cas.gui import App
+        sig = inspect.signature(App.assign_profile)
+        self.assertEqual(list(sig.parameters)[1:3], ["name", "serials"])
+
+    def test_assign_firmware_takes_the_id_and_the_serials(self):
+        import inspect
+        from cas.gui import App
+        sig = inspect.signature(App.assign_firmware)
+        self.assertEqual(list(sig.parameters)[1:3], ["fid", "serials"])
+
+    def test_unassign_profile_clears_the_manual_override(self):
+        from unittest import mock
+        app = self._app()
+        app.assigned_manual.add("S1")
+        with mock.patch("cas.gui.config.set_device_profile") as sdp, \
+             mock.patch("cas.gui.messagebox.askyesno", return_value=True):
+            app.unassign_profile(["S1"])
+        sdp.assert_called_once_with("S1", None)
+        self.assertNotIn("S1", app.assigned_manual)
