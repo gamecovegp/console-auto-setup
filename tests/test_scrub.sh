@@ -14,4 +14,10 @@ scrub_members "$tmp" "com.github.stenzek.duckstation/savestates"
 
 # absent member is a no-op (no error)
 scrub_members "$tmp" "com.absent.app/nothing" && true
+
+# scrub.sh clears the overlay.d boot-grant diagnostic marker so it never ships on a sealed unit.
+# (Static check: scrub.sh's is_root gate early-exits on a non-root dev box, so we can't run it here.)
+grep -q 'rm -f /data/local/tmp/cas_boot_grant.done' "$ROOT/provision/root/scrub.sh" \
+  || { echo "FAIL: scrub.sh does not clear the cas_boot_grant marker"; fail=1; }
+
 [ "$fail" -eq 0 ] && { echo "PASS: scrub_members"; exit 0; } || exit 1

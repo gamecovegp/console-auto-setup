@@ -18,5 +18,8 @@ if [ -n "$LP" ] && [ -f "$DB" ] && command -v sqlite3 >/dev/null 2>&1; then
     && ok "scrub: launcher last-played cleared" \
     || warn "scrub: GAME_INFO update skipped (no sqlite3 on device or schema differs)"
 fi
+# boot-grant diagnostic marker (written by the overlay.d cas-grant.sh) — clear the trace so a sealed
+# unit ships clean. Additive: absent on units that never ran the boot-grant, harmless either way.
+rm -f /data/local/tmp/cas_boot_grant.done 2>/dev/null
 ok "scrub.sh done"
 exit 0
