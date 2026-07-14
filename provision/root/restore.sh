@@ -188,7 +188,7 @@ if echo "$RPKGS" | grep -q org.es_de.frontend && [ -f "$ES_SET" ]; then
     *)        [ -n "$SERIAL" ] && MEDIA_DIR="/storage/$SERIAL/ES-DE/downloaded_media" || MEDIA_DIR="";;
   esac
   if [ -n "$MEDIA_DIR" ]; then
-    sed -i '/name="MediaDirectory"/d' "$ES_SET" 2>/dev/null   # drop any existing line (avoids duplicates)
+    sed '/name="MediaDirectory"/d' "$ES_SET" > "$ES_SET.cas" 2>/dev/null && mv "$ES_SET.cas" "$ES_SET"  # drop existing line (portable in-place; BSD `sed -i` reads the script as a suffix)
     [ -s "$ES_SET" ] && [ -n "$(tail -c1 "$ES_SET" 2>/dev/null)" ] && printf '\n' >> "$ES_SET"  # ensure EOL
     printf '<string name="MediaDirectory" value="%s" />\n' "$MEDIA_DIR" >> "$ES_SET"
     relabel "$ES_SET" 2>/dev/null
@@ -203,7 +203,7 @@ if echo "$RPKGS" | grep -q org.es_de.frontend && [ -f "$ES_SET" ]; then
   #     above) lets ES-DE read the path without re-picking. Skip with no SD (ROMs unavailable anyway).
   if [ -n "$SERIAL" ]; then
     ROM_DIR="/storage/$SERIAL/ROMs"
-    sed -i '/name="ROMDirectory"/d' "$ES_SET" 2>/dev/null      # drop any existing line (avoids duplicates)
+    sed '/name="ROMDirectory"/d' "$ES_SET" > "$ES_SET.cas" 2>/dev/null && mv "$ES_SET.cas" "$ES_SET"  # drop existing line (portable in-place; BSD `sed -i` reads the script as a suffix)
     [ -s "$ES_SET" ] && [ -n "$(tail -c1 "$ES_SET" 2>/dev/null)" ] && printf '\n' >> "$ES_SET"  # ensure EOL
     printf '<string name="ROMDirectory" value="%s" />\n' "$ROM_DIR" >> "$ES_SET"
     relabel "$ES_SET" 2>/dev/null

@@ -26,12 +26,12 @@ SERIAL="6ED25E36D25E032F"
 mkdir -p "${ES_SET%/*}"; cp "$GOLD" "$ES_SET"
 # 2c) MediaDirectory -> this unit's card
 MEDIA_DIR="/storage/$SERIAL/ES-DE/downloaded_media"
-sed -i '/name="MediaDirectory"/d' "$ES_SET"
+sed '/name="MediaDirectory"/d' "$ES_SET" > "$ES_SET.cas" && mv "$ES_SET.cas" "$ES_SET"   # portable in-place (BSD sed -i differs)
 [ -s "$ES_SET" ] && [ -n "$(tail -c1 "$ES_SET" 2>/dev/null)" ] && printf '\n' >> "$ES_SET"
 printf '<string name="MediaDirectory" value="%s" />\n' "$MEDIA_DIR" >> "$ES_SET"
 # 2d) ROMDirectory -> this unit's card
 ROM_DIR="/storage/$SERIAL/ROMs"
-sed -i '/name="ROMDirectory"/d' "$ES_SET"
+sed '/name="ROMDirectory"/d' "$ES_SET" > "$ES_SET.cas" && mv "$ES_SET.cas" "$ES_SET"   # portable in-place (BSD sed -i differs)
 [ -s "$ES_SET" ] && [ -n "$(tail -c1 "$ES_SET" 2>/dev/null)" ] && printf '\n' >> "$ES_SET"
 printf '<string name="ROMDirectory" value="%s" />\n' "$ROM_DIR" >> "$ES_SET"
 
