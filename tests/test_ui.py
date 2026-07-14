@@ -597,10 +597,12 @@ class TestMainAppliesTheTheme(unittest.TestCase):
         self.assertLess(src.index("apply("), src.index("App("),
                         "theme must be applied before App() builds the widgets")
 
-    def test_theme_actually_reaches_the_built_widgets(self):
-        """Runtime check (guarded — skips headless): build the REAL App against a themed root and
-        confirm the styling actually landed on a real widget, not just that main() calls apply()
-        textually. Catches the case where apply() runs too late to matter."""
+    def test_a_themed_root_reaches_the_built_widgets(self):
+        """Runtime check (guarded — skips headless): applying the theme directly to a root and THEN
+        building the REAL App on it, confirms the styling actually lands on a real widget (not just that
+        some code calls apply() textually). This does NOT exercise gui.main()'s own ordering — it applies
+        the theme and builds App itself, so it stays green even if main() stopped theming altogether or
+        themed too late. See TestGuiMainOrdering below for the behavioural test of main()'s ordering."""
         root = _tk_or_skip()
         try:
             from tkinter import ttk
@@ -616,3 +618,35 @@ class TestMainAppliesTheTheme(unittest.TestCase):
             self.assertEqual(str(app.run_btn.cget("style")), "Accent.TButton")
         finally:
             root.destroy()
+
+
+class TestGuiMainOrdering(unittest.TestCase):
+    """Behavioural test of gui.main() itself (not a stand-in that rebuilds the same steps): proves
+    main() applies the theme to the SAME root it hands to App, and does so BEFORE App is built — a
+    themed-too-late or theme-skipped main() must fail this test. No real Tk/display is created; tk.Tk,
+    THEME.apply and App are all replaced with recorders so this runs headless."""
+
+    def test_theme_is_applied_before_app_is_built_on_the_same_root(self):
+        from cas import gui
+
+        calls = []
+        fake_root = mock.MagicMock(name="fake_root")
+
+        def fake_apply(win):
+            calls.append(("apply", win))
+            return ({"accent": "#123456"}, {})
+
+        def fake_app(win, **kwargs):
+            calls.append(("App", win))
+            return mock.MagicMock(name="fake_app")
+
+        with mock.patch.object(gui.tk, "Tk", return_value=fake_root), \
+             mock.patch.object(gui.THEME, "apply", side_effect=fake_apply), \
+             mock.patch.object(gui, "App", side_effect=fake_app):
+            gui.main(adb_bin="adb-for-tests", fb_bin="fastboot-for-tests")
+
+        self.assertEqual([name for name, _win in calls], ["apply", "App"],
+                          "gui.main() must call THEME.apply(win) before App(win, ...)")
+        self.assertIs(calls[0][1], fake_root, "THEME.apply must be given the root main() creates")
+        self.assertIs(calls[1][1], fake_root, "App must be built on that SAME root")
+        fake_root.mainloop.assert_called_once()

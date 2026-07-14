@@ -20,6 +20,35 @@ from cas import warnings as WARN
 from cas import uiauto as UI
 
 
+# --- CAS_CONFIG isolation (module-wide safety net) ------------------------------------------------
+# INVARIANT: no test in this module may EVER write the operator's real cas-config.json (it lives at the
+# repo root, gitignored — see cas/config.py's config_path()). A test that exercises a real (non-dry)
+# provision()/provision_all() success path — or any other config.set_*()/record_download() writer —
+# without CAS_CONFIG pointed at a temp file falls straight through to that real file. Individual
+# TestCase classes below layer their OWN setUp()/tearDown() save-and-restore on top of this (some tests
+# need a specific config content mid-test); this module-level default is the backstop that catches
+# whatever a test — present or future — forgets to isolate itself.
+_PREV_CAS_CONFIG = None
+_MODULE_CFG_DIR = None
+
+
+def setUpModule():
+    global _PREV_CAS_CONFIG, _MODULE_CFG_DIR
+    _PREV_CAS_CONFIG = os.environ.get("CAS_CONFIG")
+    _MODULE_CFG_DIR = tempfile.mkdtemp(prefix="cas-test-config-")
+    os.environ["CAS_CONFIG"] = os.path.join(_MODULE_CFG_DIR, "cas-config.json")
+
+
+def tearDownModule():
+    import shutil
+    if _PREV_CAS_CONFIG is None:
+        os.environ.pop("CAS_CONFIG", None)
+    else:
+        os.environ["CAS_CONFIG"] = _PREV_CAS_CONFIG
+    if _MODULE_CFG_DIR:
+        shutil.rmtree(_MODULE_CFG_DIR, ignore_errors=True)
+
+
 class FakeRunner:
     """Records calls; returns canned (rc, out, err) shaped like the real adb."""
 
@@ -197,6 +226,18 @@ class GrantRunner(FakeRunner):
 
 
 class GrantShellRoot(unittest.TestCase):
+    def setUp(self):
+        # CAS_CONFIG isolation: some tests below point it at a scratch dir and clean up with a bare
+        # del/pop (assuming it was previously unset) — restore whatever it actually was (the module
+        # default from setUpModule) so that assumption never has to hold true.
+        self._saved_cas_config = os.environ.get("CAS_CONFIG")
+
+    def tearDown(self):
+        if self._saved_cas_config is None:
+            os.environ.pop("CAS_CONFIG", None)
+        else:
+            os.environ["CAS_CONFIG"] = self._saved_cas_config
+
     def _adb(self, runner):
         return Adb("ABC123", runner=runner)
 
@@ -1303,6 +1344,22 @@ class TestReleaseToken(unittest.TestCase):
 
 
 class TestProvision(unittest.TestCase):
+    def setUp(self):
+        # CAS_CONFIG isolation (regression guard — see Finding 2): several tests below run provision()'s
+        # REAL (non-dry) push path to completion, which calls config.record_download() and writes
+        # straight through to whatever CAS_CONFIG resolves to. Some tests here isolate it themselves
+        # (with a bare del/pop that assumes it was previously unset); at least one used to not isolate it
+        # at ALL, corrupting the operator's real cas-config.json on every suite run. This class-level
+        # save/restore is the backstop: it captures the module default from setUpModule() and reinstates
+        # it after EVERY test in this class, regardless of what the test body did to the env var.
+        self._saved_cas_config = os.environ.get("CAS_CONFIG")
+
+    def tearDown(self):
+        if self._saved_cas_config is None:
+            os.environ.pop("CAS_CONFIG", None)
+        else:
+            os.environ["CAS_CONFIG"] = self._saved_cas_config
+
     def test_provision_runs_restore_and_reboot(self):
         with tempfile.TemporaryDirectory() as t:
             prof = make_profile(t)
@@ -2045,6 +2102,17 @@ class TestRoot(unittest.TestCase):
 
 
 class TestBatch(unittest.TestCase):
+    def setUp(self):
+        # CAS_CONFIG isolation: test_provision_all_uses_selected_profile_over_model drives provision_all()
+        # to a real success (record_download write) with no isolation of its own — see Finding 2.
+        self._saved_cas_config = os.environ.get("CAS_CONFIG")
+
+    def tearDown(self):
+        if self._saved_cas_config is None:
+            os.environ.pop("CAS_CONFIG", None)
+        else:
+            os.environ["CAS_CONFIG"] = self._saved_cas_config
+
     def _profile_with_imgs(self, t, name="odin2mini", model="Odin2 ?Mini"):
         prof = make_profile(t, name, model)
         meta = pathlib.Path(t) / name / "profile.meta"
@@ -2208,6 +2276,17 @@ class TestEsMedia(unittest.TestCase):
 class TestCompanionInstall(unittest.TestCase):
     """The GameCove Companion is a normal golden app; when it's in the manifest the PC-side install
     (adb install) refreshes it to the current PC build after restore. Not in the manifest -> skipped."""
+
+    def setUp(self):
+        # CAS_CONFIG isolation: test_provision_skips_companion_when_not_in_manifest runs provision()'s
+        # REAL (non-dry) push path to a success with no isolation of its own — see Finding 2.
+        self._saved_cas_config = os.environ.get("CAS_CONFIG")
+
+    def tearDown(self):
+        if self._saved_cas_config is None:
+            os.environ.pop("CAS_CONFIG", None)
+        else:
+            os.environ["CAS_CONFIG"] = self._saved_cas_config
 
     def test_installs_from_pc_when_apk_present(self):
         with tempfile.TemporaryDirectory() as t:
@@ -3559,6 +3638,17 @@ class TestCancelSleep(unittest.TestCase):
 
 
 class TestProvisionLockdown(unittest.TestCase):
+    def setUp(self):
+        # CAS_CONFIG isolation: every test below runs provision()'s REAL (non-dry) push path to a
+        # success with no isolation of its own — see Finding 2.
+        self._saved_cas_config = os.environ.get("CAS_CONFIG")
+
+    def tearDown(self):
+        if self._saved_cas_config is None:
+            os.environ.pop("CAS_CONFIG", None)
+        else:
+            os.environ["CAS_CONFIG"] = self._saved_cas_config
+
     def _profile(self, tmp, flags):
         apps = ["org.es_de.frontend", PV.COMPANION_PKG]
         d = pathlib.Path(tmp) / "p"
@@ -5031,6 +5121,17 @@ class WindowsDriverKitTest(unittest.TestCase):
 
 
 class TestOverlayBootGrant(unittest.TestCase):
+    def setUp(self):
+        # CAS_CONFIG isolation: test_bake_boot_grant_default_on points it at a scratch dir and cleans up
+        # with a bare del (assuming it was previously unset) — restore whatever it actually was.
+        self._saved_cas_config = os.environ.get("CAS_CONFIG")
+
+    def tearDown(self):
+        if self._saved_cas_config is None:
+            os.environ.pop("CAS_CONFIG", None)
+        else:
+            os.environ["CAS_CONFIG"] = self._saved_cas_config
+
     def _overlay(self, name):
         repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         return pathlib.Path(repo) / "provision" / "root" / "overlay" / name
@@ -5073,6 +5174,59 @@ class TestOverlayBootGrant(unittest.TestCase):
                 self.assertTrue(config.bake_boot_grant())
             finally:
                 del os.environ["CAS_CONFIG"]
+
+
+class TestRealConfigNeverWritten(unittest.TestCase):
+    """Regression guard for Finding 2: tests/test_cas.py::TestProvision::test_provision_never_pushes_a_directory
+    used to call PV.provision() on the real (non-dry) push path with CAS_CONFIG unset, so
+    config.record_download() wrote straight through to the operator's REAL repo-root cas-config.json
+    (gitignored — which is exactly why nobody noticed: `git status` stays clean while the file quietly
+    fills with junk download_stats rows). This proves the invariant holds: exercising every config
+    writer named in the audit, under CAS_CONFIG isolation, must leave the real file byte-identical.
+    Skips cleanly on a fresh checkout that has no real config file yet (nothing to protect)."""
+
+    def _real_config_path(self):
+        from cas import APPDIR
+        return pathlib.Path(APPDIR) / "cas-config.json"
+
+    def test_writing_under_isolation_never_touches_the_real_config(self):
+        real = self._real_config_path()
+        if not real.exists():
+            self.skipTest("no real cas-config.json in this checkout (fresh clone) — nothing to protect yet")
+        import hashlib
+        before_hash = hashlib.sha256(real.read_bytes()).hexdigest()
+        before_mtime = real.stat().st_mtime_ns
+
+        saved = os.environ.get("CAS_CONFIG")
+        with tempfile.TemporaryDirectory() as t:
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cas-config.json")
+            try:
+                from cas import config as C
+                from cas import firmware as FW
+                # Exercise every writer named in the Finding 2 audit — under isolation, NONE may reach
+                # the real file.
+                C.record_download(1024, 1.0, profile="regression-guard")
+                C.set_device_profile("REGRESSION-SERIAL", "regression-profile")
+                C.set_always_install_pkgs(["com.regression.guard"])
+                C.set_library("/tmp/regression-guard-lib")
+                C.set_log_dir("/tmp/regression-guard-log")
+                C.set_es_media_src("/tmp/regression-guard-media")
+                C.set_firmware_dir("/tmp/regression-guard-fw")
+                C.set_apk_store("/tmp/regression-guard-apks")
+                FW.set_device_firmware("REGRESSION-SERIAL", "regression-fw", manual=True)
+            finally:
+                if saved is None:
+                    os.environ.pop("CAS_CONFIG", None)
+                else:
+                    os.environ["CAS_CONFIG"] = saved
+
+        after_hash = hashlib.sha256(real.read_bytes()).hexdigest()
+        after_mtime = real.stat().st_mtime_ns
+        self.assertEqual(before_hash, after_hash,
+                         "a config writer touched the REAL cas-config.json even though CAS_CONFIG "
+                         "was isolated — the never-write-the-real-config invariant is broken")
+        self.assertEqual(before_mtime, after_mtime,
+                         "the REAL cas-config.json's mtime changed even though CAS_CONFIG was isolated")
 
 
 if __name__ == "__main__":

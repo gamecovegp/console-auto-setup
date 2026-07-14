@@ -56,7 +56,7 @@ def _lib_watch_action(was, now, busy):
 
 
 class _Tooltip:
-    """Minimal hover tooltip (no external deps): a yellow popup on <Enter>, gone on <Leave>."""
+    """Minimal hover tooltip (no external deps): a dark chip on <Enter>, gone on <Leave>."""
     def __init__(self, widget, text):
         self.widget = widget
         self.text = text

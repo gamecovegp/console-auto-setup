@@ -14,6 +14,33 @@ from cas import config as C
 from cas import firmware as FW
 
 
+# --- CAS_CONFIG isolation (module-wide safety net) ------------------------------------------------
+# INVARIANT: no test in this module may EVER write the operator's real cas-config.json (gitignored, at
+# the repo root — see cas/config.py's config_path()). Every test that currently writes it (via
+# firmware.set_device_firmware / resolve()'s auto-match) already isolates CAS_CONFIG in its own
+# setUp()/tearDown(); this module-level default is a backstop for whatever a test — present or future —
+# forgets to isolate itself. Mirrors tests/test_cas.py's setUpModule/tearDownModule.
+_PREV_CAS_CONFIG = None
+_MODULE_CFG_DIR = None
+
+
+def setUpModule():
+    global _PREV_CAS_CONFIG, _MODULE_CFG_DIR
+    _PREV_CAS_CONFIG = os.environ.get("CAS_CONFIG")
+    _MODULE_CFG_DIR = tempfile.mkdtemp(prefix="cas-test-config-")
+    os.environ["CAS_CONFIG"] = os.path.join(_MODULE_CFG_DIR, "cas-config.json")
+
+
+def tearDownModule():
+    import shutil
+    if _PREV_CAS_CONFIG is None:
+        os.environ.pop("CAS_CONFIG", None)
+    else:
+        os.environ["CAS_CONFIG"] = _PREV_CAS_CONFIG
+    if _MODULE_CFG_DIR:
+        shutil.rmtree(_MODULE_CFG_DIR, ignore_errors=True)
+
+
 # ---------------------------------------------------------------------------
 # Shared test helpers
 # ---------------------------------------------------------------------------
