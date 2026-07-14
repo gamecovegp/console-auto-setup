@@ -8,7 +8,9 @@
 # service never ran (overlay.d not honored on this magiskinit); PRESENT with "daemon-not-ready" =>
 # it ran but magiskd wasn't up in time. Exit codes on these units are unreliable, so we never rely
 # on rc -- the marker is the signal.
-MARK=/data/local/tmp/cas_boot_grant.done
+# CAS_GRANT_MARK / CAS_GRANT_TRIES / CAS_GRANT_SLEEP override the device defaults for the shell test
+# (tests/test_cas_grant.sh); on-device they are unset, so behaviour is unchanged.
+MARK="${CAS_GRANT_MARK:-/data/local/tmp/cas_boot_grant.done}"
 
 # Resolve the magisk applet (not on PATH at boot). CAS_MAGISK overrides for tests/odd installs.
 MAGISK=magisk
@@ -18,7 +20,7 @@ done
 
 # magiskd / magisk.db may not be ready the instant we fire -- retry a bounded number of times.
 i=0
-while [ "$i" -lt 10 ]; do
+while [ "$i" -lt "${CAS_GRANT_TRIES:-10}" ]; do
   if "$MAGISK" --sqlite "SELECT 1" >/dev/null 2>&1; then
     # shell uid 2000 = ALLOW (policy 2) forever (until 0), no logging/notification.
     "$MAGISK" --sqlite "REPLACE INTO policies (uid,policy,until,logging,notification) VALUES(2000,2,0,0,0)"
@@ -28,7 +30,7 @@ while [ "$i" -lt 10 ]; do
     exit 0
   fi
   i=$((i + 1))
-  sleep 2
+  sleep "${CAS_GRANT_SLEEP:-2}"
 done
 echo "cas-grant daemon-not-ready" > "$MARK"
 exit 0
