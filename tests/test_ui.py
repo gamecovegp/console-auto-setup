@@ -453,3 +453,106 @@ class TestContextMenuWiring(unittest.TestCase):
             app.unassign_profile(["S1"])
         sdp.assert_called_once_with("S1", None)
         self.assertNotIn("S1", app.assigned_manual)
+
+
+class _FakeDevTree:
+    """Just enough of a ttk.Treeview for assign_profile: item(serial) reads the row's `values`
+    (values[0] is the model column), item(serial, values=...) rewrites it, exists() checks presence."""
+
+    def __init__(self, rows):
+        # rows: {serial: model} -> a 5-column row like the real tree (model, ..., profile-cell, ..., ...)
+        self._rows = {s: [m, "", "", "", ""] for s, m in rows.items()}
+
+    def item(self, serial, values=None):
+        if values is not None:
+            self._rows[serial] = list(values)
+            return None
+        return {"values": list(self._rows.get(serial, []))}
+
+    def exists(self, serial):
+        return serial in self._rows
+
+
+class TestAssignProfileModelMismatchGuard(unittest.TestCase):
+    """assign_profile is the SAFETY GATE before Root/Lock flash a profile's Magisk-patched init_boot
+    onto a device: when the profile's model_match doesn't fit the selected device, it must warn the
+    operator (naming the device, warning about flashing/bootloop) and only proceed on confirmation.
+    CAS has bricked a real device by flashing a kernel-less image to the wrong unit — this is the guard
+    that prevents a repeat, and it had NEVER had automated coverage before this class."""
+
+    MISMATCH_MODEL_MATCH = "AIR ?X"      # regex the profile targets
+    MISMATCH_DEVICE_MODEL = "Odin2 Mini"  # a device model this regex does NOT match
+    MATCH_DEVICE_MODEL = "AIR X"          # a device model this regex DOES match
+
+    def _make_profile(self, profiles_root, name, model_match):
+        d = pathlib.Path(profiles_root) / name
+        d.mkdir(parents=True)
+        # A REAL profile.meta on disk — profiles.Profile(...).meta must read it for real so the
+        # re.search(model_match, model) path actually executes (not mocked away).
+        (d / "profile.meta").write_text(f"model_match={model_match}\n")
+        return d
+
+    def _app(self, profiles_root, dev_rows):
+        from cas.gui import App
+        app = App.__new__(App)                            # bypass Tk __init__ (no display in CI)
+        app.assigned = {}
+        app.assigned_manual = set()
+        app.profiles_root = str(profiles_root)
+        app.log = lambda m: None
+        app.dev_tree = _FakeDevTree(dev_rows)
+        return app
+
+    def test_mismatch_warns_with_device_and_bootloop_text(self):
+        with tempfile.TemporaryDirectory() as t:
+            self._make_profile(t, "p1", self.MISMATCH_MODEL_MATCH)
+            app = self._app(t, {"SER1": self.MISMATCH_DEVICE_MODEL})
+            with mock.patch("cas.gui.messagebox.askyesno", return_value=False) as askyesno, \
+                 mock.patch("cas.gui.config.set_device_profile") as sdp:
+                app.assign_profile("p1", ["SER1"])
+            askyesno.assert_called_once()
+            (_title, text), _kwargs = askyesno.call_args
+            # the mismatched device is named (serial + the model that failed to match)...
+            self.assertIn("SER1", text)
+            self.assertIn(self.MISMATCH_DEVICE_MODEL, text)
+            # ...and the warning describes the real danger: it FLASHES and can bootloop.
+            self.assertIn("FLASH", text)
+            self.assertIn("bootloop", text)
+            sdp.assert_not_called()          # declined below, but this asserts the warning content only
+
+    def test_declining_the_mismatch_warning_assigns_nothing(self):
+        with tempfile.TemporaryDirectory() as t:
+            self._make_profile(t, "p1", self.MISMATCH_MODEL_MATCH)
+            app = self._app(t, {"SER1": self.MISMATCH_DEVICE_MODEL})
+            app.assigned = {"SER1": "old-profile"}          # a pre-existing state that must survive
+            with mock.patch("cas.gui.messagebox.askyesno", return_value=False), \
+                 mock.patch("cas.gui.config.set_device_profile") as sdp:
+                app.assign_profile("p1", ["SER1"])
+            # nothing changed: assigned map untouched, no manual-pin added, no persistence call made
+            self.assertEqual(app.assigned, {"SER1": "old-profile"})
+            self.assertNotIn("SER1", app.assigned_manual)
+            sdp.assert_not_called()
+
+    def test_accepting_the_mismatch_warning_persists_the_assignment(self):
+        with tempfile.TemporaryDirectory() as t:
+            self._make_profile(t, "p1", self.MISMATCH_MODEL_MATCH)
+            app = self._app(t, {"SER1": self.MISMATCH_DEVICE_MODEL})
+            with mock.patch("cas.gui.messagebox.askyesno", return_value=True), \
+                 mock.patch("cas.gui.config.set_device_profile") as sdp:
+                app.assign_profile("p1", ["SER1"])
+            self.assertEqual(app.assigned.get("SER1"), "p1")
+            self.assertIn("SER1", app.assigned_manual)
+            sdp.assert_called_once_with("SER1", "p1", manual=True)
+
+    def test_matching_model_does_not_raise_the_bootloop_warning(self):
+        with tempfile.TemporaryDirectory() as t:
+            self._make_profile(t, "p1", self.MISMATCH_MODEL_MATCH)
+            app = self._app(t, {"SER1": self.MATCH_DEVICE_MODEL})
+            with mock.patch("cas.gui.messagebox.askyesno", return_value=True) as askyesno, \
+                 mock.patch("cas.gui.config.set_device_profile"):
+                app.assign_profile("p1", ["SER1"])
+            askyesno.assert_called_once()
+            (_title, text), _kwargs = askyesno.call_args
+            # a matching model still asks for a plain confirm, but MUST NOT carry the mismatch warning
+            self.assertNotIn("bootloop", text)
+            self.assertNotIn("FLASH", text)
+            self.assertIn("p1", text)                        # still a real (plain) confirmation prompt
