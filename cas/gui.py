@@ -1577,10 +1577,12 @@ class App:
     def _post_menu(self, menu, event):
         """Post a context menu with tk_popup()'s grab HELD until the menu actually goes away — that grab
         is what makes an outside click dismiss it (Tk delivers the click to the grabbing widget, whose own
-        bindings then unpost it). `tk_popup()` returns immediately on every platform (it never blocks
-        until dismissal); releasing the grab in a `finally` right after — a widely-copied but WRONG
-        recipe — drops it a microsecond after taking it, leaving the menu stuck open with nothing watching
-        for the outside click. So instead: release exactly on <Unmap> (fires however the menu goes away —
+        bindings then unpost it). ON X11 — the bench's platform — `tk_popup()` takes that grab and returns
+        immediately, so releasing it in a `finally` right after (a widely-copied but WRONG recipe) drops it
+        a microsecond after taking it, leaving the menu stuck open with nothing watching for the outside
+        click. Windows/macOS post through the OS's own blocking menu loop and take no Tk grab at all, so
+        they dismiss natively and the bindings below are inert there (grab_release() on an ungrabbed widget
+        is a no-op). So instead: release exactly on <Unmap> (fires however the menu goes away —
         an item picked, Escape, an outside click, or the explicit unpost() below), plus belt-and-braces
         <FocusOut>/<Escape> dismissal. A stuck grab would freeze the WHOLE app on a bench, so <Unmap> is
         the one thing guaranteed to fire whenever the menu disappears — by any route, including the
