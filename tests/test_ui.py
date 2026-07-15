@@ -3,6 +3,7 @@
 The GUI is tested WITHOUT a display — every decision this layer makes lives in a pure function.
 The few tests that need a real Tk() call _tk_or_skip(), which skips (never fails) on a headless box.
 """
+import os
 import pathlib
 import sys
 import tempfile
@@ -10,6 +11,31 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
+
+# --- CAS_CONFIG isolation (module-wide safety net) ------------------------------------------------
+# INVARIANT: no test in this module may EVER write the operator's real cas-config.json (gitignored, at
+# the repo root). Some UI tests here write config (e.g. the default-kit designation), so isolate
+# CAS_CONFIG for the whole module. Mirrors tests/test_cas.py and tests/test_firmware.py.
+_PREV_CAS_CONFIG = None
+_MODULE_CFG_DIR = None
+
+
+def setUpModule():
+    global _PREV_CAS_CONFIG, _MODULE_CFG_DIR
+    _PREV_CAS_CONFIG = os.environ.get("CAS_CONFIG")
+    _MODULE_CFG_DIR = tempfile.mkdtemp(prefix="cas-test-config-")
+    os.environ["CAS_CONFIG"] = os.path.join(_MODULE_CFG_DIR, "cas-config.json")
+
+
+def tearDownModule():
+    import shutil
+    if _PREV_CAS_CONFIG is None:
+        os.environ.pop("CAS_CONFIG", None)
+    else:
+        os.environ["CAS_CONFIG"] = _PREV_CAS_CONFIG
+    if _MODULE_CFG_DIR:
+        shutil.rmtree(_MODULE_CFG_DIR, ignore_errors=True)
 
 
 def _tk_or_skip():
@@ -948,3 +974,39 @@ class TestSizeToContent(unittest.TestCase):
             self.assertGreater(h, 150, "should grow past the min_h floor to fit the content")
         finally:
             root.destroy()
+
+
+class TestFirmwareWindowDefaultKit(unittest.TestCase):
+    """FirmwareWindow lets the operator designate a library build as the '(default kit)' — so a device
+    pinned to '(default kit)' flashes THAT build's init_boot instead of the un-shipped hard-coded path.
+    The '_set_default_kit' handler is the wiring under test (display-free: stub the tree + app)."""
+
+    def _win(self, selected):
+        import types
+        from cas import dialogs as D
+        w = D.FirmwareWindow.__new__(D.FirmwareWindow)
+        w.tree = types.SimpleNamespace(selection=lambda: ([selected] if selected else []))
+        w.refresh = lambda: None
+        w.app = types.SimpleNamespace(log=lambda m: None, refresh_devices=lambda: None)
+        return w
+
+    def test_set_designates_the_selected_build(self):
+        from cas import config
+        config.set_default_kit_firmware(None)
+        self._win("odin2-default")._set_default_kit()
+        self.assertEqual(config.default_kit_firmware(), "odin2-default")
+
+    def test_selecting_the_current_default_again_clears_it(self):
+        from cas import config
+        config.set_default_kit_firmware("odin2-default")
+        self._win("odin2-default")._set_default_kit()          # toggle off
+        self.assertIsNone(config.default_kit_firmware())
+
+    def test_no_selection_designates_nothing(self):
+        from unittest import mock
+        from cas import config
+        config.set_default_kit_firmware(None)
+        with mock.patch("cas.dialogs.messagebox.showinfo") as info:
+            self._win(None)._set_default_kit()
+        info.assert_called_once()
+        self.assertIsNone(config.default_kit_firmware())

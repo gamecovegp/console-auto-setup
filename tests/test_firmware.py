@@ -548,5 +548,61 @@ class TestFlashMethod(unittest.TestCase):
         self.assertIn(".exe", reason)
 
 
+class TestDefaultKitFirmware(unittest.TestCase):
+    """'(default kit)' used to resolve to a HARD-CODED init_boot path (odin2_20231201) that is
+    gitignored and not bundled — so in a release/fresh checkout Root failed with 'missing
+    init_boot.img'. It can now be UNIFIED with the firmware library: designate a library build as the
+    default kit and a device pinned to '(default kit)' flashes THAT build's init_boot (present),
+    instead of the un-shipped path. This is the kalama (RP6 / Odin2 Mini) fix."""
+
+    def _lib_with_odin2(self, root):
+        """A firmware library holding an odin2 build with a real init_boot.img in its payload."""
+        fw = make_fw(root, "odin2-default", device="Odin2", flash="init_boot",
+                     match={"serial_prefix": ["ODIN2"]})
+        (fw.payload_dir() / "init_boot.img").write_bytes(b"ANDROID!ramdisk")   # what stock_boot_image globs
+        return fw
+
+    def test_designation_round_trips_and_clears(self):
+        from cas import config
+        config.set_default_kit_firmware("odin2-default")
+        self.assertEqual(config.default_kit_firmware(), "odin2-default")
+        config.set_default_kit_firmware(None)
+        self.assertIsNone(config.default_kit_firmware())
+
+    def test_default_kit_firmware_resolves_the_designated_library_build(self):
+        with tempfile.TemporaryDirectory() as td:
+            from cas import config
+            self._lib_with_odin2(td)
+            config.set_default_kit_firmware("odin2-default")
+            fw = FW.default_kit_firmware(td)
+            self.assertIsNotNone(fw)
+            self.assertEqual(fw.id, "odin2-default")
+
+    def test_none_when_unset_or_missing_from_library(self):
+        with tempfile.TemporaryDirectory() as td:
+            from cas import config
+            self.assertIsNone(FW.default_kit_firmware(td))          # unset
+            config.set_default_kit_firmware("not-in-library")
+            self.assertIsNone(FW.default_kit_firmware(td))          # designated id not present → None
+
+    def test_resolve_maps_default_kit_to_the_designated_build_with_a_flashable_image(self):
+        with tempfile.TemporaryDirectory() as td:
+            from cas import config
+            self._lib_with_odin2(td)
+            config.set_default_kit_firmware("odin2-default")
+            FW.set_device_firmware("ODIN2ABC", FW.DEFAULT_FW_ID, manual=True)
+            r = FW.resolve("ODIN2ABC", {"serial": "ODIN2ABC", "device": "Odin2"}, td)
+            self.assertEqual(r["firmware_id"], FW.DEFAULT_FW_ID)    # still shows as the default kit
+            self.assertIsNotNone(r["firmware"])                    # ...but now backed by a real build
+            self.assertTrue(str(r["firmware"].stock_boot_image()).endswith("init_boot.img"))
+
+    def test_resolve_default_kit_without_a_designation_keeps_the_old_none_behavior(self):
+        with tempfile.TemporaryDirectory() as td:
+            FW.set_device_firmware("ODIN2ABC", FW.DEFAULT_FW_ID, manual=True)
+            r = FW.resolve("ODIN2ABC", {"serial": "ODIN2ABC"}, td)
+            self.assertEqual(r["firmware_id"], FW.DEFAULT_FW_ID)
+            self.assertIsNone(r["firmware"])                       # no designation → falls back as before
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -162,6 +162,25 @@ def set_firmware_dir(path):
     return load_config().get("firmware_dir")
 
 
+def default_kit_firmware():
+    """The library firmware id designated as the '(default kit)'. When set, a device pinned to
+    '(default kit)' flashes THAT build's init_boot at Root — instead of the hard-coded odin2 path that
+    is gitignored and ships in no release. None when unset (Root then falls back to that path)."""
+    v = load_config().get("default_kit_firmware")
+    return str(v) if v else None
+
+
+def set_default_kit_firmware(firmware_id):
+    """Designate (id truthy) or clear (falsy) the library firmware used as the '(default kit)'."""
+    cfg = load_config()
+    if firmware_id:
+        cfg["default_kit_firmware"] = str(firmware_id)
+    else:
+        cfg.pop("default_kit_firmware", None)
+    save_config(cfg)
+    return load_config().get("default_kit_firmware")
+
+
 def apk_store_dir():
     """The managed-APK server store directory. An explicit 'apk_store' override is honored ONLY if its path
     currently exists (so a stale override on an offline bench is ignored and the store follows the

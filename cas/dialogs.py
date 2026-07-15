@@ -363,15 +363,17 @@ class FirmwareWindow:
         bar = ttk.Frame(win, padding=(12, 10))
         bar.pack(fill="x", side="bottom")
         ttk.Button(bar, text="Add / update…", command=self._add).pack(side="left")
+        ttk.Button(bar, text="Set as default kit", command=self._set_default_kit).pack(side="left", padx=(8, 0))
         ttk.Button(bar, text="Open folder", command=self._open).pack(side="left", padx=(8, 0))
         ttk.Button(bar, text="Close", command=win.destroy).pack(side="right")
 
-        ttk.Label(win, text="Assign firmware to a unit by right-clicking its row in the device list.",
+        ttk.Label(win, text="Assign firmware to a unit by right-clicking its row in the device list.  "
+                            "★ = the build “(default kit)” flashes.",
                   style="Muted.TLabel").pack(anchor="w", padx=12, pady=(6, 0), side="bottom")
 
         self.tree = ttk.Treeview(win, columns=("version", "device", "target", "match"),
                                  show="tree headings", selectmode="browse")
-        self.tree.heading("#0", text="firmware id"); self.tree.column("#0", width=210)
+        self.tree.heading("#0", text="firmware id"); self.tree.column("#0", width=230)
         for c, t, w in (("version", "current", 90), ("device", "device", 130),
                         ("target", "flashes", 100), ("match", "serial prefix", 140)):
             self.tree.heading(c, text=t); self.tree.column(c, width=w)
@@ -391,8 +393,10 @@ class FirmwareWindow:
         self.tree.delete(*self.tree.get_children())
         root = self._root()
         rows = firmware_rows(root) if root else []
+        dk = config.default_kit_firmware()                     # the build “(default kit)” maps to, if any
         for r in rows:
-            self.tree.insert("", "end", iid=r["id"], text=r["id"],
+            star = "★  " if r["id"] == dk else ""              # mark the designated default-kit build
+            self.tree.insert("", "end", iid=r["id"], text=star + r["id"],
                              values=(r["version"], r["device"], r["target"], r["match"]))
         # Explain an EMPTY list instead of leaving it a mystery: the configured (shared/external)
         # firmware dir may simply be unmounted, in which case firmware_root() silently falls back.
@@ -403,14 +407,39 @@ class FirmwareWindow:
             except OSError:
                 return False
         if configured and not _isdir(configured):
-            self.lib_var.set(f"Library: {configured}   ✗ unreachable (library drive unmounted?) — "
-                             f"falling back to {root}")
+            base = (f"Library: {configured}   ✗ unreachable (library drive unmounted?) — "
+                    f"falling back to {root}")
         elif not _isdir(root):
-            self.lib_var.set(f"Library: {root}   ✗ not reachable (connect the library drive?)")
+            base = f"Library: {root}   ✗ not reachable (connect the library drive?)"
         elif not rows:
-            self.lib_var.set(f"Library: {root}   ✓ (no firmware yet — use “Add / update…”)")
+            base = f"Library: {root}   ✓ (no firmware yet — use “Add / update…”)"
         else:
-            self.lib_var.set(f"Library: {root}   ✓ ({len(rows)} firmware)")
+            base = f"Library: {root}   ✓ ({len(rows)} firmware)"
+        # Surface what “(default kit)” resolves to — the whole point of designating one.
+        if dk and any(r["id"] == dk for r in rows):
+            base += f"   ·   ★ default kit → {dk}"
+        elif dk:
+            base += f"   ·   ⚠ default kit “{dk}” is not in this library"
+        else:
+            base += "   ·   no default kit set (‘(default kit)’ falls back to the bundled odin2 path)"
+        self.lib_var.set(base)
+
+    def _set_default_kit(self):
+        """Designate the selected build as the '(default kit)' — the init_boot Root flashes when a
+        device is pinned to '(default kit)'. Re-selecting the current one clears it."""
+        sel = self.tree.selection()
+        fid = sel[0] if sel else None
+        if not fid:
+            messagebox.showinfo("CAS", "Select a firmware row, then ‘Set as default kit’.")
+            return
+        if fid == config.default_kit_firmware():
+            config.set_default_kit_firmware(None)              # toggle off
+            self.app.log(f"default kit cleared (‘(default kit)’ falls back to the bundled path).")
+        else:
+            config.set_default_kit_firmware(fid)
+            self.app.log(f"default kit → {fid}: devices pinned to ‘(default kit)’ now flash its init_boot.")
+        self.refresh()
+        self.app.refresh_devices()                             # re-resolve so any '(default kit)' rows update
 
     def _add(self):
         self.app._add_firmware(on_done=self._on_ingest_done)   # threaded ingest; refresh when it actually lands

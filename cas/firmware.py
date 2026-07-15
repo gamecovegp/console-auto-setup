@@ -254,6 +254,15 @@ def find(firmware_id, root):
     return Firmware(p) if (p / "meta.json").exists() else None
 
 
+def default_kit_firmware(root):
+    """The library Firmware designated (in config) as the '(default kit)', or None. Lets resolve() back
+    the '(default kit)' choice with a REAL library build's init_boot (present on the operator's library
+    drive) instead of the hard-coded odin2 path that ships in no release. None when unset or the
+    designated id is no longer in the library (Root then falls back to the hard-coded path as before)."""
+    fid = config.default_kit_firmware()
+    return find(fid, root) if fid else None
+
+
 # ---------------------------------------------------------------------------
 # Task 4: match() — suggestion by device identity
 # ---------------------------------------------------------------------------
@@ -465,7 +474,18 @@ def resolve(serial, identity_dict, root):
     assigned = get_device_firmware().get(serial)
     fw, manual, suggested, pinned = None, False, None, None
     if assigned and assigned["firmware_id"] == DEFAULT_FW_ID:
-        # Pinned to the bundled default kit: no library build to flash, no auto-match, no warning.
+        # Pinned to the default kit. If a library build is designated as the default kit, flash ITS
+        # init_boot (present on the library drive) — this is the fix for '(default kit)' → 'missing
+        # init_boot.img', since the hard-coded odin2 path ships in no release. logic_check still runs,
+        # so pinning the default kit onto a device the image doesn't fit surfaces a warning (the old
+        # None path was silently unguarded). No designation → keep the old behavior (fall back to the
+        # hard-coded path in provision.root_all), so nothing regresses for existing benches.
+        dk = default_kit_firmware(root)
+        if dk is not None:
+            ok, warns = logic_check(dk, identity_dict)
+            return {"firmware_id": DEFAULT_FW_ID, "version": dk.current(),
+                    "manual": assigned.get("manual", True), "suggested": None,
+                    "ok": ok, "warnings": warns, "firmware": dk}
         return {"firmware_id": DEFAULT_FW_ID, "version": None, "manual": assigned.get("manual", True),
                 "suggested": None, "ok": True, "warnings": [], "firmware": None}
     if assigned:

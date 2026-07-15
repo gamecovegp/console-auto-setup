@@ -1669,8 +1669,12 @@ class App:
             ids = [f.id for f in FW.list_firmware(FW.firmware_root())]
         except Exception:
             ids = []
-        for fid in [FW.DEFAULT_FW_ID] + ids:                 # the bundled kit is a first-class choice
-            sub.add_command(label=("●  " if fid == shown else "○  ") + fid,
+        dk = config.default_kit_firmware()                   # what '(default kit)' maps to, if designated
+        for fid in [FW.DEFAULT_FW_ID] + ids:                 # the default kit is a first-class choice
+            text = fid
+            if fid == FW.DEFAULT_FW_ID:
+                text = f"{fid}  →  {dk}" if dk else f"{fid}  (set one in Firmware library…)"
+            sub.add_command(label=("●  " if fid == shown else "○  ") + text,
                             command=lambda f=fid, ss=list(serials): self.assign_firmware(f, ss))
         sub.add_separator()
         sub.add_command(label="Clear override (auto-match)",
