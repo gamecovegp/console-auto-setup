@@ -245,10 +245,11 @@ class App:
         bar.add_cascade(label="File", menu=filem)
 
         setm = tk.Menu(bar, tearoff=0)
+        # ONE folder to configure — the CAS Profiles library. Run-history logs and the firmware catalog
+        # live UNDER it automatically (config.history_dir / firmware_dir default to library_root()), so
+        # there are no separate log/firmware folder pickers to get out of sync.
         setm.add_command(label="Open library folder", command=self._open_library)
-        setm.add_command(label="Library folder…", command=self.choose_library)
-        setm.add_command(label="Log folder…", command=self.choose_log_dir)
-        setm.add_command(label="Firmware folder…", command=self.choose_firmware_dir)
+        setm.add_command(label="Library folder (CAS Profiles)…", command=self.choose_library)
         setm.add_command(label="Managed APKs…", command=self._open_apk_store)
         setm.add_command(label="ES-DE box art…", command=self._open_boxart)
         setm.add_separator()
@@ -401,39 +402,6 @@ class App:
                 "CAS",
                 f"Couldn't open a file manager for:\n{target}\n\n"
                 "Open it manually in your file manager (paste the path above).")
-
-    def choose_log_dir(self):
-        """Pick a shared folder (e.g. a mounted external/shared drive) where the download/save run-history
-        .jsonl logs are written, so they centralize across benches WITHOUT moving the heavy goldens off the
-        local library.
-        Cancel offers to clear it (logs then fall back to the library root). Logs always fall back to local
-        if the chosen folder is later unreachable, so a run is never lost."""
-        cur = config.load_config().get("log_dir")
-        d = filedialog.askdirectory(
-            title="Run-history log folder — a local/shared folder for download/save logs  (Cancel to clear)")
-        if d:
-            config.set_log_dir(d)
-            self.log(f"Run-history logs → {d}  (per-machine download/save run-history).")
-        elif cur and messagebox.askyesno(
-                "CAS", "Clear the shared log folder? Run-history will go to the library root instead."):
-            config.set_log_dir(None)
-            self.log("Run-history logs → library root (shared log folder cleared).")
-
-    def choose_firmware_dir(self):
-        """Pick the device-root-firmware library folder (e.g. a mounted external/shared drive's
-        '…/CAS Profiles/_firmware'), so the firmware catalog is shared across benches while the heavy
-        goldens stay on a fast local library. Cancel offers to clear it (firmware then lives under the
-        library root)."""
-        cur = config.load_config().get("firmware_dir")
-        d = filedialog.askdirectory(
-            title="Firmware library folder — a local/external folder for device root firmware  (Cancel to clear)")
-        if d:
-            config.set_firmware_dir(d)
-            self.log(f"Firmware library → {d}")
-        elif cur and messagebox.askyesno(
-                "CAS", "Clear the firmware-library folder? It will live under the library root instead."):
-            config.set_firmware_dir(None)
-            self.log("Firmware library → library root/_firmware (shared firmware folder cleared).")
 
     def choose_library(self):
         """Pick the profile/golden library folder — e.g. the external drive '…/CAS Profiles' so goldens are
