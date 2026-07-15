@@ -39,9 +39,11 @@ STATE_COLORS = {
 
 # Lock the coupling: gui._populate_devices does THEME.LIGHT[key] for every STATE_COLORS value, on the UI
 # thread, mid device-list refresh. A value that isn't a LIGHT key is a KeyError right there — which empties
-# the whole device list instead of failing loudly here, at import time.
-assert all(v in LIGHT for v in STATE_COLORS.values()), \
-    f"STATE_COLORS value(s) not in LIGHT: {sorted({v for v in STATE_COLORS.values() if v not in LIGHT})}"
+# the whole device list instead of failing loudly here, at import time. A bare `assert` would be stripped
+# under `python -O`, so this is an explicit raise — the invariant must hold even in an optimized build.
+_bad_state_colors = sorted({v for v in STATE_COLORS.values() if v not in LIGHT})
+if _bad_state_colors:
+    raise ValueError(f"STATE_COLORS value(s) not in LIGHT: {_bad_state_colors}")
 
 STATE_DOT = "●"
 ROW_HEIGHT = 28
@@ -72,13 +74,20 @@ def apply(root, palette=None):
 
     base = tkfont.nametofont("TkDefaultFont")
     if ui != "TkDefaultFont":
-        base.configure(family=ui, size=10)
+        base.configure(family=ui)          # switch the family ONLY — keep the platform's own default size
     family = base.cget("family")
+    # Derive the type scale from that platform default (10pt Linux, 9pt Windows, 13pt macOS) instead of
+    # hard-coding 10, which shrank mac text and enlarged Windows. `size` may be negative on some builds
+    # (Tk reads a negative size as pixels) — preserve the sign so the +3/-1 offsets scale in either unit.
+    sz = base.cget("size") or 10
+    unit = -1 if sz < 0 else 1
+    pts = abs(sz)
     fonts = {
-        "title":   tkfont.Font(root=root, family=family, size=13, weight="bold"),
+        "title":   tkfont.Font(root=root, family=family, size=unit * (pts + 3), weight="bold"),
         "body":    base,
-        "caption": tkfont.Font(root=root, family=family, size=9),
-        "mono":    tkfont.Font(root=root, family=(mono if mono != "TkFixedFont" else family), size=9),
+        "caption": tkfont.Font(root=root, family=family, size=unit * max(1, pts - 1)),
+        "mono":    tkfont.Font(root=root, family=(mono if mono != "TkFixedFont" else family),
+                               size=unit * max(1, pts - 1)),
     }
 
     st = ttk.Style(root)

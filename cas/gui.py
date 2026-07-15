@@ -634,7 +634,12 @@ class App:
         self.dev_tree.pack(side="left", fill="both", expand=True)
         self.dev_tree.bind("<Double-1>", self._assign_on_doubleclick)
         self.dev_tree.bind("<<TreeviewSelect>>", lambda e: self._on_tree_select())
-        self.dev_tree.bind("<Control-a>", lambda e: (self.select_all_devices(), "break")[1])
+        # Select-all works from ANYWHERE on the window (the hint line advertises it unconditionally), not
+        # only when the device list has focus — plus ⌘A on macOS. The tree keeps its own binding so a
+        # "break" there stops the window binding from firing a second time when the tree is focused.
+        self.dev_tree.bind("<Control-a>", self._select_all_shortcut)
+        self.win.bind("<Control-a>", self._select_all_shortcut)
+        self.win.bind("<Command-a>", self._select_all_shortcut)
         self._build_context_menu()
 
         # Box-art state lives on the App (BoxArtDialog binds to these); no widget in the main window.
@@ -1440,9 +1445,6 @@ class App:
             warn_overwrite=True, on_new=self.new_profile)
         return pick.result
 
-    def _selected_serials(self):
-        return list(self.dev_tree.selection())
-
     def _action_targets(self):
         """The serials an action runs on: the SELECTED rows. (There is no apply-to-all mode any more —
         Select all / Ctrl+A does that job, and the footer states the count before you press ▶ Run.)"""
@@ -1694,6 +1696,15 @@ class App:
     def select_all_devices(self):
         self.dev_tree.selection_set(self.dev_tree.get_children())
 
+    def _select_all_shortcut(self, event=None):
+        """Ctrl+A / ⌘A → select every device, from anywhere on the window. Skips text widgets so their
+        own Ctrl+A (select-all / start-of-line) still works — the read-only log, and any entry field.
+        Returns 'break' so the tree's copy of this binding doesn't also fire the window-level one."""
+        if isinstance(self.win.focus_get(), (tk.Entry, tk.Text)):
+            return None
+        self.select_all_devices()
+        return "break"
+
     # ---------- firmware library (DEVICE ROOT firmware; library-only — never flashes) ----------
     def _fw_cell(self, serial):
         """The 'firmware' column text for a device row, from its resolved suggestion/override."""
@@ -1878,6 +1889,12 @@ class App:
         `on_done`, if given, is invoked on the UI thread once the ingest actually finishes — the copy
         can be multi-GB over USB/NAS, so callers must never guess a fixed delay (a caller-owned window
         may have to refresh its own list once the real data has landed)."""
+        # Check BEFORE prompting: _run_bg refuses (logs 'busy') while a job runs, so without this the
+        # operator would answer the folder/id/prefix dialogs only for the ingest — and on_done — to never
+        # fire, leaving the Firmware window silently stale.
+        if self.busy:
+            messagebox.showinfo("CAS", "Finish the current operation first, then add firmware.")
+            return
         folder = filedialog.askdirectory(title="Select a firmware build folder (contains emmc/ or ufs/)")
         if not folder:
             return
@@ -1906,52 +1923,6 @@ class App:
                 self.win.after(0, on_done)
             return True
         self._run_bg(work, label="Ingesting firmware")
-
-    def _run_batch(self, kind, serials, devices=None):
-        """Run kind ∈ {download, root, lock} on `serials`, each with its ASSIGNED profile, IN PARALLEL —
-        with a confirm (first run), the mini-report, and per-failure retry. `devices` is set on a retry."""
-        first = devices is None
-        pm, force = self._profile_map(serials)
-        if first:
-            verb = {"download": "Download to", "root": "Root", "lock": "Seal (lock)"}[kind]
-            lines = "\n  ".join(f"{s} → {self.assigned.get(s) or '(no profile)'}" for s in serials)
-            extra = {"root": "\n\nBootloaders must be UNLOCKED; each device reboots a couple of times.",
-                     "lock": "\n\nAssumes each unit is VERIFIED. Hides Developer options, un-roots, and "
-                             "disables USB debugging. The golden is skipped.",
-                     "download": ""}[kind]
-            if not messagebox.askyesno(
-                    f"CAS — {verb} {len(serials)} device(s)",
-                    f"{verb} these device(s), each with its own profile? They run IN PARALLEL.\n  "
-                    + lines + extra):
-                return
-        devs = devices if devices is not None else [(s, "device") for s in serials]
-
-        def work():
-            cev = self.cancel_event                          # this op's cancel signal (set by the Cancel button)
-            if kind == "download":
-                res = PV.provision_all(lambda s: Adb(serial=s, adb=self.adb_bin, cancel=cev), devs,
-                                       root=self.profiles_root, log=self.log, profile_map=pm,
-                                       es_media_src=config.es_media_src())
-            elif kind == "root":
-                res = PV.root_all(lambda s: Adb(serial=s, adb=self.adb_bin, cancel=cev),
-                                  lambda s: Fastboot(serial=s, fastboot=self.fb_bin, cancel=cev), devs,
-                                  profiles_root=self.profiles_root, appdir=APPDIR, log=self.log,
-                                  profile_map=pm, force_serials=force, on_critical=self._on_flash_critical)
-            else:  # lock
-                res = PV.seal_all(lambda s: Adb(serial=s, adb=self.adb_bin, cancel=cev),
-                                  lambda s: Fastboot(serial=s, fastboot=self.fb_bin, cancel=cev), devs,
-                                  profiles_root=self.profiles_root, appdir=APPDIR, log=self.log,
-                                  profile_map=pm, force_serials=force, on_critical=self._on_flash_critical)
-            self.win.after(0, self.refresh_devices)
-            failed = [s for s, v in res.items() if v[0] in ("fail", "error")]
-            if failed:
-                self._retry_ctx = (
-                    f"{len(failed)} device(s) failed {kind}:\n  {', '.join(failed)}\n\nRetry just those?",
-                    lambda fs=failed: self._run_batch(kind, fs, devices=[(s, "device") for s in fs]))
-            return res
-        label = {"download": "Downloading", "root": "Rooting", "lock": "Locking"}[kind]
-        self._run_bg(work, label=f"{label} {len(serials)} device(s)"
-                                 f"{' (retry)' if devices is not None else ''}")
 
     def _stage(self, step, serials, pm, force, cev, wait_boot=False):
         """Run ONE unit stage across serials via the matching PV.*_all; return its {serial:(status,…)} dict.
@@ -2140,17 +2111,6 @@ class App:
             self.media_mode.set("push")
             config.set_es_media_src(d)
             self.log(f"ES-DE box art: will PUSH from {d} to each unit on Download.")
-
-    def _store_path(self, p):
-        """How a picked Root image is recorded in profile.meta: APPDIR-relative when it lives inside the app
-        bundle (portable across machines + the shared external profile library), else the absolute path.
-        Both forms resolve via profiles.resolve_asset at root time."""
-        p = P.pathlib.Path(p).resolve()
-        try:
-            return str(p.relative_to(P.pathlib.Path(APPDIR).resolve()))
-        except ValueError:
-            return str(p)
-
 
     def _probe_sd_media(self, serial=None):
         """AUTO-DETECT whether a device's SD carries an ES-DE folder / box art, shown inline (no button).

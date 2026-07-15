@@ -309,6 +309,7 @@ class TestAddFirmwareOnDone(unittest.TestCase):
         import cas.gui as G
         app = G.App.__new__(G.App)             # bypass Tk __init__
         app.win = _FakeWin()
+        app.busy = False                       # _add_firmware now refuses while a job is running
         app.log = lambda m: None
         app.refresh_devices = lambda: None
         app._bg_calls = []
@@ -812,3 +813,88 @@ class TestGuiMainOrdering(unittest.TestCase):
         self.assertIs(calls[0][1], fake_root, "THEME.apply must be given the root main() creates")
         self.assertIs(calls[1][1], fake_root, "App must be built on that SAME root")
         fake_root.mainloop.assert_called_once()
+
+
+class TestFontScale(unittest.TestCase):
+    """apply() derives the type scale from the platform's own default font size (10pt Linux, 9pt
+    Windows, 13pt macOS) instead of hard-coding 10 — which used to shrink mac text and enlarge
+    Windows. Guarded: skips on a headless box."""
+
+    def test_scale_follows_the_platform_default_not_a_hardcoded_10(self):
+        from tkinter import font as tkfont
+        from cas import theme
+        root = _tk_or_skip()
+        try:
+            tkfont.nametofont("TkDefaultFont").configure(size=13)   # pretend we're on macOS
+            _palette, fonts = theme.apply(root)
+            # body follows the platform default (13), NOT the old hard-coded 10; title +3, caption -1
+            self.assertEqual(fonts["body"].cget("size"), 13)
+            self.assertEqual(fonts["title"].cget("size"), 16)
+            self.assertEqual(fonts["caption"].cget("size"), 12)
+            self.assertEqual(fonts["mono"].cget("size"), 12)
+        finally:
+            root.destroy()
+
+
+class TestSelectAllShortcut(unittest.TestCase):
+    """Ctrl+A / ⌘A selects every device from anywhere on the window, but must NOT hijack a text
+    widget's own Ctrl+A. Uses real tk widgets so the isinstance() branch is genuinely exercised, with
+    focus_get() stubbed (real focus delivery is flaky in an unmapped test window)."""
+
+    def _app_with_tree(self, root, focused):
+        import types
+        from cas.gui import App
+        from tkinter import ttk
+        app = App.__new__(App)
+        tree = ttk.Treeview(root)
+        for iid in ("A", "B", "C"):
+            tree.insert("", "end", iid=iid)
+        app.dev_tree = tree
+        app.win = types.SimpleNamespace(focus_get=lambda: focused)
+        return app, tree
+
+    def test_selects_all_when_focus_is_not_a_text_widget(self):
+        from tkinter import ttk
+        root = _tk_or_skip()
+        try:
+            app, tree = self._app_with_tree(root, ttk.Button(root))   # focus on a button, not text
+            self.assertEqual(app._select_all_shortcut(), "break")
+            self.assertEqual(set(tree.selection()), {"A", "B", "C"})
+        finally:
+            root.destroy()
+
+    def test_is_a_noop_when_focus_is_in_a_text_entry(self):
+        import tkinter as tk
+        root = _tk_or_skip()
+        try:
+            app, tree = self._app_with_tree(root, tk.Entry(root))     # typing in a field
+            self.assertIsNone(app._select_all_shortcut())             # let the entry keep Ctrl+A
+            self.assertEqual(tree.selection(), ())
+        finally:
+            root.destroy()
+
+    def test_is_a_noop_in_the_log_text_widget(self):
+        import tkinter as tk
+        root = _tk_or_skip()
+        try:
+            app, tree = self._app_with_tree(root, tk.Text(root))      # the read-only log pane
+            self.assertIsNone(app._select_all_shortcut())
+            self.assertEqual(tree.selection(), ())
+        finally:
+            root.destroy()
+
+
+class TestAddFirmwareBusyGuard(unittest.TestCase):
+    """_add_firmware must refuse — with a message, BEFORE prompting — while a job is running, or the
+    operator answers the folder/id/prefix dialogs only for _run_bg to drop the work (and never fire
+    the caller's on_done), leaving the Firmware window silently stale. Display-free."""
+
+    def test_refuses_and_does_not_prompt_while_busy(self):
+        from cas.gui import App
+        app = App.__new__(App)
+        app.busy = True
+        with mock.patch("cas.gui.messagebox.showinfo") as info, \
+             mock.patch("cas.gui.filedialog.askdirectory", return_value="") as ask:
+            app._add_firmware(on_done=lambda: None)
+        info.assert_called_once()          # told the operator why
+        ask.assert_not_called()            # never reached the folder prompt (the guard fired first)

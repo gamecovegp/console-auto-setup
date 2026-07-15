@@ -199,10 +199,14 @@ One module, applied once at startup, restyling ttk's `clam`. No new dependency.
   title / body / caption / mono sizes instead of one size everywhere.
 * **Widgets** — flat buttons with hover and pressed state layers; a filled accent
   `Accent.TButton` for `▶ Run`; an 8px spacing grid; `Treeview` at ~28px row
-  height, flat header, accent-tinted selection, zebra striping; colored state dots
-  (green `device`, amber `unauthorized`, red `offline`, blue `fastboot`/`EDL`); a
-  thin accent progress bar; slim scrollbars; the tooltip restyled from a yellow
-  sticky-note to a dark chip.
+  height, flat header, accent-tinted selection, zebra striping; state-coloured
+  rows — a healthy `device` row stays default (dark, readable) while problem
+  states are tinted to draw the eye: amber `unauthorized`, red `offline`, accent
+  `fastboot`/`recovery`/`sideload`. (A ttk `Treeview` tag colours the whole row, not
+  a single glyph, so a green-only dot on a dark row isn't achievable and tinting
+  every healthy row green would be low-contrast — the signal is carried by the
+  *problem* states standing out, not by a green "all good".) A thin accent progress
+  bar; slim scrollbars; the tooltip restyled from a yellow sticky-note to a dark chip.
 
 What actually reads as dated in the current app is the beveled 3D relief, the
 cramped rows, the yellow tooltip, the gray system buttons, and the flat type
