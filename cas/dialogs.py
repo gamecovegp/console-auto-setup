@@ -9,12 +9,13 @@ the UI thread (the library may live on a slow external drive).
 import pathlib
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, scrolledtext
 
 from . import profiles as P
 from . import firmware as FW
 from . import config
 from . import theme as THEME
+from . import history as H
 
 
 def profile_rows(profiles_root):
@@ -527,6 +528,92 @@ class FirmwareWindow:
         root = self._root()
         if root:
             self.app._open_path(str(root))
+
+
+_HISTORY_KINDS = {"All": None, "Downloads": {"download"}, "Saves": {"save"}, "Firmware": {"firmware"}}
+
+
+class HistoryWindow:
+    """The complete, saved run-history — every Download / Save / firmware event ever logged under the
+    library, merged across all benches. A copy-pasteable text view (like the log, but the whole record),
+    filterable by date and by type."""
+
+    def __init__(self, parent, app):
+        self.app = app
+        self._records = []
+        self.win = win = tk.Toplevel(parent)
+        win.title("CAS — run history")
+        win.transient(parent)
+        win.geometry("880x560")
+        win.minsize(560, 320)
+
+        ttk.Label(win, text="Run history", style="Title.TLabel").pack(anchor="w", padx=12, pady=(12, 0))
+        self.count_var = tk.StringVar()
+        ttk.Label(win, textvariable=self.count_var, style="Muted.TLabel").pack(anchor="w", padx=12)
+
+        # Filter row (top): Date + Type. Changing either re-renders the text below.
+        flt = ttk.Frame(win, padding=(12, 8, 12, 4))
+        flt.pack(side="top", fill="x")
+        ttk.Label(flt, text="Date:").pack(side="left")
+        self.date_var = tk.StringVar(value="All dates")
+        self.date_cb = ttk.Combobox(flt, textvariable=self.date_var, state="readonly", width=14)
+        self.date_cb.pack(side="left", padx=(4, 12))
+        self.date_cb.bind("<<ComboboxSelected>>", lambda e: self._render())
+        ttk.Label(flt, text="Type:").pack(side="left")
+        self.kind_var = tk.StringVar(value="All")
+        kind_cb = ttk.Combobox(flt, textvariable=self.kind_var, state="readonly", width=11,
+                               values=list(_HISTORY_KINDS))
+        kind_cb.pack(side="left", padx=(4, 0))
+        kind_cb.bind("<<ComboboxSelected>>", lambda e: self._render())
+
+        # Bottom bar pinned BEFORE the text so its buttons are never clipped (same rule as the others).
+        bar = ttk.Frame(win, padding=(12, 10))
+        bar.pack(side="bottom", fill="x")
+        ttk.Button(bar, text="Copy", command=self._copy).pack(side="left")
+        ttk.Button(bar, text="Refresh", command=self._reload).pack(side="left", padx=(8, 0))
+        ttk.Button(bar, text="Open folder", command=self._open).pack(side="left", padx=(8, 0))
+        ttk.Button(bar, text="Close", command=win.destroy).pack(side="right")
+
+        self.text = scrolledtext.ScrolledText(win, wrap="none", state="disabled", relief="flat",
+                                              borderwidth=0, font=THEME.mono_font(win))
+        self.text.pack(side="top", fill="both", expand=True, padx=12, pady=(4, 0))
+
+        win.bind("<Escape>", lambda e: win.destroy())
+        self._reload()
+
+    def _dir(self):
+        try:
+            return config.history_dir()
+        except Exception:
+            return self.app.profiles_root
+
+    def _reload(self):
+        self._records = H.history_records(self._dir())
+        dates = H.history_dates(self._records)
+        self.date_cb["values"] = ["All dates"] + dates
+        if self.date_var.get() not in self.date_cb["values"]:
+            self.date_var.set("All dates")
+        self._render()
+
+    def _render(self):
+        date = None if self.date_var.get() == "All dates" else self.date_var.get()
+        kinds = _HISTORY_KINDS.get(self.kind_var.get())
+        shown = H.filter_records(self._records, date=date, kinds=kinds)
+        self._shown_text = H.render(shown) or "No matching history."
+        self.count_var.set(f"{len(shown)} of {len(self._records)} event(s)"
+                           + (f"  ·  {self._dir()}" if self._records else "  ·  nothing logged yet"))
+        self.text.configure(state="normal")
+        self.text.delete("1.0", "end")
+        self.text.insert("1.0", self._shown_text)
+        self.text.configure(state="disabled")
+
+    def _copy(self):
+        self.win.clipboard_clear()
+        self.win.clipboard_append(getattr(self, "_shown_text", ""))
+        self.app.log("run history (filtered) copied to clipboard.")
+
+    def _open(self):
+        self.app._open_path(str(self._dir()))
 
 
 class BoxArtDialog:

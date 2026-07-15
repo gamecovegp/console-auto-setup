@@ -251,6 +251,7 @@ class App:
         setm.add_command(label="Open library folder", command=self._open_library)
         setm.add_command(label="Library folder (CAS Profiles)…", command=self.choose_library)
         setm.add_command(label="Managed APKs…", command=self._open_apk_store)
+        setm.add_command(label="Run history…", command=self._open_history)
         setm.add_command(label="ES-DE box art…", command=self._open_boxart)
         setm.add_separator()
         setm.add_command(label="Seal selected unit (retail lock)…", command=self.seal_selected)
@@ -1876,6 +1877,9 @@ class App:
 
     def _open_boxart(self):
         D.BoxArtDialog(self.win, self)
+
+    def _open_history(self):
+        D.HistoryWindow(self.win, self)
 
     def _add_firmware(self, on_done=None):
         """Ingest a raw firmware build folder into the library (new version) on a background thread.

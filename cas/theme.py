@@ -56,6 +56,19 @@ MONO_PREFS = ("Cascadia Mono", "Consolas", "SF Mono", "JetBrains Mono",
               "DejaVu Sans Mono", "Liberation Mono", "Courier New")
 
 
+def mono_font(widget):
+    """The applied theme's monospace font (for aligned log/history text), found by walking up `widget`'s
+    master chain to the root apply() styled. 'TkFixedFont' if the theme wasn't applied — a valid font
+    spec either way, so callers never crash."""
+    cur = widget
+    while cur is not None:
+        cas = getattr(cur, "_cas_theme", None)
+        if cas:
+            return cas["fonts"]["mono"]
+        cur = getattr(cur, "master", None)
+    return "TkFixedFont"
+
+
 def center_columns(tree):
     """Center every column of a ttk.Treeview — the cells AND the heading, including the '#0' tree
     column — so a list/table reads as centered. Call after the columns are defined."""

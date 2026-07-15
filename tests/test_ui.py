@@ -1012,6 +1012,68 @@ class TestFirmwareWindowDefaultKit(unittest.TestCase):
         self.assertIsNone(config.default_kit_firmware())
 
 
+class TestRunHistory(unittest.TestCase):
+    """cas.history reads the saved *-history.<machine>.jsonl logs into normalized, sorted, filterable,
+    copy-pasteable records — the data behind the Run history viewer."""
+
+    def _lib(self, td):
+        root = pathlib.Path(td)
+        (root / "download-history.benchA.jsonl").write_text(
+            '{"when": "2026-07-14 18:28:52", "total_bytes": 2097152000, "total_secs": 262, '
+            '"ok": 1, "failed": 0, "devices": [{"serial": "S1", "status": "ok", "profile": "rp6-512"}]}\n')
+        (root / "save-history.benchB.jsonl").write_text(
+            '{"when": "2026-07-02 10:06:24", "profile": "air-x-256", "serial": "MQ1", "bytes": 1048576000, "secs": 48}\n'
+            '\n'                                                          # blank line — must be skipped
+            'NOT JSON — must be skipped\n')                              # malformed — must be skipped
+        (root / "firmware-history.jsonl").write_text(                    # legacy (no machine tag)
+            '{"when": "2026-07-04 03:30", "serial": "S1", "firmware_id": "odin2-default", '
+            '"version": null, "action": "assign", "manual": true}\n')
+        return str(root)
+
+    def test_reads_all_types_sorted_newest_first_skipping_bad_lines(self):
+        from cas import history
+        with tempfile.TemporaryDirectory() as td:
+            recs = history.history_records(self._lib(td))
+        self.assertEqual([r["type"] for r in recs], ["download", "firmware", "save"])   # newest first
+        self.assertEqual(recs[0]["date"], "2026-07-14")
+        self.assertEqual(recs[1]["machine"], "legacy")                  # untagged file → 'legacy'
+        self.assertEqual(recs[2]["machine"], "benchB")
+
+    def test_line_text_is_human_readable(self):
+        from cas import history
+        with tempfile.TemporaryDirectory() as td:
+            recs = history.history_records(self._lib(td))
+        by = {r["type"]: r["text"] for r in recs}
+        self.assertIn("S1→rp6-512", by["download"])
+        self.assertIn("1 ok", by["download"])
+        self.assertIn("air-x-256 ← MQ1", by["save"])
+        self.assertIn("assign odin2-default", by["firmware"])
+        self.assertIn("(manual)", by["firmware"])
+
+    def test_filter_by_date_and_type(self):
+        from cas import history
+        with tempfile.TemporaryDirectory() as td:
+            recs = history.history_records(self._lib(td))
+        self.assertEqual(history.history_dates(recs), ["2026-07-14", "2026-07-04", "2026-07-02"])
+        self.assertEqual(len(history.filter_records(recs, date="2026-07-14")), 1)
+        self.assertEqual([r["type"] for r in history.filter_records(recs, kinds={"save"})], ["save"])
+        self.assertEqual(history.filter_records(recs, date="1999-01-01"), [])
+
+    def test_render_is_one_line_per_event_and_copy_pasteable(self):
+        from cas import history
+        with tempfile.TemporaryDirectory() as td:
+            recs = history.history_records(self._lib(td))
+        out = history.render(recs)
+        self.assertEqual(len(out.splitlines()), 3)
+        self.assertIn("DOWNLOAD", out)
+        self.assertIn("[benchB]", out)
+
+    def test_missing_dir_yields_no_records(self):
+        from cas import history
+        self.assertEqual(history.history_records("/no/such/dir"), [])
+        self.assertEqual(history.history_dates([]), [])
+
+
 class TestSetProfileModel(unittest.TestCase):
     """The Profile library 'Set model…' button edits a profile's model_match (what auto-assigns a device
     to it), writing profile.meta in place and leaving other keys intact."""
