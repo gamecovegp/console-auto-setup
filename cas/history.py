@@ -95,7 +95,9 @@ def history_records(history_dir):
         for f in sorted(root.glob(f"{stem}*.jsonl")):
             machine = _machine_of(f.name, stem)
             try:
-                lines = f.read_text(encoding="utf-8").splitlines()
+                # errors='replace': a history file with a stray non-UTF-8 byte (an old/externally-touched
+                # log on a Windows bench) must never crash the viewer — the bad line just won't parse.
+                lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
             except OSError:
                 continue
             for ln in lines:

@@ -1020,14 +1020,17 @@ class TestRunHistory(unittest.TestCase):
         root = pathlib.Path(td)
         (root / "download-history.benchA.jsonl").write_text(
             '{"when": "2026-07-14 18:28:52", "total_bytes": 2097152000, "total_secs": 262, '
-            '"ok": 1, "failed": 0, "devices": [{"serial": "S1", "status": "ok", "profile": "rp6-512"}]}\n')
+            '"ok": 1, "failed": 0, "devices": [{"serial": "S1", "status": "ok", "profile": "rp6-512"}]}\n',
+            encoding="utf-8")
         (root / "save-history.benchB.jsonl").write_text(
             '{"when": "2026-07-02 10:06:24", "profile": "air-x-256", "serial": "MQ1", "bytes": 1048576000, "secs": 48}\n'
-            '\n'                                                          # blank line — must be skipped
-            'NOT JSON — must be skipped\n')                              # malformed — must be skipped
+            '\n'                                                          # blank line - must be skipped
+            'NOT JSON (an em-dash — non-ascii) - must be skipped\n',  # malformed + non-ASCII → both skipped
+            encoding="utf-8")
         (root / "firmware-history.jsonl").write_text(                    # legacy (no machine tag)
             '{"when": "2026-07-04 03:30", "serial": "S1", "firmware_id": "odin2-default", '
-            '"version": null, "action": "assign", "manual": true}\n')
+            '"version": null, "action": "assign", "manual": true}\n',
+            encoding="utf-8")
         return str(root)
 
     def test_reads_all_types_sorted_newest_first_skipping_bad_lines(self):
@@ -1072,6 +1075,17 @@ class TestRunHistory(unittest.TestCase):
         from cas import history
         self.assertEqual(history.history_records("/no/such/dir"), [])
         self.assertEqual(history.history_dates([]), [])
+
+    def test_non_utf8_history_file_never_crashes_the_reader(self):
+        # A stray non-UTF-8 byte (0x97 = a cp1252 em-dash, e.g. an old Windows-written log) must NOT
+        # raise UnicodeDecodeError — the good lines still load, the bad byte is tolerated.
+        from cas import history
+        with tempfile.TemporaryDirectory() as td:
+            pathlib.Path(td, "save-history.b.jsonl").write_bytes(
+                b'{"when": "2026-07-15 09:00:00", "profile": "ok-one", "serial": "S1", "bytes": 1048576, "secs": 1}\n'
+                b'garbage \x97 byte line\n')                    # invalid UTF-8 — must be skipped, not fatal
+            recs = history.history_records(td)                  # must not raise
+        self.assertEqual([r["raw"].get("profile") for r in recs], ["ok-one"])
 
     def test_run_history_shows_the_error_on_a_failed_device(self):
         from cas import history
