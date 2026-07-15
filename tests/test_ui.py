@@ -1073,6 +1073,63 @@ class TestRunHistory(unittest.TestCase):
         self.assertEqual(history.history_records("/no/such/dir"), [])
         self.assertEqual(history.history_dates([]), [])
 
+    def test_run_history_shows_the_error_on_a_failed_device(self):
+        from cas import history
+        with tempfile.TemporaryDirectory() as td:
+            pathlib.Path(td, "lock-history.b.jsonl").write_text(
+                '{"when": "2026-07-15 09:00:00", "action": "lock", "ok": 1, "failed": 1, '
+                '"devices": [{"serial": "S1", "status": "ok"}, '
+                '{"serial": "S2", "status": "fail", "error": "stock init_boot flash failed"}]}\n')
+            recs = history.history_records(td)
+        self.assertEqual(recs[0]["type"], "lock")
+        self.assertIn("S2 FAIL: stock init_boot flash failed", recs[0]["text"])  # the WHY
+        self.assertIn("S1 ok", recs[0]["text"])                                  # success = no error noise
+        self.assertTrue(history.is_failure(recs[0]))
+
+    def test_failures_only_predicate(self):
+        from cas import history
+        ok = {"type": "root", "raw": {"ok": 2, "failed": 0, "devices": [{"status": "ok"}]}}
+        bad = {"type": "root", "raw": {"ok": 0, "failed": 1, "devices": [{"status": "fail"}]}}
+        fw = {"type": "firmware", "raw": {"action": "assign"}}
+        self.assertFalse(history.is_failure(ok))
+        self.assertTrue(history.is_failure(bad))
+        self.assertFalse(history.is_failure(fw))       # firmware events are never failures
+
+
+class TestRunLogging(unittest.TestCase):
+    """provision.log_run / log_save_fail persist per-device pass/fail + the ERROR reason for the actions
+    that previously logged nothing (root/lock/warmup) or only successes (save)."""
+
+    def test_log_run_writes_status_and_error_only_on_failure(self):
+        from cas import provision as PV, history
+        with tempfile.TemporaryDirectory() as td:
+            PV.log_run(td, "root",
+                       {"S1": ("ok", "rp6-512"), "S2": ("fail", "model mismatch — refused")},
+                       log=lambda m: None)
+            recs = history.history_records(td)
+        self.assertEqual(len(recs), 1)
+        r = recs[0]["raw"]
+        self.assertEqual(r["action"], "root")
+        self.assertEqual((r["ok"], r["failed"]), (1, 1))
+        d = {x["serial"]: x for x in r["devices"]}
+        self.assertNotIn("error", d["S1"])                          # success → no error
+        self.assertEqual(d["S2"]["error"], "model mismatch — refused")
+
+    def test_log_run_skips_when_only_skips_or_cancels(self):
+        from cas import provision as PV, history
+        with tempfile.TemporaryDirectory() as td:
+            PV.log_run(td, "lock", {"S1": ("skip", "device"), "S2": ("cancelled", "")}, log=lambda m: None)
+            self.assertEqual(history.history_records(td), [])       # nothing worth a record
+
+    def test_log_save_fail_is_shown_as_a_failed_save(self):
+        from cas import provision as PV, history
+        with tempfile.TemporaryDirectory() as td:
+            PV.log_save_fail(td, "rp6-512", "S1", "device went offline mid-capture", log=lambda m: None)
+            recs = history.history_records(td)
+        self.assertEqual(recs[0]["type"], "save")
+        self.assertIn("FAILED: device went offline mid-capture", recs[0]["text"])
+        self.assertTrue(history.is_failure(recs[0]))
+
 
 class TestSetProfileModel(unittest.TestCase):
     """The Profile library 'Set model…' button edits a profile's model_match (what auto-assigns a device

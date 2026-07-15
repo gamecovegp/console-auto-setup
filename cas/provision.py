@@ -1048,7 +1048,9 @@ def warmup_all(make_adb, devices, root="profiles", log=print, profile=None, prof
         except Exception as e:                  # isolate: one device fault must not abort the whole batch
             log(f"[{serial}] ERROR: {e}")
             return ("error", str(e))
-    return _each_device(devices, worker, parallel)
+    results = _each_device(devices, worker, parallel)
+    log_run(root, "warmup", results, log)                  # per-device pass/fail (+ reason) -> run history
+    return results
 
 
 def _append_history(root, stem, rec, log=print, summary=""):
@@ -1071,6 +1073,44 @@ def _append_history(root, stem, rec, log=print, summary=""):
         return False
 
 
+def log_run(root, action, results, log=print):
+    """Append ONE per-run record to <action>-history.<machine>.jsonl (action ∈ root/lock/warmup): which
+    devices passed, and — the point of this — the ERROR REASON for each that failed. A successful device
+    carries only its 'ok' status (no noise); a failed one carries the last line it logged before bailing.
+    Best-effort via _append_history (a write failure only warns). `results` is {serial:(status, detail)}.
+    Download + Save keep their own byte-carrying history; this covers the actions that had none."""
+    import datetime
+    devs, ok, failed = [], 0, 0
+    for serial, res in (results or {}).items():
+        status = res[0] if isinstance(res, (tuple, list)) and res else res
+        detail = res[1] if isinstance(res, (tuple, list)) and len(res) > 1 else ""
+        e = {"serial": serial, "status": status}
+        if status == "ok":
+            ok += 1
+        elif status in ("fail", "error"):
+            failed += 1
+            if detail:
+                e["error"] = detail                        # the WHY — only on a failure
+        devs.append(e)
+    if not any(d["status"] in ("ok", "fail", "error") for d in devs):
+        return                                              # only skips/cancels -> nothing worth a record
+    rec = {"when": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+           "action": action, "ok": ok, "failed": failed, "devices": devs}
+    _append_history(root, f"{action}-history", rec, log,
+                    summary=f"{action} run logged: {ok} ok, {failed} failed")
+
+
+def log_save_fail(root, name, serial, error, log=print):
+    """Record a FAILED Save to save-history (successful saves are logged by capture_to_pc). Shape stays
+    compatible with the success record — plus status='fail' and the reason — so the history viewer shows
+    WHY a capture failed on that device+run."""
+    import datetime
+    _append_history(root, "save-history", {
+        "when": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "profile": name, "serial": serial, "status": "fail", "error": error,
+    }, log, summary=f"save FAILED: {name} — {error}")
+
+
 def _log_download_run(root, results, elapsed, log=print):
     """Append ONE whole-Download record to the per-machine download-history.<machine>.jsonl. Captures the
     run's TOTAL length (bytes + seconds) and every device + its profile."""
@@ -1085,6 +1125,8 @@ def _log_download_run(root, results, elapsed, log=print):
             except Exception:
                 e["bytes"] = 0
             total += e["bytes"]
+        elif status in ("fail", "error") and detail:
+            e["error"] = detail                             # the reason (provision() already captured it)
         devs.append(e)
     if not any(d["status"] in ("ok", "fail", "error") for d in devs):
         return                                              # nothing was actually provisioned -> don't log
@@ -1676,18 +1718,25 @@ def root_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
                 log(f"[{serial}] firmware lookup skipped ({e}); using fastboot + profile stock")
             if flasher is None:
                 flasher = fastboot_flasher(fb, on_critical=on_critical)   # default path WITH the flash marker
+            msgs = []                                      # capture the reason a FAIL surfaces (like warmup/download)
+
+            def _wlog(m, s=serial):
+                msgs.append(m)
+                log(f"[{s}] {m}")
             ok = root(adb, fb, stock_path,
                       magisk_apk=_kit_apk(MAGISK_PKG, prof, appdir, magisk_rel),
-                      log=lambda m, s=serial: log(f"[{s}] {m}"),
+                      log=_wlog,
                       model_match=prof.meta.get("model_match"), force=(serial in force_serials),
                       flasher=flasher)
             if adb.cancel is not None and adb.cancel.is_set():
                 return ("cancelled", prof.name)
-            return ("ok" if ok else "fail", prof.name)
+            return ("ok", prof.name) if ok else ("fail", msgs[-1] if msgs else prof.name)
         except Exception as e:
             log(f"[{serial}] ERROR: {e}")
             return ("error", str(e))
-    return _each_device(devices, worker, parallel)
+    results = _each_device(devices, worker, parallel)
+    log_run(profiles_root, "root", results, log)           # per-device pass/fail (+ reason) -> run history
+    return results
 
 
 def seal_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, log=print, profile=None,
@@ -1762,14 +1811,21 @@ def seal_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
                 log(f"[{serial}] firmware lookup skipped ({e}); using fastboot + profile stock")
             if flasher is None:
                 flasher = fastboot_flasher(fb, on_critical=on_critical)
+            msgs = []                                      # capture the reason a FAIL surfaces (like warmup/download)
+
+            def _wlog(m, s=serial):
+                msgs.append(m)
+                log(f"[{s}] {m}")
             ok = seal(adb, fb, stock_path,
-                      log=lambda m, s=serial: log(f"[{s}] {m}"),
+                      log=_wlog,
                       model_match=prof.meta.get("model_match"), force=(serial in force_serials),
                       flasher=flasher)
             if adb.cancel is not None and adb.cancel.is_set():
                 return ("cancelled", prof.name)
-            return ("ok" if ok else "fail", prof.name)
+            return ("ok", prof.name) if ok else ("fail", msgs[-1] if msgs else prof.name)
         except Exception as e:
             log(f"[{serial}] ERROR: {e}")
             return ("error", str(e))
-    return _each_device(devices, worker, parallel)
+    results = _each_device(devices, worker, parallel)
+    log_run(profiles_root, "lock", results, log)           # per-device pass/fail (+ reason) -> run history
+    return results

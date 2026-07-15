@@ -1960,8 +1960,15 @@ class App:
                 if not survivors:
                     break
                 s = survivors[0]
+                msgs = []                                  # capture the reason so a FAILED save is logged with it
+                def _slog(m):
+                    msgs.append(m)
+                    self.log(m)
                 ok = PV.capture_to_pc(Adb(serial=s, adb=self.adb_bin, cancel=cev), save_name, _stamp(),
-                                      root=self.profiles_root, log=self.log)
+                                      root=self.profiles_root, log=_slog)
+                if not ok and not cev.is_set():            # success is logged by capture_to_pc; log the failure
+                    PV.log_save_fail(self.profiles_root, save_name, s,
+                                     msgs[-1] if msgs else "capture failed", self.log)
                 survivors = survivors if ok else []
             else:
                 # Download reboots WITHOUT waiting; if any step follows (Lock), make the Download stage block

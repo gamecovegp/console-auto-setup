@@ -9,7 +9,10 @@ cas.provision._append_history / cas.firmware.log_event under config.history_dir(
 import json
 import pathlib
 
-_TYPES = ("download", "save", "firmware")     # one .jsonl family per kind; the window's Type filter
+# One .jsonl family per kind; the window's Type filter. root/lock/warmup are written by
+# provision.log_run (per-device pass/fail + the error reason on a failure).
+_RUN_KINDS = ("root", "lock", "warmup")
+_TYPES = ("download", "save") + _RUN_KINDS + ("firmware",)
 
 
 def _mb(nbytes):
@@ -26,21 +29,34 @@ def _secs(v):
         return "—s"
 
 
+def _dev_line(d):
+    """One device's outcome for a run summary: 'S1→profile' / 'S1 ok', or 'S1 FAIL: <reason>' on a
+    failure (the error the user asked to see)."""
+    s = d.get("serial", "?")
+    st = d.get("status", "?")
+    if st == "ok":
+        return f"{s}→{d['profile']}" if d.get("profile") else f"{s} ok"
+    err = d.get("error")
+    return f"{s} {st.upper()}" + (f": {err}" if err else "")
+
+
 def _fmt_download(r):
-    devs = r.get("devices") or []
-    parts = []
-    for d in devs:
-        s = d.get("serial", "?")
-        parts.append(f"{s}→{d['profile']}" if d.get("status") == "ok" and d.get("profile")
-                     else f"{s}({d.get('status', '?')})")
-    who = ", ".join(parts) or "—"
+    who = ", ".join(_dev_line(d) for d in (r.get("devices") or [])) or "—"
     return (f"{r.get('ok', 0)} ok · {r.get('failed', 0)} failed · "
             f"{_mb(r.get('total_bytes'))} in {_secs(r.get('total_secs'))}  ·  {who}")
 
 
+def _fmt_run(r):
+    """root / lock / warmup run: pass/fail counts + each device (with the error reason on a failure)."""
+    who = " | ".join(_dev_line(d) for d in (r.get("devices") or [])) or "—"
+    return f"{r.get('ok', 0)} ok · {r.get('failed', 0)} failed · {who}"
+
+
 def _fmt_save(r):
-    return (f"{r.get('profile', '?')} ← {r.get('serial') or '?'} · "
-            f"{_mb(r.get('bytes'))} in {_secs(r.get('secs'))}")
+    base = f"{r.get('profile', '?')} ← {r.get('serial') or '?'}"
+    if r.get("status") in ("fail", "error") or r.get("error"):
+        return base + f" — FAILED: {r.get('error', 'capture failed')}"
+    return base + f" · {_mb(r.get('bytes'))} in {_secs(r.get('secs'))}"
 
 
 def _fmt_firmware(r):
@@ -49,7 +65,8 @@ def _fmt_firmware(r):
     return f"{r.get('action', '?')} {r.get('firmware_id', '?')}{ver} → {r.get('serial') or '—'}{tail}"
 
 
-_FMT = {"download": _fmt_download, "save": _fmt_save, "firmware": _fmt_firmware}
+_FMT = {"download": _fmt_download, "save": _fmt_save, "firmware": _fmt_firmware,
+        "root": _fmt_run, "lock": _fmt_run, "warmup": _fmt_run}
 
 
 def _machine_of(name, stem):
@@ -107,6 +124,19 @@ def history_records(history_dir):
 def history_dates(records):
     """Distinct YYYY-MM-DD dates present in `records`, newest first (for the date filter dropdown)."""
     return sorted({e["date"] for e in records if e["date"]}, reverse=True)
+
+
+def is_failure(record):
+    """True if a history event is/contains a failure — powers the 'Failures only' filter. Firmware
+    assign/update events are never failures."""
+    r = record.get("raw") or {}
+    t = record.get("type")
+    if t in ("download",) + _RUN_KINDS:
+        return bool(r.get("failed")) or any(
+            d.get("status") in ("fail", "error") for d in (r.get("devices") or []))
+    if t == "save":
+        return r.get("status") in ("fail", "error") or bool(r.get("error"))
+    return False
 
 
 def filter_records(records, date=None, kinds=None):

@@ -530,7 +530,8 @@ class FirmwareWindow:
             self.app._open_path(str(root))
 
 
-_HISTORY_KINDS = {"All": None, "Downloads": {"download"}, "Saves": {"save"}, "Firmware": {"firmware"}}
+_HISTORY_KINDS = {"All": None, "Failures only": None, "Downloads": {"download"}, "Saves": {"save"},
+                  "Root": {"root"}, "Lock": {"lock"}, "Warm up": {"warmup"}, "Firmware": {"firmware"}}
 
 
 class HistoryWindow:
@@ -597,8 +598,10 @@ class HistoryWindow:
 
     def _render(self):
         date = None if self.date_var.get() == "All dates" else self.date_var.get()
-        kinds = _HISTORY_KINDS.get(self.kind_var.get())
-        shown = H.filter_records(self._records, date=date, kinds=kinds)
+        label = self.kind_var.get()
+        shown = H.filter_records(self._records, date=date, kinds=_HISTORY_KINDS.get(label))
+        if label == "Failures only":
+            shown = [e for e in shown if H.is_failure(e)]
         self._shown_text = H.render(shown) or "No matching history."
         self.count_var.set(f"{len(shown)} of {len(self._records)} event(s)"
                            + (f"  ·  {self._dir()}" if self._records else "  ·  nothing logged yet"))
