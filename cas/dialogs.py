@@ -73,6 +73,30 @@ def _center(dlg, parent, dy=90):
         pass
 
 
+def size_to_content(win, parent, min_w, min_h, pad=44):
+    """Open `win` AT LEAST as tall/wide as its packed content actually requests, then clamp to the
+    screen and place it near `parent`. Call AFTER every widget is packed.
+
+    This is the real cure for 'the bottom buttons are cut off': the windows used to force a fixed
+    geometry (e.g. 720x420) that was SHORTER than the content's natural height (~460px because a
+    Treeview asks for ~10 rows). On a WM that honours the content's requested minimum rather than
+    shrinking the tree, the extra height spills past the window edge and the button bar disappears.
+    Measuring winfo_reqheight() and opening at least that tall makes it WM- and font-independent —
+    no magic number to rebreak when a label wraps or the platform font changes."""
+    win.update_idletasks()
+    sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+    w = min(max(min_w, win.winfo_reqwidth()), sw - 2 * pad)
+    h = min(max(min_h, win.winfo_reqheight()), sh - 2 * pad)
+    win.minsize(min_w, min(min_h, h))          # a floor; the bottom bar is pack-pinned for anything below it
+    try:
+        x = max(pad, min(parent.winfo_rootx() + 40, sw - w - pad))
+        y = max(pad, min(parent.winfo_rooty() + 40, sh - h - pad))
+    except (tk.TclError, AttributeError):
+        x = y = pad
+    win.geometry(f"{w}x{h}+{x}+{y}")
+    return w, h                                 # the chosen size (returned so it's testable without a map)
+
+
 class ProfilePicker:
     """Modal: choose the profile to Save into (or to assign to a device).
 
@@ -101,6 +125,20 @@ class ProfilePicker:
         ttk.Label(win, text="The device's assigned profile is pre-selected. Double-click to confirm.",
                   style="Muted.TLabel").pack(anchor="w", padx=12, pady=(0, 8))
 
+        # Pin the action bar + the overwrite warning to the BOTTOM before the tree, so Run/Cancel are
+        # never clipped no matter how short the window gets (see ProfilesWindow for the full rationale).
+        bar = ttk.Frame(win, padding=(12, 10))
+        bar.pack(fill="x", side="bottom")
+        if on_new:
+            ttk.Button(bar, text="＋ New profile…", command=self._new).pack(side="left")
+        self.ok_btn = ttk.Button(bar, text=ok_text, style="Accent.TButton", command=self._ok)
+        self.ok_btn.pack(side="right")
+        ttk.Button(bar, text="Cancel", command=win.destroy).pack(side="right", padx=(0, 8))
+
+        self.warn_var = tk.StringVar(value="")
+        ttk.Label(win, textvariable=self.warn_var, style="Warn.TLabel",
+                  wraplength=480, justify="left").pack(anchor="w", padx=12, pady=(8, 0), side="bottom")
+
         self.tree = ttk.Treeview(win, columns=("model", "golden", "captured"),
                                  show="tree headings", selectmode="browse", height=9)
         self.tree.heading("#0", text="profile")
@@ -111,18 +149,6 @@ class ProfilePicker:
         self.tree.pack(fill="both", expand=True, padx=12)
         self.tree.bind("<<TreeviewSelect>>", lambda e: self._on_select())
         self.tree.bind("<Double-1>", lambda e: self._ok())
-
-        self.warn_var = tk.StringVar(value="")
-        ttk.Label(win, textvariable=self.warn_var, style="Warn.TLabel",
-                  wraplength=480, justify="left").pack(anchor="w", padx=12, pady=(8, 0))
-
-        bar = ttk.Frame(win, padding=(12, 10))
-        bar.pack(fill="x", side="bottom")
-        if on_new:
-            ttk.Button(bar, text="＋ New profile…", command=self._new).pack(side="left")
-        self.ok_btn = ttk.Button(bar, text=ok_text, style="Accent.TButton", command=self._ok)
-        self.ok_btn.pack(side="right")
-        ttk.Button(bar, text="Cancel", command=win.destroy).pack(side="right", padx=(0, 8))
 
         self._reload(preselect)
         win.bind("<Escape>", lambda e: win.destroy())
@@ -226,11 +252,26 @@ class ProfilesWindow:
         self.win = win = tk.Toplevel(parent)
         win.title("CAS — profile library")
         win.transient(parent)
-        win.geometry("720x420")
 
         ttk.Label(win, text="Profile library", style="Title.TLabel").pack(anchor="w", padx=12, pady=(12, 0))
         self.lib_var = tk.StringVar(value=f"Library: {app.profiles_root}")
         ttk.Label(win, textvariable=self.lib_var, style="Muted.TLabel").pack(anchor="w", padx=12)
+
+        # Pin the button bar + the detail line to the BOTTOM *before* packing the tree, so they always
+        # reserve their space and can never be clipped when the window opens at a fixed height smaller
+        # than the tree's natural request (a Treeview asks for ~10 rows). The tree, packed last with
+        # expand, shrinks to fill whatever is left. (Same load-bearing pack order as the main window.)
+        bar = ttk.Frame(win, padding=(12, 10))
+        bar.pack(fill="x", side="bottom")
+        ttk.Button(bar, text="New…", command=self._new).pack(side="left")
+        ttk.Button(bar, text="Delete…", command=self._delete).pack(side="left", padx=(8, 0))
+        ttk.Button(bar, text="Open folder", command=lambda: app._open_path(app.profiles_root)) \
+            .pack(side="left", padx=(8, 0))
+        ttk.Button(bar, text="Close", command=win.destroy).pack(side="right")
+
+        self.detail_var = tk.StringVar(value="Select a profile to see its golden.")
+        ttk.Label(win, textvariable=self.detail_var, style="Muted.TLabel",
+                  wraplength=680, justify="left").pack(anchor="w", padx=12, pady=(6, 0), side="bottom")
 
         self.tree = ttk.Treeview(win, columns=("model", "golden", "captured"),
                                  show="tree headings", selectmode="browse")
@@ -240,19 +281,9 @@ class ProfilesWindow:
         self.tree.pack(fill="both", expand=True, padx=12, pady=(8, 0))
         self.tree.bind("<<TreeviewSelect>>", lambda e: self._on_select())
 
-        self.detail_var = tk.StringVar(value="Select a profile to see its golden.")
-        ttk.Label(win, textvariable=self.detail_var, style="Muted.TLabel",
-                  wraplength=680, justify="left").pack(anchor="w", padx=12, pady=(6, 0))
-
-        bar = ttk.Frame(win, padding=(12, 10))
-        bar.pack(fill="x", side="bottom")
-        ttk.Button(bar, text="New…", command=self._new).pack(side="left")
-        ttk.Button(bar, text="Delete…", command=self._delete).pack(side="left", padx=(8, 0))
-        ttk.Button(bar, text="Open folder", command=lambda: app._open_path(app.profiles_root)) \
-            .pack(side="left", padx=(8, 0))
-        ttk.Button(bar, text="Close", command=win.destroy).pack(side="right")
         win.bind("<Escape>", lambda e: win.destroy())
         self.refresh()
+        size_to_content(win, parent, 720, 460)     # open tall enough that the buttons are never clipped
 
     def refresh(self, preselect=None):
         self.tree.delete(*self.tree.get_children())
@@ -319,13 +350,24 @@ class FirmwareWindow:
         self.win = win = tk.Toplevel(parent)
         win.title("CAS — firmware library")
         win.transient(parent)
-        win.geometry("760x400")
 
         ttk.Label(win, text="Firmware library (device root firmware)",
                   style="Title.TLabel").pack(anchor="w", padx=12, pady=(12, 0))
         self.lib_var = tk.StringVar()
         ttk.Label(win, textvariable=self.lib_var, style="Muted.TLabel",
                   wraplength=720, justify="left").pack(anchor="w", padx=12)
+
+        # Pin the button bar + the hint below the tree to the BOTTOM *before* packing the tree, so they
+        # always reserve their space and can never be clipped when the window opens at a fixed height
+        # smaller than the tree's natural request (~10 rows). The tree, packed last, shrinks to fill.
+        bar = ttk.Frame(win, padding=(12, 10))
+        bar.pack(fill="x", side="bottom")
+        ttk.Button(bar, text="Add / update…", command=self._add).pack(side="left")
+        ttk.Button(bar, text="Open folder", command=self._open).pack(side="left", padx=(8, 0))
+        ttk.Button(bar, text="Close", command=win.destroy).pack(side="right")
+
+        ttk.Label(win, text="Assign firmware to a unit by right-clicking its row in the device list.",
+                  style="Muted.TLabel").pack(anchor="w", padx=12, pady=(6, 0), side="bottom")
 
         self.tree = ttk.Treeview(win, columns=("version", "device", "target", "match"),
                                  show="tree headings", selectmode="browse")
@@ -335,16 +377,9 @@ class FirmwareWindow:
             self.tree.heading(c, text=t); self.tree.column(c, width=w)
         self.tree.pack(fill="both", expand=True, padx=12, pady=(8, 0))
 
-        ttk.Label(win, text="Assign firmware to a unit by right-clicking its row in the device list.",
-                  style="Muted.TLabel").pack(anchor="w", padx=12, pady=(6, 0))
-
-        bar = ttk.Frame(win, padding=(12, 10))
-        bar.pack(fill="x", side="bottom")
-        ttk.Button(bar, text="Add / update…", command=self._add).pack(side="left")
-        ttk.Button(bar, text="Open folder", command=self._open).pack(side="left", padx=(8, 0))
-        ttk.Button(bar, text="Close", command=win.destroy).pack(side="right")
         win.bind("<Escape>", lambda e: win.destroy())
         self.refresh()
+        size_to_content(win, parent, 760, 460)     # open tall enough that the buttons are never clipped
 
     def _root(self):
         try:

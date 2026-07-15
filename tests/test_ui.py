@@ -898,3 +898,53 @@ class TestAddFirmwareBusyGuard(unittest.TestCase):
             app._add_firmware(on_done=lambda: None)
         info.assert_called_once()          # told the operator why
         ask.assert_not_called()            # never reached the folder prompt (the guard fired first)
+
+
+class TestSizeToContent(unittest.TestCase):
+    """Regression: the Profiles/Firmware windows used to force a geometry SHORTER than their content
+    (e.g. 720x420 vs a ~460px natural height, a Treeview asking for ~10 rows). On a WM that honours
+    the content's requested minimum rather than shrinking the tree, the extra height spilled past the
+    window edge and the bottom button bar disappeared. size_to_content() opens the window AT LEAST as
+    tall as the content requests, so the buttons are always inside."""
+
+    def _tall_window(self, root):
+        import tkinter as tk
+        from tkinter import ttk
+        win = tk.Toplevel(root)
+        ttk.Treeview(win, height=12).pack(fill="both", expand=True)   # asks for a tall height
+        bar = ttk.Frame(win)
+        bar.pack(fill="x", side="bottom")
+        ttk.Button(bar, text="Close").pack(side="right")
+        win.update_idletasks()
+        return win
+
+    def test_never_chooses_a_height_shorter_than_the_content_requests(self):
+        # Assert on the (w, h) size_to_content RETURNS — deterministic, no reliance on a WM mapping the
+        # window (an unmapped Toplevel reports its req size from geometry(), which would mask a regression).
+        from cas import dialogs as D, theme as THEME
+        root = _tk_or_skip()
+        try:
+            THEME.apply(root)
+            root.update()
+            win = self._tall_window(root)
+            req = win.winfo_reqheight()
+            self.assertGreater(req, 200, "the tall tree should request well over the 200px floor")
+            cap = win.winfo_screenheight() - 88               # size_to_content's screen clamp (2*pad)
+
+            _w, h = D.size_to_content(win, root, 400, 200)
+            self.assertGreaterEqual(h, min(req, cap),
+                                    f"chosen height {h} is shorter than the content's {req}px — buttons clip")
+        finally:
+            root.destroy()
+
+    def test_grows_past_the_min_height_floor_to_fit_content(self):
+        from cas import dialogs as D, theme as THEME
+        root = _tk_or_skip()
+        try:
+            THEME.apply(root)
+            root.update()
+            win = self._tall_window(root)
+            _w, h = D.size_to_content(win, root, 400, 150)    # a 150px floor, but content needs more
+            self.assertGreater(h, 150, "should grow past the min_h floor to fit the content")
+        finally:
+            root.destroy()

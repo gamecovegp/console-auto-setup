@@ -1756,6 +1756,9 @@ class App:
         dlg = tk.Toplevel(self.win); dlg.title("Managed APKs (server store)"); dlg.transient(self.win)
         dlg.grab_set()
         tk.Label(dlg, text=f"Server store: {store}", anchor="w").pack(fill="x", padx=8, pady=(8, 4))
+        # Pin the button row to the BOTTOM before the tree so it can never be clipped on a short window;
+        # its buttons are added lower down (where their command closures are defined).
+        bar = tk.Frame(dlg); bar.pack(fill="x", side="bottom", padx=8, pady=8)
         tree = ttk.Treeview(dlg, columns=("pkg", "label", "files", "always"), show="headings", height=12)
         for c, w in (("pkg", 320), ("label", 150), ("files", 55), ("always", 60)):
             tree.heading(c, text=c.upper()); tree.column(c, width=w, anchor="w")
@@ -1865,12 +1868,13 @@ class App:
                 return True
             self._run_bg(work, label=f"Installing {pkg} → {len(serials)} device(s)")
 
-        bar = tk.Frame(dlg); bar.pack(fill="x", padx=8, pady=8)
+        # `bar` was created + bottom-pinned above (before the tree) so it can't be clipped; fill it now.
         for txt, cmd in (("Add APK…", add), ("Update…", update), ("Toggle Always", toggle_always),
                          ("Install → device(s)", install_to_devices), ("Remove", remove),
                          ("Close", dlg.destroy)):
             tk.Button(bar, text=txt, command=cmd).pack(side="left", padx=4)
         refresh()
+        D.size_to_content(dlg, self.win, 720, 420)   # open tall enough + on-screen; buttons never clipped
 
     def _open_profiles(self):
         D.ProfilesWindow(self.win, self)
