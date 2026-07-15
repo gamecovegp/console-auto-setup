@@ -591,10 +591,15 @@ class TestDefaultKitFirmware(unittest.TestCase):
             self._lib_with_odin2(td)
             config.set_default_kit_firmware("odin2-default")
             FW.set_device_firmware("ODIN2ABC", FW.DEFAULT_FW_ID, manual=True)
-            r = FW.resolve("ODIN2ABC", {"serial": "ODIN2ABC", "device": "Odin2"}, td)
+            # device codename ('kalama') deliberately DIFFERS from the firmware's human device label
+            # ('Odin2') — the default kit must stay FRICTIONLESS (no logic_check → no false warning),
+            # or every real Odin2 would carry a permanent ⚠ (its label never equals ro.product.device).
+            r = FW.resolve("ODIN2ABC", {"serial": "ODIN2ABC", "device": "kalama"}, td)
             self.assertEqual(r["firmware_id"], FW.DEFAULT_FW_ID)    # still shows as the default kit
             self.assertIsNotNone(r["firmware"])                    # ...but now backed by a real build
             self.assertTrue(str(r["firmware"].stock_boot_image()).endswith("init_boot.img"))
+            self.assertTrue(r["ok"])                               # frictionless: no warning
+            self.assertEqual(r["warnings"], [])
 
     def test_resolve_default_kit_without_a_designation_keeps_the_old_none_behavior(self):
         with tempfile.TemporaryDirectory() as td:

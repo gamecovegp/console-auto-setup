@@ -476,16 +476,19 @@ def resolve(serial, identity_dict, root):
     if assigned and assigned["firmware_id"] == DEFAULT_FW_ID:
         # Pinned to the default kit. If a library build is designated as the default kit, flash ITS
         # init_boot (present on the library drive) — this is the fix for '(default kit)' → 'missing
-        # init_boot.img', since the hard-coded odin2 path ships in no release. logic_check still runs,
-        # so pinning the default kit onto a device the image doesn't fit surfaces a warning (the old
-        # None path was silently unguarded). No designation → keep the old behavior (fall back to the
-        # hard-coded path in provision.root_all), so nothing regresses for existing benches.
+        # init_boot.img', since the hard-coded odin2 path ships in no release. Kept FRICTIONLESS by
+        # design (no logic_check → no warning): the default kit is the operator's explicit "just use
+        # this" choice, and the brick-relevant guard (an init_boot image must not go to a plain 'boot'
+        # partition) lives in provision.root() itself (_img_kernel_size), independent of this. Running
+        # logic_check here would ALSO fire a permanent false 'device' warning, because a firmware's
+        # human device label ('Odin2 (kalama)') never equals the live ro.product.device codename. No
+        # designation → keep the old behavior (fall back to the hard-coded path in root_all), so
+        # nothing regresses for existing benches.
         dk = default_kit_firmware(root)
         if dk is not None:
-            ok, warns = logic_check(dk, identity_dict)
             return {"firmware_id": DEFAULT_FW_ID, "version": dk.current(),
                     "manual": assigned.get("manual", True), "suggested": None,
-                    "ok": ok, "warnings": warns, "firmware": dk}
+                    "ok": True, "warnings": [], "firmware": dk}
         return {"firmware_id": DEFAULT_FW_ID, "version": None, "manual": assigned.get("manual", True),
                 "suggested": None, "ok": True, "warnings": [], "firmware": None}
     if assigned:
