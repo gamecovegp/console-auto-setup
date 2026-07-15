@@ -1012,6 +1012,56 @@ class TestFirmwareWindowDefaultKit(unittest.TestCase):
         self.assertIsNone(config.default_kit_firmware())
 
 
+class TestSetProfileModel(unittest.TestCase):
+    """The Profile library 'Set model…' button edits a profile's model_match (what auto-assigns a device
+    to it), writing profile.meta in place and leaving other keys intact."""
+
+    def _profile(self, td, name, meta):
+        d = pathlib.Path(td) / name
+        d.mkdir(parents=True)
+        (d / "profile.meta").write_text(meta)
+        return d
+
+    def _app(self, td):
+        from cas.gui import App
+        app = App.__new__(App)
+        app.profiles_root = td
+        app.win = object()
+        app.log = lambda m: None
+        app.refresh_devices = lambda: None
+        return app
+
+    def test_saves_the_new_model_and_preserves_other_keys(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._profile(td, "rp6-512", "model_match=\nfrontend=es-de\nnotes=hi\n")
+            app = self._app(td)
+            with mock.patch("cas.gui.simpledialog.askstring", return_value="Retroid Pocket 6"):
+                out = app.set_profile_model("rp6-512")
+            self.assertEqual(out, "Retroid Pocket 6")
+            from cas import profiles as P
+            prof = P.Profile(pathlib.Path(td) / "rp6-512")
+            self.assertEqual(prof.meta.get("model_match"), "Retroid Pocket 6")
+            self.assertEqual(prof.meta.get("frontend"), "es-de")     # untouched
+            self.assertEqual(prof.meta.get("notes"), "hi")
+
+    def test_cancel_leaves_the_model_untouched(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._profile(td, "rp6-512", "model_match=Odin2\n")
+            app = self._app(td)
+            with mock.patch("cas.gui.simpledialog.askstring", return_value=None):   # Cancel
+                self.assertIsNone(app.set_profile_model("rp6-512"))
+            from cas import profiles as P
+            self.assertEqual(P.Profile(pathlib.Path(td) / "rp6-512").meta.get("model_match"), "Odin2")
+
+    def test_prefills_the_current_value(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._profile(td, "rp6-512", "model_match=Retroid.*6\n")
+            app = self._app(td)
+            with mock.patch("cas.gui.simpledialog.askstring", return_value="x") as ask:
+                app.set_profile_model("rp6-512")
+            self.assertEqual(ask.call_args.kwargs.get("initialvalue"), "Retroid.*6")
+
+
 class TestClampWarmup(unittest.TestCase):
     """clamp_warmup parses the two warm-up entry strings, falling back to the current value on a blank,
     garbage, or negative entry — so an operator typo can never crash the run or set a nonsense time."""
@@ -1037,14 +1087,14 @@ class TestWarmupConfig(unittest.TestCase):
         self.assertEqual(config.warmup_dwell_s(), 5.0)
         self.assertEqual(config.set_warmup_dwell_s(-9), 0.0)          # negative clamps to 0
         config.set_warmup_dwell_s(None)                              # reset → back to the default
-        self.assertEqual(config.warmup_dwell_s(), 3.0)
+        self.assertEqual(config.warmup_dwell_s(), 1.0)
 
     def test_settle_round_trips_and_resets(self):
         from cas import config
         self.assertEqual(config.set_warmup_settle_s(12), 12.0)
         self.assertEqual(config.warmup_settle_s(), 12.0)
         config.set_warmup_settle_s(None)
-        self.assertEqual(config.warmup_settle_s(), 30.0)
+        self.assertEqual(config.warmup_settle_s(), 10.0)
 
 
 class TestWarmupWiring(unittest.TestCase):

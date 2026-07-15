@@ -326,6 +326,7 @@ class ProfilesWindow:
         bar = ttk.Frame(win, padding=(12, 10))
         bar.pack(fill="x", side="bottom")
         ttk.Button(bar, text="New…", command=self._new).pack(side="left")
+        ttk.Button(bar, text="Set model…", command=self._set_model).pack(side="left", padx=(8, 0))
         ttk.Button(bar, text="Delete…", command=self._delete).pack(side="left", padx=(8, 0))
         ttk.Button(bar, text="Open folder", command=lambda: app._open_path(app.profiles_root)) \
             .pack(side="left", padx=(8, 0))
@@ -393,6 +394,14 @@ class ProfilesWindow:
         name = self.app.new_profile()
         if name:
             self.refresh(preselect=name)
+
+    def _set_model(self):
+        name = self._selected()
+        if not name:
+            messagebox.showinfo("CAS", "Select a profile row, then ‘Set model…’.")
+            return
+        self.app.set_profile_model(name)
+        self.refresh(preselect=name)
 
     def _delete(self):
         name = self._selected()

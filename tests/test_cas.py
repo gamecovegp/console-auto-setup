@@ -1315,11 +1315,11 @@ class TestConfig(unittest.TestCase):
         from cas import config as C
         with tempfile.TemporaryDirectory() as t:
             os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cas-config.json")
-            self.assertEqual(C.warmup_dwell_s(), 3.0)          # key absent -> default
+            self.assertEqual(C.warmup_dwell_s(), 1.0)          # key absent -> default
             C.save_config({"warmup_dwell_s": 10})
             self.assertEqual(C.warmup_dwell_s(), 10.0)         # int is coerced to float
             C.save_config({"warmup_dwell_s": "bogus"})         # unparseable -> default, never crash
-            self.assertEqual(C.warmup_dwell_s(), 3.0)
+            self.assertEqual(C.warmup_dwell_s(), 1.0)
             C.save_config({"warmup_dwell_s": -5})              # negative is clamped to 0
             self.assertEqual(C.warmup_dwell_s(), 0.0)
 
@@ -1338,11 +1338,11 @@ class TestConfig(unittest.TestCase):
         from cas import config as C
         with tempfile.TemporaryDirectory() as t:
             os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "cas-config.json")
-            self.assertEqual(C.warmup_settle_s(), 30.0)        # key absent -> default
+            self.assertEqual(C.warmup_settle_s(), 10.0)        # key absent -> default
             C.save_config({"warmup_settle_s": 45})
             self.assertEqual(C.warmup_settle_s(), 45.0)        # int is coerced to float
             C.save_config({"warmup_settle_s": "bogus"})        # unparseable -> default, never crash
-            self.assertEqual(C.warmup_settle_s(), 30.0)
+            self.assertEqual(C.warmup_settle_s(), 10.0)
             C.save_config({"warmup_settle_s": -5})             # negative is clamped to 0
             self.assertEqual(C.warmup_settle_s(), 0.0)
 
@@ -3053,8 +3053,8 @@ class TestWarmup(unittest.TestCase):
         from cas import config as C
         self.assertEqual(set(C.load_config()), {"auto_grant_shell"})   # no bench keys leaked in
         self.assertEqual(C.warmup_skip_pkgs(), frozenset({"com.topjohnwu.magisk"}))
-        self.assertEqual(C.warmup_dwell_s(), 3.0)
-        self.assertEqual(C.warmup_settle_s(), 30.0)
+        self.assertEqual(C.warmup_dwell_s(), 1.0)
+        self.assertEqual(C.warmup_settle_s(), 10.0)
 
     def test_launches_every_manifest_app_frontends_last(self):
         with tempfile.TemporaryDirectory() as t:

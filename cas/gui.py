@@ -2401,6 +2401,28 @@ class App:
         self.refresh_profiles()
         self.refresh_devices()
 
+    def set_profile_model(self, name):
+        """Edit a profile's model-match — the device model this profile auto-assigns to. Prompts with the
+        current value, writes it to profile.meta (other keys preserved), and re-resolves device matches.
+        Returns the new value on save, or None if cancelled."""
+        if not name:
+            return None
+        prof = P.Profile(P.pathlib.Path(self.profiles_root) / name)
+        cur = prof.meta.get("model_match", "") or ""
+        new = simpledialog.askstring(
+            "Profile model",
+            f"Model match for “{name}” — the device model this profile auto-assigns to.\n"
+            "A substring or regex matched against the device's model, e.g. 'Odin2.*Mini' or "
+            "'Retroid Pocket 6'. Leave blank to match by profile name + SD size only.",
+            initialvalue=cur, parent=self.win)
+        if new is None:                                    # cancelled — leave it untouched
+            return None
+        new = new.strip()
+        P.set_meta_key(prof.path / "profile.meta", "model_match", new)
+        self.log(f"profile '{name}' model → '{new or '(name + SD-size match)'}'")
+        self.refresh_devices()                             # re-resolve auto-matches with the new pattern
+        return new
+
 
 def main(adb_bin="adb", fb_bin="fastboot"):
     win = tk.Tk()

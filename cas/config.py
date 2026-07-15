@@ -245,16 +245,17 @@ def bake_boot_grant():
     return bool(load_config().get("bake_boot_grant", True))
 
 
-_DEFAULT_WARMUP_DWELL_S = 3.0
-_DEFAULT_WARMUP_SETTLE_S = 30.0
+_DEFAULT_WARMUP_DWELL_S = 1.0
+_DEFAULT_WARMUP_SETTLE_S = 10.0
 _DEFAULT_WARMUP_SKIP = ("com.topjohnwu.magisk",)
 
 
 def warmup_dwell_s():
     """Seconds the ③ Warm up step leaves each app in the foreground before launching the next (default
-    3.0). Apps are never force-stopped, so this bounds how long we WATCH an app, not how long it gets to
-    index — a backgrounded app keeps scanning. Raise it (cas-config.json "warmup_dwell_s") if a unit still
-    ships with an unindexed emulator. A garbage/negative value falls back to the default / 0."""
+    1.0). Apps are never force-stopped, so this bounds how long we WATCH an app, not how long it gets to
+    index — a backgrounded app keeps scanning. Raise it (cas-config.json "warmup_dwell_s", or the ③ Warm
+    up modal) if a unit still ships with an unindexed emulator. A garbage/negative value falls back to the
+    default / 0."""
     try:
         return max(0.0, float(load_config().get("warmup_dwell_s", _DEFAULT_WARMUP_DWELL_S)))
     except (TypeError, ValueError):
@@ -263,7 +264,7 @@ def warmup_dwell_s():
 
 def warmup_settle_s():
     """Seconds ③ Warm up waits, once every app has been launched, before the force-stop sweep (default
-    30.0). This is what makes 'they keep indexing in the background' actually TRUE for the LAST apps
+    10.0). This is what makes 'they keep indexing in the background' actually TRUE for the LAST apps
     launched — the frontends: Lock reboots the unit within ~20s of the pass ending, so without this wait
     a reboot that soon is functionally the same kill as the force-stop the pass otherwise never does
     mid-pass. A garbage/negative value falls back to the default / 0."""
