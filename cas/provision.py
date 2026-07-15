@@ -17,7 +17,8 @@ import concurrent.futures
 from . import BUNDLE, DATA
 from . import profiles as P
 
-CORES_SRC = DATA / "retroarch-cores"   # the curated arm64 RetroArch core set, sourced from the PC
+# RetroArch cores: resolved at provision time via config.cores_dir() (library_root()/retroarch-cores,
+# falling back to APPDIR/data) — NOT a fixed APPDIR/data path, so the set follows the CAS library drive.
 MEDIA_SRC = DATA / "ES-DE" / "downloaded_media"   # shared ES-DE box-art pool (box/screenshot/marquee),
 #   pushed per-device but kept OUT of the per-profile golden (it's ~12 GB; bundling it would balloon every
 #   profile). Override the PC source with CAS_MEDIA. The golden carries only the small ES-DE config.
@@ -493,9 +494,10 @@ def provision(adb, profile, log=print, dry_push=False, es_media_src=None):
     if not _validate_payload(pay, pay_pkgs, axes, log):
         return False
 
-    # RetroArch cores come from the PC (CORES_SRC), not the SD. (The app's own cores also ride data.tar;
-    # this tops the set up to the full curated library.)
-    push_cores = CORES_SRC.exists() and any(CORES_SRC.glob("*.so"))
+    # RetroArch cores come from the PC CAS LIBRARY (cores_dir() = library_root()/retroarch-cores), NOT the
+    # SD. Sourced from the library so the ~2.4GB set lives with the profiles, not beside the exe.
+    cores_src = _cfg.cores_dir()
+    push_cores = cores_src.exists() and any(cores_src.glob("*.so"))
 
     pay_bytes = P.Profile(profile.path).golden_size() if hasattr(profile, "path") else 0
     t_push = time.monotonic()                          # time push+restore -> records bytes/sec for ETAs
@@ -569,9 +571,10 @@ def provision(adb, profile, log=print, dry_push=False, es_media_src=None):
                 pass
         if not ok_m:
             return False
-        if push_cores:                                     # the full curated core set, FROM THE PC
-            log(f"pushing RetroArch cores from PC ({sum(1 for _ in CORES_SRC.glob('*.so'))} cores)...")
-            if not _push_dir(adb, push, CORES_SRC, DEV, log, arcname="cores"):  # -> {DEV}/cores/*.so
+        if push_cores:                                     # the full curated core set, FROM THE PC LIBRARY
+            log(f"pushing RetroArch cores from the library ({sum(1 for _ in cores_src.glob('*.so'))} "
+                f"cores from {cores_src})...")
+            if not _push_dir(adb, push, cores_src, DEV, log, arcname="cores"):  # -> {DEV}/cores/*.so
                 return False
 
     cores_env = f"CAS_CORES={DEV}/cores " if (push_cores and not dry_push) else ""

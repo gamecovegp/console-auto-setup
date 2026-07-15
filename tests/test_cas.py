@@ -1268,6 +1268,31 @@ class TestConfig(unittest.TestCase):
             os.environ["CAS_CONFIG"] = str(cfgp)
             self.assertEqual(C.firmware_dir(), real)
 
+    def test_cores_dir_prefers_library_then_falls_back_to_appdir(self):
+        # RetroArch cores are sourced from the CAS LIBRARY (library_root()/retroarch-cores), so the ~2.4GB
+        # set lives WITH the profiles on the library drive — not beside the exe. Falls back to APPDIR/data/
+        # retroarch-cores only when the library has no .so.
+        from cas import config as C, APPDIR
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as t:
+            os.environ["CAS_CONFIG"] = str(pathlib.Path(t) / "missing.json")
+            os.environ.pop("CAS_PROFILES", None)
+            lib = pathlib.Path(t) / "lib"; lib.mkdir()
+            with mock.patch.object(C, "library_root", lambda: lib):
+                self.assertEqual(C.cores_dir(), APPDIR / "data" / "retroarch-cores")  # library empty -> fallback
+                cores = lib / "retroarch-cores"; cores.mkdir()
+                (cores / "snes9x_libretro_android.so").write_bytes(b"MZ")
+                self.assertEqual(C.cores_dir(), cores)                                # library populated -> preferred
+
+    def test_cores_dir_honors_existing_override(self):
+        from cas import config as C
+        with tempfile.TemporaryDirectory() as t:
+            cfgp = pathlib.Path(t) / "cas-config.json"
+            real = pathlib.Path(t) / "cores"; real.mkdir()
+            cfgp.write_text('{"cores_dir": %s}' % __import__("json").dumps(str(real)))
+            os.environ["CAS_CONFIG"] = str(cfgp)
+            self.assertEqual(C.cores_dir(), real)
+
     def test_apk_store_defaults_under_library(self):
         from cas import config as C
         with tempfile.TemporaryDirectory() as t:

@@ -231,7 +231,7 @@ if [ -n "$RAUID" ]; then                       # RetroArch IS installed on this 
   if [ "$N_CORES" -gt 0 ]; then
     ok "installed RetroArch cores: $N_CORES"
   else
-    warn "RetroArch installed but ZERO cores present (source: $CORES) -- it will show 'no core' and games won't launch. Populate the PC's data/retroarch-cores/ (gitignored, ~2.4GB of .so) or the SD's retroarch-cores/, then re-Download."
+    warn "RetroArch installed but ZERO cores present (source: $CORES) -- it will show 'no core' and games won't launch. Put the arm64 *.so core set in the CAS LIBRARY's retroarch-cores/ folder (beside the profiles + _firmware; ~2.4GB, gitignored), then re-Download."
   fi
 fi
 

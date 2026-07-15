@@ -128,6 +128,29 @@ def firmware_dir():
     return library_root() / "_firmware"
 
 
+def cores_dir():
+    """The curated arm64 RetroArch core set (*.so) the PC repushes on restore. Sourced from the CAS
+    LIBRARY (library_root()/retroarch-cores) so the ~2.4GB set lives WITH the profiles + _firmware on the
+    library drive — NOT beside the exe (APPDIR/data) and NOT on the unit's SD. An explicit 'cores_dir'
+    config override wins if it exists; else the library location if it holds any *.so; else the local
+    default APPDIR/data/retroarch-cores (source checkouts / older layouts). Mirrors firmware_dir()."""
+    d = load_config().get("cores_dir")
+    if d:
+        p = pathlib.Path(d)
+        try:
+            if p.is_dir():
+                return p
+        except OSError:
+            pass
+    lib = library_root() / "retroarch-cores"
+    try:
+        if lib.is_dir() and any(lib.glob("*.so")):
+            return lib
+    except OSError:
+        pass
+    return APPDIR / "data" / "retroarch-cores"
+
+
 def set_firmware_dir(path):
     """Persist (path) or clear (falsy) the firmware-library directory."""
     cfg = load_config()
