@@ -21,6 +21,7 @@ LIGHT = {
     "accent":       "#A855F7",
     "accent_hover": "#9333EA",
     "accent_tint":  "#EDE4FB",
+    "outline":      "#111827",     # near-black button border — makes every button distinct on white
     "ok":           "#10B981",
     "warn":         "#F59E0B",
     "danger":       "#EF4444",
@@ -53,6 +54,15 @@ FONT_PREFS = ("Segoe UI Variable Text", "Segoe UI", "Inter", "SF Pro Text",
               "Helvetica Neue", "Cantarell", "Ubuntu", "DejaVu Sans")
 MONO_PREFS = ("Cascadia Mono", "Consolas", "SF Mono", "JetBrains Mono",
               "DejaVu Sans Mono", "Liberation Mono", "Courier New")
+
+
+def center_columns(tree):
+    """Center every column of a ttk.Treeview — the cells AND the heading, including the '#0' tree
+    column — so a list/table reads as centered. Call after the columns are defined."""
+    for c in ("#0",) + tuple(tree["columns"]):
+        tree.column(c, anchor="center")
+        tree.heading(c, anchor="center")
+    return tree
 
 
 def pick_font(available, prefs=FONT_PREFS, fallback="TkDefaultFont"):
@@ -112,23 +122,28 @@ def apply(root, palette=None):
     st.configure("Toolbar.TLabel", background=p["surface"], foreground=p["muted"], font=fonts["caption"])
     st.configure("Warn.TLabel", background=p["surface_alt"], foreground=p["warn"])
 
-    # Buttons: flat, generous padding, a state layer on hover/press instead of a 3D bevel.
-    st.configure("TButton", background=p["surface"], foreground=p["text"], relief="flat",
-                 borderwidth=1, padding=(12, 6), anchor="center")
+    # Buttons: flat fill, generous padding, and a thin near-black outline (relief='solid') so every
+    # button reads as a distinct, clickable control on the light surface instead of blending in. The
+    # outline turns accent on hover/focus as an affordance.
+    st.configure("TButton", background=p["surface"], foreground=p["text"], relief="solid",
+                 borderwidth=1, bordercolor=p["outline"], padding=(12, 6), anchor="center")
     st.map("TButton",
            background=[("pressed", p["accent_tint"]), ("active", p["surface_alt"]),
                        ("disabled", p["surface_alt"])],
-           bordercolor=[("active", p["accent"]), ("focus", p["accent"])],
+           bordercolor=[("active", p["accent"]), ("focus", p["accent"]),
+                        ("disabled", p["border"])],
            foreground=[("disabled", p["muted"])])
-    st.configure("Toolbar.TButton", background=p["surface"], borderwidth=1, padding=(10, 5))
+    st.configure("Toolbar.TButton", background=p["surface"], relief="solid", borderwidth=1,
+                 bordercolor=p["outline"], padding=(10, 5))
     st.map("Toolbar.TButton",
            background=[("pressed", p["accent_tint"]), ("active", p["surface_alt"])],
-           bordercolor=[("active", p["accent"])])
+           bordercolor=[("active", p["accent"]), ("disabled", p["border"])])
     st.configure("Accent.TButton", background=p["accent"], foreground="#FFFFFF",
-                 borderwidth=0, padding=(16, 7))
+                 relief="solid", borderwidth=1, bordercolor=p["outline"], padding=(16, 7))
     st.map("Accent.TButton",
            background=[("pressed", p["accent_hover"]), ("active", p["accent_hover"]),
                        ("disabled", p["border"])],
+           bordercolor=[("disabled", p["border"])],
            foreground=[("disabled", p["muted"])])
 
     st.configure("Treeview", background=p["surface"], fieldbackground=p["surface"],

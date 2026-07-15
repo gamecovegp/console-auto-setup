@@ -1010,3 +1010,112 @@ class TestFirmwareWindowDefaultKit(unittest.TestCase):
             self._win(None)._set_default_kit()
         info.assert_called_once()
         self.assertIsNone(config.default_kit_firmware())
+
+
+class TestClampWarmup(unittest.TestCase):
+    """clamp_warmup parses the two warm-up entry strings, falling back to the current value on a blank,
+    garbage, or negative entry — so an operator typo can never crash the run or set a nonsense time."""
+
+    def test_valid_numbers_parse(self):
+        from cas.dialogs import clamp_warmup
+        self.assertEqual(clamp_warmup("2", "12", 3, 30), (2.0, 12.0))
+        self.assertEqual(clamp_warmup("1.5", "0", 3, 30), (1.5, 0.0))
+
+    def test_blank_or_garbage_falls_back_to_current(self):
+        from cas.dialogs import clamp_warmup
+        self.assertEqual(clamp_warmup("", "abc", 3, 30), (3.0, 30.0))
+
+    def test_negative_falls_back_to_current(self):
+        from cas.dialogs import clamp_warmup
+        self.assertEqual(clamp_warmup("-5", "-1", 3, 30), (3.0, 30.0))
+
+
+class TestWarmupConfig(unittest.TestCase):
+    def test_dwell_round_trips_clamps_and_resets(self):
+        from cas import config
+        self.assertEqual(config.set_warmup_dwell_s(5), 5.0)
+        self.assertEqual(config.warmup_dwell_s(), 5.0)
+        self.assertEqual(config.set_warmup_dwell_s(-9), 0.0)          # negative clamps to 0
+        config.set_warmup_dwell_s(None)                              # reset → back to the default
+        self.assertEqual(config.warmup_dwell_s(), 3.0)
+
+    def test_settle_round_trips_and_resets(self):
+        from cas import config
+        self.assertEqual(config.set_warmup_settle_s(12), 12.0)
+        self.assertEqual(config.warmup_settle_s(), 12.0)
+        config.set_warmup_settle_s(None)
+        self.assertEqual(config.warmup_settle_s(), 30.0)
+
+
+class TestWarmupWiring(unittest.TestCase):
+    """The ③ warm-up modal's chosen timing must (a) persist and be returned by _pick_warmup, and
+    (b) actually reach PV.warmup_all via _stage — otherwise the picker would be cosmetic."""
+
+    def _app(self):
+        from cas.gui import App
+        app = App.__new__(App)
+        app.win = object()
+        app.log = lambda m: None
+        app.adb_bin = app.fb_bin = None
+        app.profiles_root = "."
+        return app
+
+    def test_pick_warmup_persists_and_returns_the_choice(self):
+        from cas import config
+        app = self._app()
+        fake = mock.Mock(result=(2.0, 10.0))
+        with mock.patch("cas.gui.D.WarmupDialog", return_value=fake):
+            out = app._pick_warmup()
+        self.assertEqual(out, (2.0, 10.0))
+        self.assertEqual(config.warmup_dwell_s(), 2.0)               # persisted → pre-fills next time
+        self.assertEqual(config.warmup_settle_s(), 10.0)
+
+    def test_pick_warmup_cancel_returns_none(self):
+        app = self._app()
+        fake = mock.Mock(result=None)
+        with mock.patch("cas.gui.D.WarmupDialog", return_value=fake):
+            self.assertIsNone(app._pick_warmup())
+
+    def test_stage_passes_the_chosen_timing_to_warmup_all(self):
+        app = self._app()
+        app._warmup_opts = (2.0, 10.0)
+        with mock.patch("cas.gui.PV.warmup_all", return_value={}) as wa:
+            app._stage("warmup", ["S1"], {}, set(), None)
+        _args, kwargs = wa.call_args
+        self.assertEqual((kwargs["dwell"], kwargs["settle"]), (2.0, 10.0))
+
+    def test_stage_without_a_choice_passes_none_so_config_defaults_apply(self):
+        app = self._app()                                           # no _warmup_opts set
+        with mock.patch("cas.gui.PV.warmup_all", return_value={}) as wa:
+            app._stage("warmup", ["S1"], {}, set(), None)
+        _args, kwargs = wa.call_args
+        self.assertEqual((kwargs["dwell"], kwargs["settle"]), (None, None))
+
+
+class TestCenterColumns(unittest.TestCase):
+    def test_every_column_including_the_tree_column_is_centered(self):
+        from tkinter import ttk
+        from cas import theme
+        root = _tk_or_skip()
+        try:
+            tree = ttk.Treeview(root, columns=("a", "b"), show="tree headings")
+            theme.center_columns(tree)
+            for c in ("#0", "a", "b"):
+                self.assertEqual(str(tree.column(c, "anchor")), "center")
+        finally:
+            root.destroy()
+
+
+class TestButtonOutline(unittest.TestCase):
+    def test_buttons_get_the_near_black_outline(self):
+        from tkinter import ttk
+        from cas import theme
+        root = _tk_or_skip()
+        try:
+            theme.apply(root)
+            st = ttk.Style(root)
+            self.assertEqual(st.lookup("TButton", "bordercolor"), theme.LIGHT["outline"])
+            self.assertEqual(st.lookup("TButton", "relief"), "solid")
+            self.assertEqual(theme.LIGHT["outline"], "#111827")
+        finally:
+            root.destroy()

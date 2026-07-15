@@ -273,6 +273,28 @@ def warmup_settle_s():
         return _DEFAULT_WARMUP_SETTLE_S
 
 
+def set_warmup_dwell_s(seconds):
+    """Persist the ③ Warm up per-app dwell (None → back to the default). Clamped to >= 0."""
+    cfg = load_config()
+    if seconds is None:
+        cfg.pop("warmup_dwell_s", None)
+    else:
+        cfg["warmup_dwell_s"] = max(0.0, float(seconds))
+    save_config(cfg)
+    return warmup_dwell_s()
+
+
+def set_warmup_settle_s(seconds):
+    """Persist the ③ Warm up final settle (None → back to the default). Clamped to >= 0."""
+    cfg = load_config()
+    if seconds is None:
+        cfg.pop("warmup_settle_s", None)
+    else:
+        cfg["warmup_settle_s"] = max(0.0, float(seconds))
+    save_config(cfg)
+    return warmup_settle_s()
+
+
 def warmup_skip_pkgs():
     """Packages ③ Warm up never launches (frozenset). Default: Magisk ONLY — it's a host tool, not a
     shipped app, so opening it does nothing for the unit. EVERYTHING else warms (Companion, Steam Link,

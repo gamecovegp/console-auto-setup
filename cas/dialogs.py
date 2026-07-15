@@ -14,6 +14,7 @@ from tkinter import ttk, messagebox
 from . import profiles as P
 from . import firmware as FW
 from . import config
+from . import theme as THEME
 
 
 def profile_rows(profiles_root):
@@ -61,6 +62,66 @@ def human_eta(secs):
         return f"{m}m {s:02d}s"
     h, m = divmod(m, 60)
     return f"{h}h {m:02d}m"
+
+
+def clamp_warmup(dwell_str, settle_str, cur_dwell, cur_settle):
+    """Parse the two warm-up entry strings into (dwell, settle) floats. A blank/garbage/negative value
+    falls back to the current value for that field (never crashes on operator typos). Pure — no Tk."""
+    def _one(s, cur):
+        try:
+            v = float(str(s).strip())
+        except (TypeError, ValueError):
+            return float(cur)
+        return v if v >= 0 else float(cur)
+    return _one(dwell_str, cur_dwell), _one(settle_str, cur_settle)
+
+
+class WarmupDialog:
+    """Modal shown when ③ Warm up is about to run: pick how long the warm-up is for THIS run. Pre-filled
+    with the current (last-used) values and PERSISTED on Run, so the choice sticks as the new default.
+    `.result` is (dwell_s, settle_s), or None if cancelled."""
+
+    def __init__(self, parent, cur_dwell, cur_settle):
+        self.result = None
+        self.win = win = tk.Toplevel(parent)
+        win.title("Warm up — timing")
+        win.transient(parent)
+        win.resizable(False, False)
+        frm = ttk.Frame(win, padding=16)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(frm, text="Warm-up timing", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(frm, text="How long ③ Warm up spends opening each app so its emulator indexes before "
+                            "Lock. Applies to this run and becomes the new default.",
+                  style="Muted.TLabel", wraplength=380, justify="left").pack(anchor="w", pady=(2, 12))
+
+        self.dwell_var = tk.StringVar(value=f"{cur_dwell:g}")
+        self.settle_var = tk.StringVar(value=f"{cur_settle:g}")
+        grid = ttk.Frame(frm)
+        grid.pack(fill="x")
+        ttk.Label(grid, text="Seconds each app stays open:").grid(row=0, column=0, sticky="w", pady=3)
+        ttk.Spinbox(grid, from_=0, to=600, increment=1, width=7, textvariable=self.dwell_var) \
+            .grid(row=0, column=1, sticky="e", padx=(10, 0))
+        ttk.Label(grid, text="Final settle before Lock (seconds):").grid(row=1, column=0, sticky="w", pady=3)
+        ttk.Spinbox(grid, from_=0, to=600, increment=5, width=7, textvariable=self.settle_var) \
+            .grid(row=1, column=1, sticky="e", padx=(10, 0))
+        grid.columnconfigure(0, weight=1)
+
+        bar = ttk.Frame(frm)
+        bar.pack(fill="x", pady=(16, 0))
+        ttk.Button(bar, text="▶ Warm up", style="Accent.TButton", command=self._ok).pack(side="right")
+        ttk.Button(bar, text="Cancel", command=win.destroy).pack(side="right", padx=(0, 8))
+
+        self._cur = (cur_dwell, cur_settle)
+        win.bind("<Escape>", lambda e: win.destroy())
+        win.bind("<Return>", lambda e: self._ok())
+        _center(win, parent)
+        win.grab_set()
+        win.wait_window()
+
+    def _ok(self):
+        self.result = clamp_warmup(self.dwell_var.get(), self.settle_var.get(), *self._cur)
+        self.win.destroy()
 
 
 def _center(dlg, parent, dy=90):
@@ -146,6 +207,7 @@ class ProfilePicker:
         for c, t, w in (("model", "model", 130), ("golden", "golden", 110), ("captured", "captured", 100)):
             self.tree.heading(c, text=t)
             self.tree.column(c, width=w)
+        THEME.center_columns(self.tree)
         self.tree.pack(fill="both", expand=True, padx=12)
         self.tree.bind("<<TreeviewSelect>>", lambda e: self._on_select())
         self.tree.bind("<Double-1>", lambda e: self._ok())
@@ -278,6 +340,7 @@ class ProfilesWindow:
         self.tree.heading("#0", text="profile"); self.tree.column("#0", width=200)
         for c, t, w in (("model", "model", 150), ("golden", "golden", 130), ("captured", "captured", 110)):
             self.tree.heading(c, text=t); self.tree.column(c, width=w)
+        THEME.center_columns(self.tree)
         self.tree.pack(fill="both", expand=True, padx=12, pady=(8, 0))
         self.tree.bind("<<TreeviewSelect>>", lambda e: self._on_select())
 
@@ -377,6 +440,7 @@ class FirmwareWindow:
         for c, t, w in (("version", "current", 90), ("device", "device", 130),
                         ("target", "flashes", 100), ("match", "serial prefix", 140)):
             self.tree.heading(c, text=t); self.tree.column(c, width=w)
+        THEME.center_columns(self.tree)
         self.tree.pack(fill="both", expand=True, padx=12, pady=(8, 0))
 
         win.bind("<Escape>", lambda e: win.destroy())

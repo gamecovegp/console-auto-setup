@@ -628,6 +628,7 @@ class App:
                         ("state", "state", 110)):
             self.dev_tree.heading(c, text=t)
             self.dev_tree.column(c, width=w, minwidth=70)
+        THEME.center_columns(self.dev_tree)
         vsb = ttk.Scrollbar(listf, orient="vertical", command=self.dev_tree.yview)
         self.dev_tree.configure(yscrollcommand=vsb.set)
         vsb.pack(side="right", fill="y")
@@ -1419,7 +1420,25 @@ class App:
                 return
             if "download" in steps and not self._pick_downloads(cleared):  # modal(s): choose apps (or cancel)
                 return
+            self._warmup_opts = None
+            if "warmup" in steps:                          # modal: choose the warm-up timing (or cancel)
+                opts = self._pick_warmup()
+                if opts is None:
+                    return
+                self._warmup_opts = opts
             self._run_chain(steps, cleared)
+
+    def _pick_warmup(self):
+        """Ask how long ③ Warm up runs (modal, pre-filled with the current values), persist the choice as
+        the new default, and return (dwell_s, settle_s) — or None if the operator cancelled."""
+        dlg = D.WarmupDialog(self.win, config.warmup_dwell_s(), config.warmup_settle_s())
+        if dlg.result is None:
+            return None
+        dwell, settle = dlg.result
+        config.set_warmup_dwell_s(dwell)                   # sticky: pre-fills next time ("update how long")
+        config.set_warmup_settle_s(settle)
+        self.log(f"warm up: {dwell:g}s per app, {settle:g}s settle.")
+        return dwell, settle
 
     def _run_save(self, steps, serial):
         """Save = preflight → pick the DESTINATION PROFILE (modal) → pick what to capture (modal) → run.
@@ -1765,8 +1784,8 @@ class App:
         bar = tk.Frame(dlg); bar.pack(fill="x", side="bottom", padx=8, pady=8)
         tree = ttk.Treeview(dlg, columns=("pkg", "label", "files", "always"), show="headings", height=12)
         for c, w in (("pkg", 320), ("label", 150), ("files", 55), ("always", 60)):
-            tree.heading(c, text=c.upper()); tree.column(c, width=w, anchor="w")
-        tree.column("always", anchor="center")
+            tree.heading(c, text=c.upper()); tree.column(c, width=w)
+        THEME.center_columns(tree)
         tree.pack(fill="both", expand=True, padx=8)
         tree.bind("<Double-1>", lambda e: toggle_always())   # double-click a row toggles Always-install
 
@@ -1873,10 +1892,11 @@ class App:
             self._run_bg(work, label=f"Installing {pkg} → {len(serials)} device(s)")
 
         # `bar` was created + bottom-pinned above (before the tree) so it can't be clipped; fill it now.
+        # ttk.Button (not tk.Button) so these inherit the themed thin-black-border look like everywhere else.
         for txt, cmd in (("Add APK…", add), ("Update…", update), ("Toggle Always", toggle_always),
                          ("Install → device(s)", install_to_devices), ("Remove", remove),
                          ("Close", dlg.destroy)):
-            tk.Button(bar, text=txt, command=cmd).pack(side="left", padx=4)
+            ttk.Button(bar, text=txt, command=cmd).pack(side="left", padx=4)
         refresh()
         D.size_to_content(dlg, self.win, 720, 420)   # open tall enough + on-screen; buttons never clipped
 
@@ -1951,8 +1971,9 @@ class App:
                                log=self.log, profile_map=pm, force_serials=force,
                                on_critical=self._on_flash_critical)
         if step == "warmup":
+            dwell, settle = getattr(self, "_warmup_opts", None) or (None, None)  # from the ③ modal; None → config
             return PV.warmup_all(mk_adb, devs, root=self.profiles_root, log=self.log, profile_map=pm,
-                                 parallel=True)
+                                 parallel=True, dwell=dwell, settle=settle)
         raise ValueError(f"unknown step {step!r}")
 
     def _run_chain_core(self, steps, serials, save_name):
