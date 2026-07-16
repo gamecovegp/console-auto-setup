@@ -406,16 +406,19 @@ def _strip_slot(part):
 
 def logic_check(firmware, identity_dict):
     """Validate a (suggested or chosen) firmware against the LIVE device. Returns (ok, [warnings]).
-    A warned firmware is still selectable — the operator just sees why (brick-guard)."""
+    A warned firmware is still selectable — the operator just sees why (brick-guard).
+
+    NOTE: there is deliberately NO 'firmware device != device' warning. A firmware's human device label
+    ('Odin2 (kalama)') never equals a live ro.product.device codename, so that warning fired on every
+    legitimate cross-brand match (the RP6-on-the-Odin-2-build pair is PROVEN to boot) — always true,
+    never meaningful, and the reason operators learned to click through warnings. Chip compatibility is
+    enforced by gate_check() instead, which rejects rather than warns.
+    """
     warns = []
     live_base = _strip_slot(identity_dict.get("flash_target") or "")
     if firmware.flash_target and live_base and firmware.flash_target != live_base:
         warns.append(
             f"firmware expects '{firmware.flash_target}' but device exposes '{live_base}'"
-        )
-    if firmware.device and identity_dict.get("device") and firmware.device != identity_dict["device"]:
-        warns.append(
-            f"firmware device '{firmware.device}' != device '{identity_dict['device']}'"
         )
     prefixes = firmware.match_rules().get("serial_prefix") or []
     serial = identity_dict.get("serial") or ""

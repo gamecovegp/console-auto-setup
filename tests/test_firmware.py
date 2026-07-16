@@ -479,11 +479,24 @@ class TestLogicCheck(unittest.TestCase):
         self.assertFalse(ok)
         self.assertTrue(any("init_boot" in w and "boot" in w for w in warns))
 
-    def test_warns_on_serial_and_device_mismatch(self):
+    def test_warns_on_serial_mismatch_only(self):
+        # Was 2 warnings; the device-inequality warning is deleted. A firmware's human label
+        # ('Odin2 (kalama)') never equals a live ro.product.device, so that warning was always true
+        # and never meaningful — which is exactly what trained operators to click through warnings.
         ok, warns = FW.logic_check(self.fw, {"serial": "MQ65x", "device": "Pocket_Max",
                                              "flash_target": "init_boot_b"})
         self.assertFalse(ok)
-        self.assertEqual(len(warns), 2)
+        self.assertEqual(len(warns), 1)
+        self.assertIn("MQ65x", warns[0])
+
+    def test_no_device_inequality_warning_on_proven_cross_brand_pair(self):
+        # RP6 rooted from the Odin 2 build: proven to boot, must be SILENT.
+        fw = make_fw(self.root, "ayn-odin2", device="odin2", flash="init_boot",
+                     match={"device": "odin2", "board_platform": "kalama"})
+        ok, warns = FW.logic_check(fw, {"serial": "RP6x", "device": "RP6",
+                                        "flash_target": "init_boot_a"})
+        self.assertTrue(ok)
+        self.assertEqual(warns, [])
 
 
 # ---------------------------------------------------------------------------
