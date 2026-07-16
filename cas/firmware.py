@@ -464,6 +464,9 @@ def ingest(src, root, firmware_id=None, label=None, match=None, copy=True):
         "storage": info["storage"],
         "flash_target": info["flash_target"],
         "flash_method": info["flash_method"],
+        "board_platform": info["board_platform"],
+        "soc": info["soc"],
+        "android_release": info["android_release"],
         "source": str(src),
     })
 
@@ -479,12 +482,18 @@ def ingest(src, root, firmware_id=None, label=None, match=None, copy=True):
         "current": version,
     })
     # Seed match rules so a freshly-ingested firmware auto-matches immediately: start from the caller's
-    # rules (e.g. serial_prefix for the MQ65/MQ66 split — both report device AIR_X), then fill `device`
-    # from detection if the caller didn't set it. Without this a GUI ingest produced an empty match{} and
+    # rules (e.g. serial_prefix for the MQ65/MQ66 split — both report device AIR_X), then fill from
+    # detection whatever the caller didn't set. Without this a GUI ingest produced an empty match{} and
     # nothing ever auto-matched.
+    #
+    # The gate fields land here too — this is the zero-knowledge operator path: the build self-describes
+    # its chip/android, so adding a NEW chip (e.g. the Odin 3 'sun' build) needs no operator input at
+    # all. A field detection couldn't read stays absent, which makes that gate axis abstain (the core
+    # rule: missing data never rejects, and never promotes).
     m = dict(match) if match else dict(meta.get("match") or {})
-    if info["device"] and not m.get("device"):
-        m["device"] = info["device"]
+    for key in ("device", "board_platform", "soc", "android_release"):
+        if info.get(key) and not m.get(key):
+            m[key] = info[key]
     meta["match"] = m
     meta["history"].append({
         "version": version,

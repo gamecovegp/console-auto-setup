@@ -408,6 +408,32 @@ class TestIngest(unittest.TestCase):
         self.assertEqual(info["soc"], "")
         self.assertEqual(info["android_release"], "")
 
+    def test_ingest_seeds_gate_fields_with_no_caller_input(self):
+        # The zero-knowledge operator path: ingest a build, its chip rules populate themselves.
+        src = fake_build(self.tmp, "odin2-20260507.165105", board_platform="kalama",
+                         soc="SM8550", android="13")
+        fw = FW.ingest(src, self.root, firmware_id="ayn-odin2")
+        r = fw.match_rules()
+        self.assertEqual(r["board_platform"], "kalama")
+        self.assertEqual(r["soc"], "SM8550")
+        self.assertEqual(r["android_release"], "13")
+
+    def test_ingest_undetectable_chip_leaves_entry_legacy_and_does_not_raise(self):
+        src = fake_build(self.tmp, "legacy-20260507.165105", board_platform="", soc="", android="")
+        fw = FW.ingest(src, self.root, firmware_id="legacy-fw")
+        r = fw.match_rules()
+        self.assertNotIn("board_platform", r)
+        self.assertNotIn("android_release", r)
+
+    def test_ingest_does_not_clobber_caller_supplied_match_rules(self):
+        src = fake_build(self.tmp, "odin2b-20260507.165105", board_platform="kalama",
+                         soc="SM8550", android="13")
+        fw = FW.ingest(src, self.root, firmware_id="ayn-odin2b",
+                       match={"serial_prefix": ["AYN"]})
+        r = fw.match_rules()
+        self.assertEqual(r["serial_prefix"], ["AYN"])       # caller's rule survives
+        self.assertEqual(r["board_platform"], "kalama")     # detection fills the rest
+
 
 # ---------------------------------------------------------------------------
 # Task 7 (adapted): resolve() — uses fw-local get/set_device_firmware
