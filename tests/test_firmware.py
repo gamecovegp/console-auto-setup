@@ -423,6 +423,7 @@ class TestIngest(unittest.TestCase):
         fw = FW.ingest(src, self.root, firmware_id="legacy-fw")
         r = fw.match_rules()
         self.assertNotIn("board_platform", r)
+        self.assertNotIn("soc", r)
         self.assertNotIn("android_release", r)
 
     def test_ingest_does_not_clobber_caller_supplied_match_rules(self):
@@ -433,6 +434,30 @@ class TestIngest(unittest.TestCase):
         r = fw.match_rules()
         self.assertEqual(r["serial_prefix"], ["AYN"])       # caller's rule survives
         self.assertEqual(r["board_platform"], "kalama")     # detection fills the rest
+
+    def test_ingest_caller_device_and_chip_rules_take_precedence_over_detection(self):
+        """Mutation test: when caller supplies device/board_platform/soc/android_release that DIFFER from
+        detected values, the caller's values must survive (not be clobbered by detection). This guards
+        against a regression where removing the 'and not m.get(key)' clause would make detection always
+        overwrite the caller — all existing tests would still pass because the test caller never supplies
+        these keys, so caller-precedence would never be exercised."""
+        # Build detects: device=AIR_X, board_platform=kalama, soc=SM8550, android=13
+        src = fake_build(self.tmp, "test-caller-override-20260507.000000",
+                         device="AIR_X", board_platform="kalama", soc="SM8550", android="13")
+        # But caller explicitly passes DIFFERENT values for device and board_platform
+        fw = FW.ingest(src, self.root, firmware_id="test-caller-override",
+                       match={"device": "Pocket_Max", "board_platform": "bengal", "serial_prefix": ["TEST"]})
+        r = fw.match_rules()
+        # Caller's device and board_platform MUST survive (not be overwritten by detection)
+        self.assertEqual(r["device"], "Pocket_Max",
+                        "Caller-supplied device should not be clobbered by detection")
+        self.assertEqual(r["board_platform"], "bengal",
+                        "Caller-supplied board_platform should not be clobbered by detection")
+        # Caller didn't supply soc/android_release, so detection should fill them in
+        self.assertEqual(r["soc"], "SM8550")
+        self.assertEqual(r["android_release"], "13")
+        # Caller's serial_prefix should also survive
+        self.assertEqual(r["serial_prefix"], ["TEST"])
 
 
 # ---------------------------------------------------------------------------
