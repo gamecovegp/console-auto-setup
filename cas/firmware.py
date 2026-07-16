@@ -40,7 +40,10 @@ def _write_json(p, obj):
 
 def identity(adb):
     """One-shot device identity for auto-assign (getprop, no root). Calls adb.slot_suffix()/
-    adb.boot_flash_target() which already exist on Adb."""
+    adb.boot_flash_target() which already exist on Adb.
+
+    board_platform/android_release/bootdevice feed gate_check(). They are best-effort: a device that
+    doesn't report one yields '', which makes that gate axis ABSTAIN rather than reject."""
     g = adb.getprop
     return {
         "serial": adb.serial or g("ro.serialno"),
@@ -48,6 +51,9 @@ def identity(adb):
         "model": g("ro.product.model"),
         "brand": g("ro.product.manufacturer"),
         "soc": g("ro.soc.model"),
+        "board_platform": g("ro.board.platform"),
+        "android_release": g("ro.build.version.release"),
+        "bootdevice": g("ro.boot.bootdevice"),
         "dev_code": g("ro.mangmi.dev.code"),
         "first_api": g("ro.product.first_api_level"),
         "slot": adb.slot_suffix(),

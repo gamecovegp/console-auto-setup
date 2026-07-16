@@ -61,6 +61,8 @@ AIRX_PROPS = {
     "ro.product.model": "AIR X", "ro.product.manufacturer": "MANGMI",
     "ro.soc.model": "SM6115", "ro.mangmi.dev.code": "MQ66",
     "ro.product.first_api_level": "33", "ro.boot.slot_suffix": "_b",
+    "ro.board.platform": "bengal", "ro.build.version.release": "14",
+    "ro.boot.bootdevice": "4804000.sdhci",
 }
 
 
@@ -100,6 +102,20 @@ class TestIdentity(unittest.TestCase):
         self.assertEqual(idn["device"], "AIR_X")
         self.assertEqual(idn["soc"], "SM6115")
         self.assertEqual(idn["flash_target"], "init_boot_b")
+
+    def test_identity_carries_gate_props(self):
+        idn = FW.identity(Adb(runner=IdRunner(AIRX_PROPS)))
+        self.assertEqual(idn["board_platform"], "bengal")
+        self.assertEqual(idn["android_release"], "14")
+        self.assertEqual(idn["bootdevice"], "4804000.sdhci")
+        self.assertEqual(idn["soc"], "SM6115")      # unchanged
+
+    def test_identity_gate_props_absent_are_empty_not_missing(self):
+        # A device that doesn't report them must yield '' (abstain), never a KeyError.
+        idn = FW.identity(Adb(runner=IdRunner({"ro.serialno": "X"})))
+        self.assertEqual(idn["board_platform"], "")
+        self.assertEqual(idn["android_release"], "")
+        self.assertEqual(idn["bootdevice"], "")
 
 
 # ---------------------------------------------------------------------------
