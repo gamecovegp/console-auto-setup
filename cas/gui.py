@@ -1003,7 +1003,9 @@ class App:
             prof = P.Profile(P.pathlib.Path(self.profiles_root) / name)
             gold = prof.has_golden()
             mm = prof.meta.get("model_match")
-            mm_ok = None if not (mm and model) else bool(re.search(mm, model))
+            # same test Root/Lock apply (P.model_matches) — a banner that disagrees with the guard either
+            # cries wolf or hides a real refusal.
+            mm_ok = None if not (mm and model) else P.model_matches(mm, model)
         except Exception:
             return None, None
         return gold, mm_ok

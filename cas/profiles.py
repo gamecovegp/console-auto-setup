@@ -495,6 +495,32 @@ def _is_capacity(tok):
     return n is not None and n >= _CAP_MIN_GB
 
 
+def model_matches(model_match, model):
+    """True when a profile's `model_match` fits a device's ro.product.model — the Root/Lock brick guard.
+
+    Two passes:
+      1. the raw regex, unchanged — hand-written patterns ('Odin2.*Mini', 'Retroid Pocket [56]') keep
+         working, including alternation to cover several models with one profile.
+      2. capacity-tolerant token subset: an operator who types the STORAGE TIER into the model
+         ('Retroid Pocket 6 256') still fits a unit reporting plain 'Retroid Pocket 6' — ro.product.model
+         never carries capacity, so a tier in the pattern is a typo, not a different device.
+
+    Only numbers >= _CAP_MIN_GB are dropped as capacity, so a model VERSION stays significant: an RP5
+    pattern never fits an RP6. That mismatch is the wrong-image flash this guard exists to stop.
+    """
+    mm, model = (model_match or "").strip(), (model or "").strip()
+    if not mm or not model:
+        return False                      # no pattern -> caller skips the guard; no model -> refuse (safe)
+    try:
+        if re.search(mm, model):
+            return True
+    except re.error:
+        pass                              # malformed pattern -> fall through to tokens instead of raising
+    want = {t for t in _toks(mm) if not _is_capacity(t)}
+    have = {t for t in _toks(model) if not _is_capacity(t)}
+    return bool(want) and want <= have
+
+
 def parse_sd_gb(sd_desc):
     """GB from an sd_info() string like '9C33-6BBD · 477G', '238G', or '1T'. None if no size is present."""
     m = re.search(r"(\d+(?:\.\d+)?)\s*([TG])", (sd_desc or ""), re.IGNORECASE)

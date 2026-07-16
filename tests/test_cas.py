@@ -826,6 +826,35 @@ class TestProfiles(unittest.TestCase):
             self.assertEqual(P.match_profile("Retroid Pocket 6", t, sd_gb=238).name, "retroid-pocket-6-256")
             self.assertIsNone(P.match_profile("Retroid Pocket 6", t))    # no size -> ambiguous, assign manually
 
+    def test_model_matches_regex_backcompat(self):
+        # hand-written regex patterns keep working exactly as before
+        self.assertTrue(P.model_matches("Odin2 ?Mini", "Odin2 Mini"))
+        self.assertTrue(P.model_matches("Odin2.*Mini", "Odin2 Retro Mini"))
+        self.assertTrue(P.model_matches("Retroid Pocket 6", "Retroid Pocket 6"))
+        self.assertFalse(P.model_matches("Odin2 ?Mini", "Retroid Pocket 6"))
+
+    def test_model_matches_tolerates_capacity_in_pattern(self):
+        # the operator typed the STORAGE TIER into the model — ro.product.model never carries capacity,
+        # so the raw regex can't match. The tier is not model identity: still the same unit.
+        self.assertTrue(P.model_matches("Retroid Pocket 6 256", "Retroid Pocket 6"))
+        self.assertTrue(P.model_matches("Retroid Pocket 6 512", "Retroid Pocket 6"))
+        self.assertTrue(P.model_matches("Ayn Odin 3 256", "Ayn Odin 3"))
+        self.assertTrue(P.model_matches("Mangmi Air X 256", "MANGMI AIR X"))     # case-insensitive tokens
+
+    def test_model_matches_still_refuses_wrong_model(self):
+        # THE BRICK GUARD: a model VERSION is not a capacity (< _CAP_MIN_GB), so it stays significant.
+        # An RP5 profile must never fit an RP6 — that wrong-image flash is what bricked the RP5.
+        self.assertFalse(P.model_matches("Retroid Pocket 5", "Retroid Pocket 6"))
+        self.assertFalse(P.model_matches("Retroid Pocket 5 256", "Retroid Pocket 6"))
+        self.assertFalse(P.model_matches("Ayn Odin 2 256", "Ayn Odin 3"))
+        self.assertFalse(P.model_matches("Odin2 Mini", "Retroid Pocket 6"))
+
+    def test_model_matches_edges(self):
+        self.assertFalse(P.model_matches("Retroid Pocket 6", ""))       # model unknown -> refuse (safe)
+        self.assertFalse(P.model_matches("", "Retroid Pocket 6"))       # no pattern -> caller skips guard
+        self.assertFalse(P.model_matches("256", "Retroid Pocket 6"))    # capacity ONLY -> no model words left
+        self.assertFalse(P.model_matches("Retroid Pocket 6[", ""))      # invalid regex must not raise
+
     def test_golden_presence_and_size(self):
         with tempfile.TemporaryDirectory() as t:
             prof = make_profile(t)                              # writes global.meta + per-app data.tar
@@ -2136,6 +2165,7 @@ class TestSeal(unittest.TestCase):
         a = "\n".join(ra.cmds())
         self.assertIn("development_settings_enabled 0", a)        # dev mode off
         self.assertIn("pm uninstall com.topjohnwu.magisk", a)     # Magisk removed
+        self.assertIn("oem_unlock_allowed 0", a)                  # OEM-unlock toggle back off (Root's inverse)
         self.assertIn("adb_enabled 0", a)                         # USB debugging off (last)
         self.assertIn("flash init_boot_a", "\n".join(fb.cmds()))  # un-rooted via stock init_boot
         # USB-debugging-off must be the LAST adb command issued

@@ -1492,7 +1492,7 @@ def root(adb, fastboot, stock_init_boot, magisk_apk=None, log=print, wait=True, 
     # (0) model cross-check — patching/flashing another model's init_boot bricks boot. getprop needs no root.
     if model_match:
         model = adb.getprop("ro.product.model")
-        if not re.search(model_match, model):
+        if not P.model_matches(model_match, model):
             if not force:
                 log(f"REFUSING: device model '{model}' does not match profile (model_match='{model_match}'). "
                     "Wrong-model init_boot would brick the unit. Pick the matching profile, or force.")
@@ -1672,7 +1672,7 @@ def seal(adb, fastboot, stock_init_boot, log=print, wait=True, model_match=None,
     # (1) model cross-check — flashing another model's init_boot bricks boot.
     if model_match:
         model = adb.getprop("ro.product.model")
-        if not re.search(model_match, model):
+        if not P.model_matches(model_match, model):
             if not force:
                 log(f"REFUSING: device model '{model}' does not match profile (model_match='{model_match}'). "
                     "Wrong-model init_boot would brick the unit. Pick the matching profile, or force.")
@@ -1722,13 +1722,23 @@ def seal(adb, fastboot, stock_init_boot, log=print, wait=True, model_match=None,
                 "adb left enabled so you can retry.")
             return False
         log("confirmed un-rooted.")
-    # (4) LAST retail lockdown: HIDE Developer Options, THEN disable USB debugging (which drops adb). These
-    # run as the shell uid (has WRITE_SECURE_SETTINGS) so they work WITHOUT root and even post-un-root — a
-    # flaky su grant can never leave Developer Options visible on a shipped unit. One call, adb_enabled last.
+    # (4) LAST retail lockdown — the inverse of what Root/the operator opened: HIDE Developer Options, turn
+    # the OEM-unlocking toggle back OFF, THEN disable USB debugging (which drops adb). These run as the shell
+    # uid (has WRITE_SECURE_SETTINGS) so they work WITHOUT root and even post-un-root — a flaky su grant can
+    # never leave Developer Options visible on a shipped unit. One call, adb_enabled LAST.
+    # `;` (never `&&`) so a rejected setting can't stop adb_enabled from running.
+    # SCOPE: this clears the toggle the operator flipped to unlock; it does NOT re-lock the bootloader. Root
+    # never unlocked it (unlocked is a PRECONDITION — these units ship unlocked), so re-locking would close
+    # something we never opened, and on Qualcomm it mandates a userdata wipe that would erase the golden.
+    # The authoritative unlock-ability lives in the persistent data block (frp), which the shell uid cannot
+    # write — so this removes the affordance, it is not a bootloader lock. EDL (9008) is PBL-level and has
+    # no software lock at all, by design.
     adb.shell("settings put global development_settings_enabled 0; "
               "settings put secure development_settings_enabled 0; "
+              "settings put global oem_unlock_allowed 0; "
               "settings put global adb_enabled 0")
-    log("hid Developer options + disabled USB debugging. Device is SEALED — adb will now disconnect. Done.")
+    log("hid Developer options + cleared the OEM-unlock toggle + disabled USB debugging. Device is SEALED "
+        "— adb will now disconnect. Done.")
     return True
 
 
