@@ -20,6 +20,7 @@ from tkinter import ttk, scrolledtext, messagebox, simpledialog, filedialog
 from . import APPDIR, BUNDLE, __version__, updater
 from . import profiles as P
 from . import provision as PV
+from . import recovery as RC
 from . import firmware as FW
 from . import warnings as WARN
 from . import dialogs as D
@@ -202,6 +203,13 @@ def _state_cell(state):
     return f"● {state or '?'}"
 
 
+def _state_cell_hinted(state, hint):
+    """The state-column text, with a transient failure hint appended (state/red row already conveys
+    trouble; this says WHAT TO DO). No hint -> identical to _state_cell."""
+    base = _state_cell(state)
+    return f"{base}  ⚠ {hint}" if hint else base
+
+
 class App:
     def __init__(self, win, adb_bin="adb", fb_bin="fastboot"):
         self.win = win
@@ -215,6 +223,8 @@ class App:
         self._t0 = 0.0
         self._last_line = ""        # most recent log line — shown live in the status bar
         self._retry_ctx = None      # (message, retry_callable) armed by an op that had failures
+        self._last_fail = {}        # {serial: row_hint} — transient "needs attention" per device row
+        self._last_recs = {}        # {serial: Recovery} collected across a CHAIN run's stages
         self._icon_refs = []        # live PhotoImage refs so Tk won't GC the app-pick modal's icons
         self.assigned = {}          # serial -> profile name (per-device; remembered across launches)
         self.assigned_manual = set()  # serials whose profile was set by hand (deliberate; allows force)
@@ -707,6 +717,7 @@ class App:
         self._t0 = time.monotonic()
         self.cancel_event = threading.Event()       # this op's abort signal (set by the Cancel button)
         self._flash_critical = False                # True only during the init_boot WRITE (brick-warning gate)
+        self._last_recs = {}                        # chain stages stash per-device guidance here
         self.log(f"⏱ starting: {label}")
         for b in self.btns:
             b.configure(state="disabled")
@@ -747,6 +758,15 @@ class App:
             except tk.TclError:
                 pass
             self._report(self._action, result_box.get("r"))
+            # Recovery guidance: what state each failed unit is in + what to do. Single-stage runs carry it
+            # on the result dict; a CHAIN folds survivors (losing the dict), so its stages stash into
+            # _last_recs. Surfaced BEFORE the retry prompt so the operator reads the fix, then chooses.
+            try:
+                recs = self._collect_recs(result_box.get("r"))
+                recs.update({s: r for s, r in getattr(self, "_last_recs", {}).items() if r is not None})
+                self._surface_recovery(self._action, recs)
+            except Exception as e:      # guidance must never wedge done() (controls are already restored)
+                self.log(f"(could not surface recovery guidance: {e})")
             # if the op armed a retry (some devices failed), offer to re-run JUST those now that we're idle.
             ctx = self._retry_ctx
             self._retry_ctx = None
@@ -785,6 +805,25 @@ class App:
         """Called from a worker thread by the flash backends around the partition write; marshal the flag to
         the UI thread so _cancel_op knows whether to show the brick-warning before aborting."""
         self.win.after(0, lambda a=bool(active): setattr(self, "_flash_critical", a))
+
+    @staticmethod
+    def _collect_recs(result):
+        """{serial: Recovery|None} from a batch result dict — the 3rd tuple element where the worker
+        attached recovery guidance. A non-dict result (a bare bool from a single-device op) -> {}."""
+        if not isinstance(result, dict):
+            return {}
+        return {s: (v[2] if isinstance(v, (tuple, list)) and len(v) > 2 else None)
+                for s, v in result.items()}
+
+    def _surface_recovery(self, action, recs):
+        """One end-of-run popup naming every device that needs attention + what to do, and stash the
+        transient per-row hints _populate_devices renders. SEALED_OK (Lock's by-design adb drop) is
+        needs_attention=False, so a successfully sealed unit never raises this."""
+        self._last_fail = {s: r.row_hint() for s, r in recs.items()
+                           if r is not None and r.needs_attention}
+        text = RC.summary_popup(recs, action)
+        if text:
+            messagebox.showwarning(f"CAS — {action}: devices need attention", text)
 
     def _report(self, label, result):
         """Post-action mini-report in the log — a clear pass / skip / fail summary for easy debugging.
@@ -924,9 +963,13 @@ class App:
                 self._last_auto[serial] = auto
                 self.assigned[serial] = auto
             tags = ("odd" if i % 2 else "even", "st_" + (state or "other"))
+            # A failed unit carries its recovery hint on the row until it reads healthy again.
+            if state == "device":
+                self._last_fail.pop(serial, None)          # back online -> the hint is stale, drop it
+            hint = self._last_fail.get(serial)
             self.dev_tree.insert("", "end", iid=serial, text=serial,
                                  values=(model, sd, _profile_cell(shown, manual),
-                                         self._fw_cell(serial), _state_cell(state)),
+                                         self._fw_cell(serial), _state_cell_hinted(state, hint)),
                                  tags=tags)
             sn = snaps.get(serial)
             if sn is not None and state == "device":
@@ -1976,6 +2019,11 @@ class App:
                 # Lock already wait for their own reboots internally.
                 wb = step == "download" and bool(steps[i + 1:])
                 res = self._stage(step, survivors, pm, force, cev, wait_boot=wb)
+                for s in survivors:                        # keep each dropped unit's guidance for done()
+                    st = res.get(s)
+                    if isinstance(st, (tuple, list)) and st and st[0] in ("fail", "error") \
+                            and len(st) > 2 and st[2] is not None:
+                        self._last_recs[s] = st[2]
                 survivors = [s for s in survivors if res.get(s, ("error",))[0] not in ("fail", "error")]
             self.log(f"chain: after {step} — {len(survivors)}/{len(serials)} still ok")
         return survivors

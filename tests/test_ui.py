@@ -1302,3 +1302,32 @@ class TestButtonOutline(unittest.TestCase):
             self.assertEqual(theme.LIGHT["outline"], "#111827")
         finally:
             root.destroy()
+
+
+class TestRecoverySurfacing(unittest.TestCase):
+    """The recovery popup + device-row hint decisions — pure helpers, no display."""
+
+    def test_collect_recs_pulls_the_third_tuple_element(self):
+        from cas.gui import App
+        from cas import recovery as R
+        rec = R.advise("root", "edl_flash", R.DeviceMode.EDL_9008)
+        result = {"A": ("fail", "boom", rec), "B": ("ok", "prof"), "C": ("fail", "x")}
+        got = App._collect_recs(result)
+        self.assertIs(got["A"], rec)          # A carries a Recovery
+        self.assertIsNone(got.get("B"))       # ok device -> no rec
+        self.assertIsNone(got.get("C"))       # 2-tuple fail -> no rec (None)
+
+    def test_collect_recs_tolerates_non_dict(self):
+        from cas.gui import App
+        self.assertEqual(App._collect_recs(True), {})
+        self.assertEqual(App._collect_recs(None), {})
+
+    def test_state_cell_hinted_appends_the_hint(self):
+        from cas.gui import _state_cell_hinted
+        cell = _state_cell_hinted("offline", "EDL / 9008 — Hold Power ~12s")
+        self.assertIn("offline", cell)
+        self.assertIn("EDL", cell)
+
+    def test_state_cell_hinted_without_hint_matches_plain(self):
+        from cas.gui import _state_cell_hinted, _state_cell
+        self.assertEqual(_state_cell_hinted("device", None), _state_cell("device"))
