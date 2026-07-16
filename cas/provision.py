@@ -16,7 +16,8 @@ import concurrent.futures
 
 from . import BUNDLE, DATA
 from . import profiles as P
-from .adb import boot_tick_msg
+from . import recovery as RC
+from .adb import boot_tick_msg, is_cancelled
 
 # RetroArch cores: resolved at provision time via config.cores_dir() (library_root()/retroarch-cores,
 # falling back to APPDIR/data) — NOT a fixed APPDIR/data path, so the set follows the CAS library drive.
@@ -303,25 +304,31 @@ def _push_dir(adb, push, src, dev_parent, log, arcname=None):
             pass
 
 
+def _free_space_note(adb, path):
+    """Best-effort 'Avail' line from `df -h <path>` — attached to a pack/pull failure log so the operator
+    sees WHY (a near-full /data is the usual culprit). Empty string if df is unavailable/unreadable."""
+    try:
+        rc, out, _ = adb.su(f"df -h {path}", timeout=30)
+        if rc == 0 and out.strip():
+            return out.strip().splitlines()[-1]
+    except Exception:
+        return ""
+    return ""
+
+
 def _pull_dir(adb, dev_dir, pc_dir, log):
     """Pull a DEVICE directory tree to `pc_dir` on the PC as ONE tar — the mirror of _push_dir, so Save is
     OS-independent too. A plain `adb pull <dir>` can silently drop files on Windows the same way
     `adb push <dir>` does, which would let a Windows bench write an INCOMPLETE golden (and the metas that
-    survive would pass the completeness check). So we pack the tree on the device with toybox `tar` — as
-    root, since the capture output is root-owned, then world-read the archive so the shell-side pull can
-    fetch it — pull that SINGLE file (reliable on every OS, with the usual '[ NN%]' progress), and unpack
-    it on the PC with stdlib tarfile (no PC-side `tar` binary needed). `pc_dir` ends up holding the tree's
-    CONTENTS. Returns True on success; removes the device-side archive on every path."""
-    dev_tar = f"{dev_dir}.tar"
-    # Pack as root (reads every file regardless of mode); chmod 644 so the shell `adb pull` can read it.
-    # Sentinel-confirmed (adb shell/su exit codes aren't reliable across devices — same as _push_dir).
-    rc, out, _ = adb.su(f"cd {dev_dir} && tar -cf {dev_tar} . && chmod 644 {dev_tar} && echo CAS_TOK")
-    if not (rc == 0 and "CAS_TOK" in out):
-        log(f"on-device pack of {dev_dir} failed (rc={rc}) — aborting.")
-        adb.su(f"rm -f {dev_tar}")
-        return False
-    total_kb = 0                                                # for the '[ NN%]' pull bar
-    rc_du, out_du, _ = adb.su(f"du -sk {dev_tar}", timeout=120)
+    survive would pass the completeness check). So we pack the tree with toybox `tar` — as root, since the
+    capture output is root-owned — and STREAM it straight to the PC via `adb exec-out` (raw binary stdout,
+    reliable on every OS, with the usual '[ NN%]' progress), then unpack it on the PC with stdlib tarfile
+    (no PC-side `tar` binary needed). Streaming also means NO device-side staging archive (the old path
+    wrote a full second copy of the golden onto the same partition first). See Adb.su_pack_to_file for the
+    `tar -C` / no-`&&` rule that fixed 'on-device pack failed (rc=1)'. `pc_dir` ends up holding the tree's
+    CONTENTS. Returns True on success."""
+    total_kb = 0                                                # for the '[ NN%]' pack bar (source ~= tar size)
+    rc_du, out_du, _ = adb.su(f"du -sk {dev_dir}", timeout=120)
     if rc_du == 0:
         try:
             total_kb = int(out_du.split()[0])
@@ -333,10 +340,17 @@ def _pull_dir(adb, dev_dir, pc_dir, log):
     os.close(fd)
     tmp = pathlib.Path(tmp)
     try:
-        ok = adb.pull_with_progress(dev_tar, tmp, total_kb, log)  # ONE file, not a tree
-        adb.su(f"rm -f {dev_tar}")
-        if not ok:
-            log("pull of the payload archive failed — aborting.")
+        rc, err = adb.su_pack_to_file(dev_dir, tmp, total_kb, log)  # tar -cf - . | -> PC file (no staging)
+        if is_cancelled(rc):
+            log("pack+pull cancelled.")
+            return False
+        if rc != 0:
+            log(f"on-device pack+pull of {dev_dir} failed (rc={rc}) — aborting.")
+            if err:
+                log(f"  device said: {err.splitlines()[-1]}")   # e.g. 'tar: write: No space left on device'
+            free = _free_space_note(adb, dev_dir)
+            if free:
+                log(f"  free space ({dev_dir}): {free}")
             return False
         try:
             with tarfile.open(str(tmp), "r") as tar:
@@ -758,6 +772,20 @@ def patch_init_boot_on_device(adb, stock_init_boot, dest, log=print):
     return True
 
 
+def _fail_with_recovery(operation, phase, adb, fb, status, detail, log):
+    """Probe the device, build recovery guidance, log it live, and return the (status, detail, Recovery)
+    3-tuple the GUI surfaces. Never raises — a probe error degrades to no guidance. `fb` may be None
+    (Download/Warm-up don't flash; probe_mode tolerates it)."""
+    try:
+        mode = RC.probe_mode(adb, fb)
+        rec = RC.advise(operation, phase, mode)
+        log(rec.log_block())
+    except Exception as e:                       # guidance is best-effort; never mask the real failure
+        log(f"(recovery hint unavailable: {e})")
+        rec = None
+    return (status, detail, rec)
+
+
 def provision_all(make_adb, devices, root="profiles", log=print, profile=None, profile_map=None,
                   parallel=True, es_media_src=None, wait_boot=False):
     """Batch DOWNLOAD: provision every connected 'device'-state unit, in PARALLEL by default (all units
@@ -769,6 +797,7 @@ def provision_all(make_adb, devices, root="profiles", log=print, profile=None, p
         if state != "device":
             log(f"[{serial}] skip (state={state})")
             return ("skip", state)
+        adb = fb = None                       # bound before the try so the except handler can probe safely
         try:
             adb = make_adb(serial)
             if adb.cancel is not None and adb.cancel.is_set():
@@ -801,17 +830,19 @@ def provision_all(make_adb, devices, root="profiles", log=print, profile=None, p
                 if not adb.wait_boot(on_tick=lambda s, st: _wlog(boot_tick_msg(s, st))):
                     if adb.cancel is not None and adb.cancel.is_set():
                         return ("cancelled", prof.name)
-                    return ("fail", "did not boot back after the Download reboot (Lock skipped)")
+                    return _fail_with_recovery("download", "reboot", adb, None, "fail",
+                                               "did not boot back after the Download reboot (Lock skipped)", _wlog)
             if ok:
                 return ("ok", prof.name)
             if adb.cancel is not None and adb.cancel.is_set():
                 return ("cancelled", prof.name)            # operator cancelled -> ⏹, not a ❌ failure
             # The last line provision() logged before bailing IS the reason (e.g. 'no root…',
             # 'restore FAILED…'); surface it so the report says WHY, not just which profile.
-            return ("fail", msgs[-1] if msgs else prof.name)
+            return _fail_with_recovery("download", "push", adb, None, "fail",
+                                       msgs[-1] if msgs else prof.name, _wlog)
         except Exception as e:  # isolate: one device fault must not abort the whole batch
             log(f"[{serial}] ERROR: {e}")
-            return ("error", str(e))
+            return _fail_with_recovery("download", "", adb, None, "error", str(e), log)
     t0 = time.monotonic()
     results = _each_device(devices, worker, parallel)
     _log_download_run(root, results, time.monotonic() - t0, log)   # whole-run record -> the library's history
@@ -1051,6 +1082,7 @@ def warmup_all(make_adb, devices, root="profiles", log=print, profile=None, prof
         if state != "device":
             log(f"[{serial}] skip (state={state})")
             return ("skip", state)
+        adb = fb = None                       # bound before the try so the except handler can probe safely
         try:
             adb = make_adb(serial)
             if adb.cancel is not None and adb.cancel.is_set():
@@ -1086,10 +1118,11 @@ def warmup_all(make_adb, devices, root="profiles", log=print, profile=None, prof
             # Lock seal an un-warmed unit and report it GREEN — the exact defect this step exists to
             # remove. A fail drops the unit before Lock. A red ❌ on the master is a cosmetic cost; a
             # silently un-warmed customer unit is not, so the misread must land on the fail-SAFE side.
-            return ("fail", msgs[-1] if msgs else prof.name)
+            return _fail_with_recovery("warmup", "launch", adb, None, "fail",
+                                       msgs[-1] if msgs else prof.name, _wlog)
         except Exception as e:                  # isolate: one device fault must not abort the whole batch
             log(f"[{serial}] ERROR: {e}")
-            return ("error", str(e))
+            return _fail_with_recovery("warmup", "", adb, None, "error", str(e), log)
     results = _each_device(devices, worker, parallel)
     log_run(root, "warmup", results, log)                  # per-device pass/fail (+ reason) -> run history
     return results
@@ -1158,7 +1191,9 @@ def _log_download_run(root, results, elapsed, log=print):
     run's TOTAL length (bytes + seconds) and every device + its profile."""
     import datetime
     devs, total = [], 0
-    for serial, (status, detail) in results.items():
+    for serial, res in results.items():
+        status = res[0] if isinstance(res, (tuple, list)) and res else res
+        detail = res[1] if isinstance(res, (tuple, list)) and len(res) > 1 else ""
         e = {"serial": serial, "status": status}
         if status == "ok":
             e["profile"] = detail
@@ -1712,6 +1747,7 @@ def root_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
         if state != "device":
             log(f"[{serial}] skip (state={state})")
             return ("skip", state)
+        adb = fb = None                       # bound before the try so the except handler can probe safely
         try:
             adb = make_adb(serial)
             if adb.cancel is not None and adb.cancel.is_set():
@@ -1742,6 +1778,7 @@ def root_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
             # and — for EDL units whose bootloader fastboot can't write (e.g. MANGMI) — the Firehose flasher.
             # Fail-safe: any firmware-lookup error → fall back to the fastboot path + profile/default stock.
             flasher = None
+            phase = "fastboot_flash"          # coarse recovery hint; the EDL branch below flips it
             try:
                 from . import firmware as FW
                 idn = FW.identity(adb)
@@ -1759,6 +1796,7 @@ def root_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
                     if sb:
                         stock_path = str(sb)            # the unit's own init_boot from its firmware build
                     if fw.flash_method == "edl":
+                        phase = "edl_flash"
                         flasher, reason = flasher_for_firmware(fw, fb, adb.slot_suffix(),
                                                                version=fwres.get("version"),
                                                                on_critical=on_critical)
@@ -1781,10 +1819,13 @@ def root_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
                       flasher=flasher)
             if adb.cancel is not None and adb.cancel.is_set():
                 return ("cancelled", prof.name)
-            return ("ok", prof.name) if ok else ("fail", msgs[-1] if msgs else prof.name)
+            if ok:
+                return ("ok", prof.name)
+            return _fail_with_recovery("root", phase, adb, fb, "fail",
+                                       msgs[-1] if msgs else prof.name, _wlog)
         except Exception as e:
             log(f"[{serial}] ERROR: {e}")
-            return ("error", str(e))
+            return _fail_with_recovery("root", "", adb, fb, "error", str(e), log)
     results = _each_device(devices, worker, parallel)
     log_run(profiles_root, "root", results, log)           # per-device pass/fail (+ reason) -> run history
     return results
@@ -1804,6 +1845,7 @@ def seal_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
         if state != "device":
             log(f"[{serial}] skip (state={state})")
             return ("skip", state)
+        adb = fb = None                       # bound before the try so the except handler can probe safely
         try:
             adb = make_adb(serial)
             if adb.cancel is not None and adb.cancel.is_set():
@@ -1835,6 +1877,7 @@ def seal_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
             # and — for EDL units whose bootloader fastboot can't write (e.g. MANGMI) — the Firehose flasher.
             # Fail-safe: any firmware-lookup error → fall back to the fastboot path + profile/default stock.
             flasher = None
+            phase = "fastboot_flash"          # coarse recovery hint; the EDL branch below flips it
             try:
                 from . import firmware as FW
                 idn = FW.identity(adb)
@@ -1852,6 +1895,7 @@ def seal_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
                     if sb:
                         stock_path = str(sb)
                     if fw.flash_method == "edl":
+                        phase = "edl_flash"
                         flasher, reason = flasher_for_firmware(fw, fb, adb.slot_suffix(),
                                                                version=fwres.get("version"),
                                                                on_critical=on_critical)
@@ -1873,10 +1917,18 @@ def seal_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
                       flasher=flasher)
             if adb.cancel is not None and adb.cancel.is_set():
                 return ("cancelled", prof.name)
-            return ("ok", prof.name) if ok else ("fail", msgs[-1] if msgs else prof.name)
+            if ok:
+                return ("ok", prof.name)
+            if any("SEALED" in m for m in msgs):
+                # seal() logged its completion marker, then adb dropped BY DESIGN — this is success, not a
+                # failure; never raise the attention popup for a unit that actually sealed.
+                rec = RC.advise("lock", "done", RC.DeviceMode.SEALED_OK)
+                return ("ok", "sealed (adb dropped after the seal completed)", rec)
+            return _fail_with_recovery("lock", phase, adb, fb, "fail",
+                                       msgs[-1] if msgs else prof.name, _wlog)
         except Exception as e:
             log(f"[{serial}] ERROR: {e}")
-            return ("error", str(e))
+            return _fail_with_recovery("lock", "", adb, fb, "error", str(e), log)
     results = _each_device(devices, worker, parallel)
     log_run(profiles_root, "lock", results, log)           # per-device pass/fail (+ reason) -> run history
     return results

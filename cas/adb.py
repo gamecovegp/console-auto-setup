@@ -306,6 +306,71 @@ class Adb:
             if finished:
                 return rc == 0
 
+    def su_pack_to_file(self, dev_dir, dst, total_kb, on_line, poll=3.0):
+        """Pack a DEVICE directory tree as root and stream the tar STRAIGHT to local file `dst`.
+
+        `tar -C <dir>`, NEVER `cd <dir> && tar` — that `&&` is what broke Save ('on-device pack failed
+        (rc=1)'). adb SPACE-JOINS the argv after `shell`/`exec-out` and the DEVICE's shell parses the line
+        first, so `su -c cd DIR && tar …` ran only the `cd` under su (in su's own subshell — so it moved
+        nothing) and then ran `tar` as the unprivileged SHELL user from adb's CWD `/`: it archived the
+        filesystem ROOT until it hit '/sys/...: Permission denied' -> 'short read' -> rc 1. Keep this
+        command a SINGLE command with no shell metacharacters (&&, ||, ;, quotes) so it survives the
+        space-joining intact — same rule as SD_LS at the top of this file.
+
+        Streaming also means NO device-side staging archive (the old path wrote a full second copy of the
+        golden onto the same partition first): zero extra device space, single pass. `adb exec-out` (not
+        `shell`) gives a raw binary stdout — no PTY, no LF->CRLF on Windows — so the tar lands byte-intact
+        on every OS. Progress: adb is silent on a piped multi-GB transfer, so we emit synthetic '[ NN%]'
+        lines by polling `dst`'s growing size (same bar cas/gui.py parses). `total_kb` is the device-side
+        source size (du -sk); 0/unknown -> MB-only heartbeat. Returns (rc, err): rc 0 on success; `err`
+        carries the device stderr so a failure says WHY (that stderr is what identified this bug — it used
+        to be discarded). Honors cancel. An injected (test) runner has no real process to poll, so it falls
+        back to one blocking exec-out call and writes the runner's stdout bytes to `dst`."""
+        cmd = f"tar -C {dev_dir} -cf - ."             # '-' = stdout: stream, never stage a device-side file
+        args = self._base() + ["exec-out", SU, "-c", cmd]
+        dst = _local(dst)
+        if self.runner is not subprocess_runner:      # test path: no real stream — persist runner stdout
+            rc, out, err = self.runner(args)
+            data = out if isinstance(out, (bytes, bytearray)) else (out or "").encode("latin-1", "ignore")
+            try:
+                pathlib.Path(dst).write_bytes(bytes(data))
+            except OSError:
+                pass
+            return rc, (err or "")
+        import tempfile
+        total_kb = int(total_kb or 0)
+        errf = tempfile.TemporaryFile(mode="w+b")     # stderr to a FILE (not a pipe) — no deadlock, keeps WHY
+        try:
+            with open(dst, "wb") as outf:             # raw bytes: the child (adb) writes the tar here
+                p = subprocess.Popen(args, stdout=outf, stderr=errf, creationflags=_NO_WINDOW)
+            t0 = time.monotonic()
+            last_pct, last_emit = -1, 0.0
+            while True:
+                try:
+                    rc, finished = p.wait(timeout=poll), True
+                except subprocess.TimeoutExpired:
+                    rc, finished = None, False
+                if not finished and self.cancel is not None and self.cancel.is_set():
+                    p.kill()
+                    on_line("⏹ cancelled")
+                    return CANCELLED, "cancelled"
+                got_kb = _dir_size_kb(dst)
+                now = time.monotonic()
+                rate = (got_kb / 1024.0) / max(0.001, now - t0)          # MB/s
+                if total_kb > 0:
+                    pct = 100 if finished else min(99, got_kb * 100 // total_kb)
+                    if finished or pct != last_pct or now - last_emit >= 10:
+                        on_line(f"[ {pct}%] packed {got_kb // 1024} / {total_kb // 1024} MB ({rate:.1f} MB/s)")
+                        last_pct, last_emit = pct, now
+                elif finished or now - last_emit >= 5:                   # unknown total: MB + rate heartbeat
+                    on_line(f"packed {got_kb // 1024} MB ({rate:.1f} MB/s)")
+                    last_emit = now
+                if finished:
+                    errf.seek(0)
+                    return rc, errf.read().decode("utf-8", "replace").strip()
+        finally:
+            errf.close()
+
     def push_stream(self, src, dst, on_line):
         """adb push, streaming progress lines to on_line(); True on success."""
         args = self._base() + ["push", _local(src), str(dst)]

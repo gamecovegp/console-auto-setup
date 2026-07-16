@@ -1579,7 +1579,7 @@ class TestProvision(unittest.TestCase):
             prof = make_profile(t)
             res = PV.provision_all(lambda s: Adb(runner=FakeRunner(su_blocked=True)),
                                    [("ABC123", "device")], profile=prof, log=lambda m: None)
-            status, detail = res["ABC123"]
+            status, detail = res["ABC123"][:2]        # failures now carry a 3rd Recovery element
             self.assertEqual(status, "fail")
             self.assertNotEqual(detail, prof.name)
             self.assertIn("no root", detail.lower())
@@ -1658,6 +1658,44 @@ class TestProvision(unittest.TestCase):
                     src = c[c.index("push") + 1]
                     self.assertFalse(os.path.isdir(src),
                                      f"pushed a DIRECTORY (0-byte on Windows): {src}")
+
+    def test_provision_all_failure_carries_recovery_guidance(self):
+        # A failed Download must return a 3-tuple whose 3rd element is a Recovery, and log the DO-NEXT
+        # block live. Deterministic failure: no SD -> provision() refuses early.
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t)
+            logs = []
+            r = FakeRunner(sd=False)                             # provision() refuses: "no SD card"
+            res = PV.provision_all(lambda s: Adb(runner=r), [("MQ66TEST", "device")],
+                                   root=t, profile=prof, log=logs.append, parallel=False)
+            entry = res["MQ66TEST"]
+            self.assertEqual(entry[0], "fail")
+            self.assertTrue(len(entry) > 2, "no Recovery element on the failing result")
+            rec = entry[2]
+            self.assertIsNotNone(rec)
+            self.assertTrue(rec.steps)
+            self.assertIn("DO NEXT", "\n".join(logs))           # the live log carried the guidance block
+
+    def test_seal_all_sealed_then_dropped_is_success_not_attention(self):
+        # Lock's by-design adb disconnect: if seal() logged its "SEALED" completion marker but then
+        # returned False (adb dropped as the unit sealed), that is SUCCESS — never a scary attention popup.
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t)
+
+            def fake_seal(adb, fb, stock, log=print, **k):
+                log("hid Developer options + disabled USB debugging. Device is SEALED — "
+                    "adb will now disconnect. Done.")
+                return False                                    # connection dropped right after the seal
+
+            with patch.object(PV, "seal", fake_seal):
+                r = FakeRunner()
+                res = PV.seal_all(lambda s: Adb(runner=r), lambda s: Fastboot(runner=r),
+                                  [("RP6X", "device")], profiles_root=t, appdir=t, profile=prof,
+                                  log=lambda m: None, parallel=False)
+            entry = res["RP6X"]
+            self.assertEqual(entry[0], "ok")                    # sealed-then-dropped = success
+            self.assertTrue(len(entry) > 2 and entry[2] is not None)
+            self.assertFalse(entry[2].needs_attention)          # excluded from the attention popup
 
     def test_push_es_media_packs_one_archive(self):
         # Universal fast path: pack downloaded_media into ONE tar, push that single file, unpack it on the
@@ -1851,26 +1889,32 @@ class TestProvision(unittest.TestCase):
             self.assertNotIn("capture.sh", "\n".join(r.cmds()))          # aborted before capturing
             self.assertFalse(any("push" in c for c in r.cmds()))         # aborted before pushing scripts
 
-    def test_capture_pulls_one_tar_not_a_directory(self):
-        # UNIVERSAL transfer (Windows + Linux): Save must pull the golden as ONE archive
-        # (device-pack -> single-file pull -> PC-unpack), NEVER `adb pull <dir>` — a directory pull can
-        # silently drop files on Windows (mirror of the "no APK in payload" push bug) and write an
-        # incomplete golden. Guard: every pull target is a .tar FILE, and the unpacked profile is complete.
+    @staticmethod
+    def _golden_tar_bytes():
+        """A minimal but COMPLETE golden payload tar (passes capture_to_pc's global.meta/pkglist check)."""
+        import io, tarfile as _tf
+        buf = io.BytesIO()
+        with _tf.open(fileobj=buf, mode="w") as tar:
+            for nm, data in (("global.meta", b"golden_serial=9C33-6BBD\n"),
+                             ("pkglist.txt", b"com.foo\n"),
+                             ("com.foo/apk/base.apk", b"x"),
+                             ("com.foo/data.tar", b"x")):
+                ti = _tf.TarInfo(nm); ti.size = len(data)
+                tar.addfile(ti, io.BytesIO(data))
+        return buf.getvalue()
+
+    def test_capture_streams_one_tar_never_stages_a_device_copy(self):
+        # UNIVERSAL transfer (Windows + Linux): Save must move the golden as ONE archive that STREAMS off
+        # the device (`adb exec-out ... tar -cf - .` -> PC file -> PC-unpack), NEVER `adb pull <dir>` (a
+        # directory pull can silently drop files on Windows and write an incomplete golden) and NEVER by
+        # staging a second full-size `<dir>.tar` on the device first (that doubled /data usage and ENOSPC-
+        # aborted a big golden with 'on-device pack failed (rc=1)'). Guards: the pack streams to stdout
+        # (`-`), no device-side tar file is created, no directory is pulled, and the profile unpacks whole.
         class _CapRunner(FakeRunner):
             def __call__(self, args, input_text=None, timeout=900):
-                if "pull" in args:                       # materialize a real payload tar at the PC dst
-                    import io, tarfile as _tf
-                    buf = io.BytesIO()
-                    with _tf.open(fileobj=buf, mode="w") as tar:
-                        for nm, data in (("global.meta", b"golden_serial=9C33-6BBD\n"),
-                                         ("pkglist.txt", b"com.foo\n"),
-                                         ("com.foo/apk/base.apk", b"x"),
-                                         ("com.foo/data.tar", b"x")):
-                            ti = _tf.TarInfo(nm); ti.size = len(data)
-                            tar.addfile(ti, io.BytesIO(data))
+                if "exec-out" in args:                   # the pack streams the tar to stdout -> return BYTES
                     self.calls.append(list(args))
-                    pathlib.Path(args[-1]).write_bytes(buf.getvalue())
-                    return 0, "", ""
+                    return 0, TestProvision._golden_tar_bytes(), ""
                 return super().__call__(args, input_text, timeout)
         with tempfile.TemporaryDirectory() as t:
             r = _CapRunner()
@@ -1879,10 +1923,36 @@ class TestProvision(unittest.TestCase):
             payload = pathlib.Path(t) / "newprof" / "golden_root_payload"
             self.assertTrue((payload / "global.meta").exists())              # unpacked on the PC
             self.assertTrue((payload / "com.foo" / "apk" / "base.apk").exists())
-            for c in r.calls:                                                # no DIRECTORY is ever pulled
-                if "pull" in c:
-                    src = c[c.index("pull") + 1]
-                    self.assertTrue(src.endswith(".tar"), f"pulled a non-tar (directory?): {src}")
+            for c in r.calls:
+                self.assertNotIn("pull", c, f"pulled a directory/file instead of streaming: {c}")
+            cmds = r.cmds()
+            self.assertTrue(any("exec-out" in c and "tar -cf - ." in c for c in cmds),
+                            f"pack must stream `tar -cf - .` via exec-out; got {cmds}")
+            # ROOT-CAUSE guard: never write a device-side staging archive (that is the space-doubling bug).
+            for c in cmds:
+                self.assertNotIn(f"tar -cf {PV.TMPCAP}.tar", c,
+                                 f"staged a full second copy on the device (ENOSPC risk): {c}")
+
+    def test_pull_dir_surfaces_reason_and_free_space_on_pack_failure(self):
+        # When the pack+stream fails (e.g. ENOSPC), the abort must say WHY: the device stderr AND the
+        # free-space line — not the old opaque 'failed (rc=1)'. (Regression: stderr used to be discarded.)
+        class _FailRunner(FakeRunner):
+            def __call__(self, args, input_text=None, timeout=900):
+                if "exec-out" in args:                   # tar dies mid-write, no space left
+                    self.calls.append(list(args))
+                    return 1, b"", "tar: ./com.foo/data.tar: write: No space left on device"
+                if "shell" in args and "/debug_ramdisk/su" in args and "df -h" in args[-1]:
+                    self.calls.append(list(args))
+                    return 0, "Filesystem  Size  Used Avail Use% Mounted on\n/dev/dm-5 118G 118G 12M 100% /data", ""
+                return super().__call__(args, input_text, timeout)
+        with tempfile.TemporaryDirectory() as t:
+            r = _FailRunner()
+            msgs = []
+            ok = PV._pull_dir(Adb(runner=r), PV.TMPCAP, pathlib.Path(t) / "in", msgs.append)
+            self.assertFalse(ok)
+            blob = "\n".join(msgs)
+            self.assertIn("No space left on device", blob)                   # the real reason
+            self.assertIn("100%", blob)                                      # the free-space context
 
     def test_seed_default_manifest_populates_empty_placeholder(self):
         # A 'New profile' leaves a placeholder manifest with NO app lines; after the first capture the
@@ -3624,7 +3694,7 @@ class TestWarmup(unittest.TestCase):
             res = PV.warmup_all(lambda s: Adb(serial=s, runner=self.WarmRunner(absent=absent_all)),
                                 [("S1", "device")], log=lambda m: None, profile=prof, parallel=False,
                                 dwell=0, settle=0)
-            status, detail = res["S1"]
+            status, detail = res["S1"][:2]            # failures now carry a 3rd Recovery element
             self.assertEqual(status, "fail")
             self.assertIn("launched 0", detail)
 
@@ -3639,7 +3709,7 @@ class TestWarmup(unittest.TestCase):
             with patch.object(PV, "warmup", fake_warmup):
                 res = PV.warmup_all(lambda s: Adb(serial=s, runner=self.WarmRunner()),
                                     [("S1", "device")], log=lambda m: None, profile=prof, parallel=False)
-            status, detail = res["S1"]
+            status, detail = res["S1"][:2]            # failures now carry a 3rd Recovery element
             self.assertEqual(status, "fail")
             self.assertIn("warmed 0", detail)
 
