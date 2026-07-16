@@ -320,6 +320,10 @@ def gate_check(firmware, identity_dict):
     what makes cross-model reuse work at all (an RP6 on the Odin 2 build scores zero on every soft
     rule). agreed==0 is a vacuous pass: the gate affirmed nothing, so match() still requires a positive
     score, preserving today's behavior for un-backfilled entries.
+
+    CONTRACT: `agreed` is 0 whenever `ok` is False. A rejected firmware affirmed nothing — whatever
+    partial agreement accumulated on earlier axes before the conflicting axis tripped is discarded, so
+    a caller can safely read `agreed > 0` as "compatible" without checking `ok` first.
     """
     r = firmware.match_rules()
     agreed = 0
@@ -328,20 +332,20 @@ def gate_check(firmware, identity_dict):
         want, live = r.get(key), identity_dict.get(key)
         if want and live:
             if want.strip().lower() != live.strip().lower():
-                return (False, f"chip {live} != firmware {want}", agreed)
+                return (False, f"chip {live} != firmware {want}", 0)
             agreed += 1
 
     want_a, live_a = r.get("android_release"), identity_dict.get("android_release")
     if want_a and live_a:
         if _android_major(want_a) != _android_major(live_a):
-            return (False, f"android {live_a} != firmware {want_a}", agreed)
+            return (False, f"android {live_a} != firmware {want_a}", 0)
         agreed += 1
 
     want_s = firmware.storage
     live_s = _storage_from_bootdevice(identity_dict.get("bootdevice"))
     if want_s and live_s:
         if want_s.strip().lower() != live_s:
-            return (False, f"storage {live_s} != firmware {want_s}", agreed)
+            return (False, f"storage {live_s} != firmware {want_s}", 0)
         agreed += 1
 
     return (True, None, agreed)

@@ -307,12 +307,13 @@ class TestGateCheck(unittest.TestCase):
     # --- the motivating case ---------------------------------------------------------------------
     def test_proven_cross_brand_pair_passes_and_is_affirmed(self):
         # RP6 on the Odin 2 build: known to boot. Must PASS and must be AFFIRMED (agreed>0), or
-        # match() would discard it at score 0.
+        # match() would discard it at score 0. All four axes are populated on both sides and agree
+        # (board_platform, soc, android_release, storage) — exact count so a dropped axis is observable.
         fw = self._fw(board_platform="kalama", soc="SM8550", android_release="13")
         ok, reason, agreed = FW.gate_check(fw, self._rp6())
         self.assertTrue(ok)
         self.assertIsNone(reason)
-        self.assertGreater(agreed, 0)
+        self.assertEqual(agreed, 4)
 
     # --- known conflicts reject ------------------------------------------------------------------
     def test_chip_conflict_rejects(self):
@@ -320,24 +321,35 @@ class TestGateCheck(unittest.TestCase):
         ok, reason, agreed = FW.gate_check(fw, self._rp6())      # kalama unit
         self.assertFalse(ok)
         self.assertIn("kalama", reason)
+        self.assertEqual(agreed, 0)
 
     def test_soc_conflict_rejects(self):
-        fw = self._fw(soc="SM8750")
-        ok, reason, _ = FW.gate_check(fw, self._rp6())
+        # board_platform agrees FIRST (same chip-axis loop, same return statement) before soc conflicts
+        # — this is the scenario that would otherwise leak agreed=1 out of a reject.
+        fw = self._fw(board_platform="kalama", soc="SM8750")
+        ok, reason, agreed = FW.gate_check(fw, self._rp6())
         self.assertFalse(ok)
         self.assertIn("SM8550", reason)
+        self.assertEqual(agreed, 0)
 
     def test_android_major_conflict_rejects(self):
+        # board_platform agrees before android conflicts — would otherwise leak agreed=1 out of a reject.
         fw = self._fw(board_platform="kalama", android_release="15")
-        ok, reason, _ = FW.gate_check(fw, self._rp6())
+        ok, reason, agreed = FW.gate_check(fw, self._rp6())
         self.assertFalse(ok)
         self.assertIn("android", reason)
+        self.assertEqual(agreed, 0)
 
     def test_storage_conflict_rejects(self):
-        fw = self._fw(storage="emmc", board_platform="kalama")   # ufs unit
-        ok, reason, _ = FW.gate_check(fw, self._rp6())
+        # board_platform, soc, AND android_release all agree before storage conflicts — this is the
+        # case that reaches agreed=3 on a firmware that would BRICK the unit if agreed weren't zeroed
+        # on every reject path. PINS finding: agreed must be 0 whenever ok is False.
+        fw = self._fw(storage="emmc", board_platform="kalama",  # ufs unit, emmc firmware
+                       soc="SM8550", android_release="13")
+        ok, reason, agreed = FW.gate_check(fw, self._rp6())
         self.assertFalse(ok)
         self.assertIn("storage", reason)
+        self.assertEqual(agreed, 0)
 
     # --- missing data ABSTAINS (never rejects) ----------------------------------------------------
     def test_legacy_entry_with_no_chip_abstains_vacuously(self):
@@ -376,10 +388,23 @@ class TestGateCheck(unittest.TestCase):
         self.assertTrue(ok)
 
     def test_chip_compare_is_case_insensitive(self):
+        # board_platform agrees case-insensitively; storage also agrees (fw default storage="ufs" vs
+        # rp6's ufs bootdevice) -> exact count of 2 so a dropped axis is observable.
         fw = self._fw(board_platform="KALAMA")
         ok, _, agreed = FW.gate_check(fw, self._rp6())
         self.assertTrue(ok)
-        self.assertGreater(agreed, 0)
+        self.assertEqual(agreed, 2)
+
+    # --- per-axis contribution isolation -----------------------------------------------------------
+    def test_chip_only_axis_populated_agreed_is_exactly_one(self):
+        # Backfilled-chip entry: only board_platform is recorded on the firmware (no soc, no
+        # android_release, no storage) — chip agreement alone must be the SOLE contributor to agreed.
+        # This is the production case that keeps a proven cross-brand pair (RP6 on the AYN Odin 2
+        # build) a candidate when storage wasn't captured on ingest.
+        fw = self._fw(storage="", board_platform="kalama")
+        ok, _, agreed = FW.gate_check(fw, self._rp6(bootdevice=""))
+        self.assertTrue(ok)
+        self.assertEqual(agreed, 1)
 
 
 # ---------------------------------------------------------------------------
