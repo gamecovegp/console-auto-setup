@@ -77,17 +77,26 @@ def make_fw(root, fid, device="AIR_X", flash="init_boot", storage="emmc",
 
 
 def fake_build(tmp, name, storage="emmc", with_init_boot=True, device="AIR_X",
-               dev_code="MQ66", os_version="1.1.6"):
-    """A minimal device-firmware tree: <name>/<storage>/{rawprogram1.xml, super_1.img}."""
+               dev_code="MQ66", os_version="1.1.6", board_platform="bengal",
+               soc="SM6115", android="14"):
+    """A minimal device-firmware tree: <name>/<storage>/{rawprogram1.xml, super_1.img}.
+    board_platform/soc/android are written into super_1.img so detect_build() can grep them; pass '' to
+    simulate a build whose props are undetectable (the legacy-entry case)."""
     d = pathlib.Path(tmp) / name
     p = d / storage
     p.mkdir(parents=True)
     parts = '<program label="boot_a" /><program label="init_boot_a" />' if with_init_boot \
         else '<program label="boot_a" /><program label="boot_b" />'
     (p / "rawprogram1.xml").write_text(f"<data>{parts}</data>")
-    (p / "super_1.img").write_text(
-        f"ro.product.system.device={device}\nro.mangmi.dev.code={dev_code}\n"
-        f"ro.mangmi.os.version={os_version}\n")
+    props = (f"ro.product.system.device={device}\nro.mangmi.dev.code={dev_code}\n"
+             f"ro.mangmi.os.version={os_version}\n")
+    if board_platform:
+        props += f"ro.board.platform={board_platform}\n"
+    if soc:
+        props += f"ro.soc.model={soc}\n"
+    if android:
+        props += f"ro.build.version.release={android}\n"
+    (p / "super_1.img").write_text(props)
     return d
 
 
@@ -382,6 +391,22 @@ class TestIngest(unittest.TestCase):
         fw = FW.ingest(src, self.root, firmware_id="fw2", match={"serial_prefix": ["MQ66"]})
         self.assertEqual(fw.match_rules().get("serial_prefix"), ["MQ66"])
         self.assertEqual(fw.match_rules().get("device"), "AIR_X")
+
+    def test_detect_build_extracts_gate_fields(self):
+        src = fake_build(self.tmp, "b-20260507.165105", board_platform="kalama",
+                         soc="SM8550", android="13")
+        info = FW.detect_build(src)
+        self.assertEqual(info["board_platform"], "kalama")
+        self.assertEqual(info["soc"], "SM8550")
+        self.assertEqual(info["android_release"], "13")
+
+    def test_detect_build_undetectable_gate_fields_are_empty(self):
+        # A build whose props don't grep out must yield '' — the legacy entry stays legacy, no raise.
+        src = fake_build(self.tmp, "c-20260507.165105", board_platform="", soc="", android="")
+        info = FW.detect_build(src)
+        self.assertEqual(info["board_platform"], "")
+        self.assertEqual(info["soc"], "")
+        self.assertEqual(info["android_release"], "")
 
 
 # ---------------------------------------------------------------------------

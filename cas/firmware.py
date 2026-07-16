@@ -420,6 +420,11 @@ def detect_build(src):
         "dev_code": _grep_value(imgs, "ro.mangmi.dev.code="),
         "os_version": _grep_value(imgs, "ro.mangmi.os.version="),
         "fingerprint": _grep_value(imgs, "ro.build.fingerprint="),
+        # Gate fields. Both chip spellings are captured: gate_check() compares board_platform to
+        # board_platform and soc to soc, never across ('kalama' != 'SM8550' would false-conflict).
+        "board_platform": _grep_value(imgs, "ro.board.platform="),
+        "soc": _grep_value(imgs, "ro.soc.model="),
+        "android_release": _grep_value(imgs, "ro.build.version.release="),
     }
 
 
