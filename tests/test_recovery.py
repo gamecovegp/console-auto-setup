@@ -102,5 +102,48 @@ class TestSummaryPopup(unittest.TestCase):
         self.assertIn("2", text)                            # "2 device(s) need attention"
 
 
+class _FakeAdb:
+    def __init__(self, state):
+        self._state = state
+    def state(self):
+        return self._state
+
+
+class _FakeFb:
+    def __init__(self, present):
+        self._present = present
+    def devices(self):
+        return "SERIAL123\tfastboot\n" if self._present else ""
+
+
+class TestProbeMode(unittest.TestCase):
+    def _probe(self, state, fb_present=False, edl=()):
+        return R.probe_mode(_FakeAdb(state), _FakeFb(fb_present), edl_ports=lambda: list(edl))
+
+    def test_device_state_is_booted(self):
+        self.assertIs(self._probe("device"), M.BOOTED_ADB)
+
+    def test_offline_is_adb_offline(self):
+        self.assertIs(self._probe("offline"), M.ADB_OFFLINE)
+
+    def test_unauthorized_is_adb_offline(self):
+        self.assertIs(self._probe("unauthorized"), M.ADB_OFFLINE)
+
+    def test_absent_in_adb_but_in_fastboot_is_fastboot(self):
+        self.assertIs(self._probe("", fb_present=True), M.FASTBOOT)
+
+    def test_absent_in_adb_and_fastboot_but_edl_port_present_is_edl(self):
+        self.assertIs(self._probe("", fb_present=False, edl=["/dev/ttyUSB0"]), M.EDL_9008)
+
+    def test_nothing_anywhere_is_absent(self):
+        self.assertIs(self._probe("", fb_present=False, edl=[]), M.ABSENT)
+
+    def test_a_probe_exception_never_raises(self):
+        class Boom:
+            def state(self):
+                raise RuntimeError("adb died")
+        self.assertIs(R.probe_mode(Boom(), _FakeFb(False), edl_ports=lambda: []), M.ABSENT)
+
+
 if __name__ == "__main__":
     unittest.main()
