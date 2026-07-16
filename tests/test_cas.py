@@ -250,6 +250,56 @@ class GrantShellRoot(unittest.TestCase):
         self.assertTrue(any("/debug_ramdisk/su" in c and c[-1].startswith("sh " + PV.DEV_GRANT)
                             for c in r.calls))
 
+    def test_autotap_wakes_and_dismisses_keyguard(self):
+        # The unit reboots to a locked/asleep screen; the auto-tap must WAKE it and slide past a
+        # non-secure keyguard first — uiautomator can't see/tap the Grant dialog on an off/locked screen,
+        # which is exactly why the tap silently missed and root had to be granted by hand on the bench.
+        r = GrantRunner()
+        PV.grant_shell_root(self._adb(r), log=lambda *_: None, ui_timeout=2)
+        cmds = "\n".join(r.cmds())
+        self.assertIn("input keyevent 224", cmds)               # KEYCODE_WAKEUP — screen on
+        self.assertIn("wm dismiss-keyguard", cmds)              # past a swipe/none lock
+
+    def test_await_boot_grant_confirms_zero_touch_when_marker_reports_ok(self):
+        # The boot-grant service writes its marker a beat after boot_completed (it waits for magiskd);
+        # _await_boot_grant polls that marker (no su/prompt) then confirms root -> true zero-touch.
+        from unittest import mock
+
+        class BootGrant(FakeRunner):
+            def __init__(self, ok_after=2, **kw):
+                super().__init__(root=False, **kw)
+                self.reads, self.ok_after = 0, ok_after
+
+            def __call__(self, args, input_text=None, timeout=900):
+                tail = args[-1] if args else ""
+                if isinstance(tail, str) and tail.startswith(f"cat {PV.BOOT_GRANT_MARK}"):
+                    self.reads += 1
+                    return (0, "cas-grant ok policy=2\n", "") if self.reads >= self.ok_after else (0, "", "")
+                if "/debug_ramdisk/su" in args and tail == "id":
+                    return (0, "uid=0\n", "") if self.reads >= self.ok_after else (1, "", "denied")
+                return super().__call__(args, input_text, timeout)
+        r = BootGrant(ok_after=2)
+        with mock.patch("time.sleep", lambda *a, **k: None):
+            self.assertTrue(PV._await_boot_grant(Adb(runner=r), log=lambda *_: None, timeout=20, step=2))
+
+    def test_await_boot_grant_falls_back_when_daemon_not_ready(self):
+        # Marker says the service ran but magiskd never came up -> don't wait the full window, fall back.
+        from unittest import mock
+
+        class NotReady(FakeRunner):
+            def __call__(self, args, input_text=None, timeout=900):
+                tail = args[-1] if args else ""
+                if isinstance(tail, str) and tail.startswith(f"cat {PV.BOOT_GRANT_MARK}"):
+                    return 0, "cas-grant daemon-not-ready\n", ""
+                return super().__call__(args, input_text, timeout)
+        with mock.patch("time.sleep", lambda *a, **k: None):
+            self.assertFalse(PV._await_boot_grant(Adb(runner=NotReady(root=False)),
+                                                  log=lambda *_: None, timeout=20, step=2))
+
+    def test_await_boot_grant_short_circuits_when_already_root(self):
+        # A persisted policy (re-root of an already-granted unit) -> True immediately, no marker poll.
+        self.assertTrue(PV._await_boot_grant(Adb(runner=FakeRunner(root=True)), log=lambda *_: None))
+
     def test_failed_autotap_falls_back(self):
         logs = []
         r = GrantRunner(never_grants=True)
@@ -277,15 +327,19 @@ class GrantShellRoot(unittest.TestCase):
 
     def test_root_autogrants_when_booted_but_ungranted(self):
         import tempfile, pathlib
+        from unittest import mock
         ra, fb = GrantRunner(), FbRunner()
         with tempfile.TemporaryDirectory() as d:
             stock = pathlib.Path(d) / "init_boot.img"
             stock.write_bytes(b"x")                       # PC stock image must exist
             os.environ["CAS_CONFIG"] = str(pathlib.Path(d) / "absent.json")  # missing -> default toggle on
             try:
-                ok = PV.root(Adb(runner=ra), Fastboot(runner=fb), stock, magisk_apk=None,
-                             log=lambda *_: None, wait=True,
-                             flasher=lambda adb, target, img, log: True)
+                # GrantRunner never writes the boot-grant marker, so _await_boot_grant waits out its grace
+                # window then falls back to the auto-tap — mock sleep so that grace window is instant here.
+                with mock.patch("time.sleep", lambda *a, **k: None):
+                    ok = PV.root(Adb(runner=ra), Fastboot(runner=fb), stock, magisk_apk=None,
+                                 log=lambda *_: None, wait=True,
+                                 flasher=lambda adb, target, img, log: True)
             finally:
                 os.environ.pop("CAS_CONFIG", None)
         self.assertTrue(ok)                               # root() returns True via the auto-grant tail
@@ -457,8 +511,61 @@ class TestAdb(unittest.TestCase):
         ticks = []
         r = FakeRunner(boot="0")                             # sys.boot_completed never becomes 1
         with mock.patch("time.sleep", lambda *a, **k: None):
-            self.assertFalse(Adb(runner=r).wait_boot(timeout=60, on_tick=ticks.append))
+            # on_tick now also receives the adb device state (2nd arg) so the caller can say WHY.
+            self.assertFalse(Adb(runner=r).wait_boot(timeout=60, on_tick=lambda s, st=None: ticks.append(s)))
         self.assertEqual(ticks, [10, 20, 30, 40, 50])        # ~every 10s, bounded by timeout=60
+
+    def test_state_reports_the_adb_connection_state(self):
+        # wait_boot leans on state() to turn a stalled boot-wait into an actionable reason. Modern adb
+        # prints the state to stdout; older adb errors on stderr — both must classify. Absent -> ''.
+        def st(rc, out, err=""):
+            class S(FakeRunner):
+                def __call__(self, args, input_text=None, timeout=900):
+                    if args and args[-1] == "get-state":
+                        return rc, out, err
+                    return super().__call__(args, input_text, timeout)
+            return Adb(runner=S()).state()
+        self.assertEqual(st(0, "device\n"), "device")
+        self.assertEqual(st(0, "unauthorized\n"), "unauthorized")
+        self.assertEqual(st(1, "", "error: device unauthorized"), "unauthorized")   # older adb
+        self.assertEqual(st(1, "", "error: device 'X' not found"), "")              # absent
+
+    def test_boot_tick_msg_is_actionable_per_state(self):
+        # A unit that re-appears 'unauthorized' after the root-flash reboot is sitting on a locked
+        # 'Allow USB debugging' prompt — the tick line must say to unlock + accept it, not hide it
+        # behind a bland 'still booting'.
+        from cas.adb import boot_tick_msg
+        un = boot_tick_msg(40, "unauthorized")
+        self.assertIn("40s", un)
+        self.assertIn("Allow USB debugging", un)
+        self.assertIn("unlock", un.lower())
+        # reachable but not yet booted: still nudge an unlock (FBE gates boot_completed until first unlock)
+        self.assertIn("unlock", boot_tick_msg(40, "device").lower())
+        # offline / absent: waiting to re-appear on USB
+        self.assertIn("re-appear", boot_tick_msg(40, "").lower())
+
+    def test_wait_boot_surfaces_unauthorized_instead_of_bland_still_booting(self):
+        # THE BENCH BUG (Retroid root): after the root-flash reboot the unit comes back 'unauthorized'
+        # (its 'Allow USB debugging' prompt waits on a LOCKED screen). The old wait_boot polled only
+        # sys.boot_completed and hid every failure behind 'still booting', so the operator never knew to
+        # unlock + accept — the wait just ran to timeout. wait_boot must feed the adb state to on_tick.
+        from unittest import mock
+        from cas.adb import boot_tick_msg
+
+        class Unauth(FakeRunner):
+            def __init__(self, **kw):
+                super().__init__(boot="0", **kw)                 # boot_completed never returns 1
+            def __call__(self, args, input_text=None, timeout=900):
+                if args and args[-1] == "get-state":
+                    return 0, "unauthorized\n", ""               # re-appeared, but not authorized
+                return super().__call__(args, input_text, timeout)
+        msgs = []
+        with mock.patch("time.sleep", lambda *a, **k: None):
+            ok = Adb(runner=Unauth()).wait_boot(
+                timeout=60, on_tick=lambda s, st: msgs.append(boot_tick_msg(s, st)))
+        self.assertFalse(ok)
+        self.assertTrue(any("Allow USB debugging" in m for m in msgs),
+                        f"expected an actionable unauthorized hint, got: {msgs}")
 
     def test_boot_flash_target_init_boot_ab(self):
         # A unit launched on Android 13+ (first_api>=33) is A/B -> flash 'init_boot_<active slot>'.
@@ -1523,6 +1630,34 @@ class TestProvision(unittest.TestCase):
             joined = "\n".join(r.cmds())                        # (2) payload arrives as a tar, unpacked on device
             self.assertIn("tar -xf", joined)
             self.assertIn("/data/local/tmp/cas/payload", joined)
+
+    def test_provision_pushes_the_captured_wifi_store(self):
+        # ROOT-CAUSE REGRESSION — "save wifi not working": capture.sh saves the golden's WifiConfigStore.xml
+        # into golden_root_payload/wifi/, and restore.sh's restore_wifi clones it onto the fresh unit — but
+        # the Download push loop never sent the wifi/ dir to the device, so restore_wifi ALWAYS found nothing
+        # ("wifi: no wifi in payload — skip") and every unit shipped without the shop network, on EVERY
+        # platform. Guard: the captured wifi/ dir must be delivered, and as a TAR via _push_dir (never
+        # `adb push <dir>`, which lands 0 files on Windows) — exactly like settings/homescreen/gamelauncher.
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t)
+            (prof.payload / "wifi").mkdir()
+            (prof.payload / "wifi" / "WifiConfigStore.xml").write_text(
+                '<WifiConfigStore><Network><string name="SSID">&quot;Shop&quot;</string></Network></WifiConfigStore>')
+            pushed_dir_names = []
+            real_push_dir = PV._push_dir
+            def spy(adb, push, src, dev_parent, log, arcname=None):
+                pushed_dir_names.append(pathlib.Path(src).name)
+                return real_push_dir(adb, push, src, dev_parent, log, arcname)
+            r = FakeRunner()
+            with patch.object(PV, "_push_dir", spy):
+                ok = PV.provision(Adb(runner=r), prof, log=lambda m: None)   # real (non-dry) push path
+            self.assertTrue(ok)
+            self.assertIn("wifi", pushed_dir_names)             # the captured wifi store WAS delivered...
+            for c in r.calls:                                   # ...and never as a raw directory push
+                if "push" in c:
+                    src = c[c.index("push") + 1]
+                    self.assertFalse(os.path.isdir(src),
+                                     f"pushed a DIRECTORY (0-byte on Windows): {src}")
 
     def test_push_es_media_packs_one_archive(self):
         # Universal fast path: pack downloaded_media into ONE tar, push that single file, unpack it on the
@@ -5238,7 +5373,12 @@ class TestOverlayBootGrant(unittest.TestCase):
 
     def test_rc_starts_the_service_as_root_at_boot_completed(self):
         rc = self._overlay("init.cas-grant.rc").read_text()
-        self.assertIn("service cas_grant /system/bin/sh /overlay.d/cas-grant.sh", rc)
+        self.assertIn("service cas_grant /system/bin/sh", rc)
+        # magiskinit moves overlay.d/ contents to '/', so the script lands at /cas-grant.sh (NOT
+        # /overlay.d/cas-grant.sh — the old path was a no-op that never ran the grant). The service must
+        # exec the root-relocated path; it may also cover the un-relocated one for robustness.
+        self.assertIn("/cas-grant.sh", rc)
+        self.assertNotRegex(rc, r"exec\s+/system/bin/sh\s+/overlay\.d/cas-grant\.sh\b")
         self.assertIn("user root", rc)
         self.assertIn("seclabel u:r:magisk:s0", rc)
         self.assertIn("oneshot", rc)

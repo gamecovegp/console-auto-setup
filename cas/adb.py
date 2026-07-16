@@ -174,6 +174,25 @@ def list_devices(adb="adb", runner=subprocess_runner):
     return devs
 
 
+def boot_tick_msg(seconds, state):
+    """Compose wait_boot()'s per-tick 'waiting for boot' line, keyed on the adb device `state`, so the
+    operator sees WHY the wait hasn't ended instead of a bland 'still booting'.
+
+    The root-flash reboot commonly brings a unit (Retroid included) back 'unauthorized' — its 'Allow USB
+    debugging' prompt is sitting on a LOCKED screen — so sys.boot_completed can never be read and the wait
+    ran silently to timeout. Surfacing the state tells the operator to unlock + accept the prompt. A unit
+    that IS authorized ('device') but not yet booted can still be gated by FBE (Android holds the full
+    BOOT_COMPLETED / sys.boot_completed=1 until the first unlock on a lock-screen-secured unit), so that
+    line nudges an unlock too. Anything else (offline/recovery/absent) is a USB re-appear wait."""
+    st = (state or "").strip().lower()
+    if st == "unauthorized":
+        return (f"  …unauthorized ({seconds}s) — on the unit: unlock the screen and tap "
+                "'Allow USB debugging' (tick 'always allow')")
+    if st == "device":
+        return f"  …still booting ({seconds}s) — if it's sitting on a lock/PIN screen, unlock it to finish"
+    return f"  …waiting for the unit to re-appear on USB ({seconds}s)"
+
+
 def _parse_bootloader_state(props):
     """Map a {prop: value} dict to 'locked' | 'unlocked' | 'unknown' (pure, best-effort).
     Prefer the explicit vbmeta device_state; fall back to verified-boot color (orange = unlocked,
@@ -425,6 +444,22 @@ class Adb:
         rc, out, _ = self.raw("get-state")
         return rc == 0 and out.strip() == "device"
 
+    def state(self):
+        """Current adb connection state for this serial: 'device' | 'unauthorized' | 'offline' |
+        '' (absent / not-found). Distinct from is_online() (a bool) — wait_boot() uses the full string
+        to turn a stalled boot-wait into an ACTIONABLE reason. Modern adb prints the state to stdout;
+        older adb reports 'unauthorized'/'offline' on stderr with a non-zero rc — classify both."""
+        rc, out, err = self.raw("get-state")
+        s = (out or "").strip().lower()
+        if rc == 0 and s:
+            return s
+        e = (err or "").lower()
+        if "unauthorized" in e:
+            return "unauthorized"
+        if "offline" in e:
+            return "offline"
+        return ""
+
     def await_online(self, timeout=120, on_tick=None):
         """Poll until the device is reachable again (back from offline/reboot), up to `timeout` seconds.
         Cancel-aware and BOUNDED (never the open-ended `wait-for-device`, which could block for the full
@@ -441,7 +476,10 @@ class Adb:
 
     def wait_boot(self, timeout=300, on_tick=None):
         """Wait for the device to reconnect and finish booting. Returns True if booted.
-        on_tick(seconds) is called ~every 10s so a UI can show 'still booting…' during the wait.
+        on_tick(seconds, state) is called ~every 10s; `state` is the adb device state at that moment
+        ('device' | 'unauthorized' | 'offline' | ''), so the UI can say WHY it's still waiting — a unit
+        that re-appears 'unauthorized' after the reboot is sitting on a locked 'Allow USB debugging'
+        prompt, which the old bland 'still booting' heartbeat hid (see boot_tick_msg).
 
         `timeout` now covers the WHOLE window (re-enumerate + boot). It was 180s, but that only bounded the
         poll loop — the old wait-for-device prelude blocked for the reconnect on top of it, so the effective
@@ -465,7 +503,7 @@ class Adb:
             if self.boot_completed(timeout=BOOT_PROBE_TIMEOUT):
                 return True
             if on_tick and i and i % 5 == 0:
-                on_tick(i * step)
+                on_tick(i * step, self.state())
             time.sleep(step)
         return False
 

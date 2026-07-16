@@ -16,6 +16,7 @@ import concurrent.futures
 
 from . import BUNDLE, DATA
 from . import profiles as P
+from .adb import boot_tick_msg
 
 # RetroArch cores: resolved at provision time via config.cores_dir() (library_root()/retroarch-cores,
 # falling back to APPDIR/data) — NOT a fixed APPDIR/data path, so the set follows the CAS library drive.
@@ -549,6 +550,9 @@ def provision(adb, profile, log=print, dry_push=False, es_media_src=None):
             return False                                   # launcher layout + wallpaper + widget map (optional)
         if (pay / "gamelauncher").is_dir() and not _push_dir(adb, push, pay / "gamelauncher", f"{DEV}/payload", log):
             return False                                   # game-frontend emulator picks (DataStore), optional
+        if (pay / "wifi").is_dir() and not _push_dir(adb, push, pay / "wifi", f"{DEV}/payload", log):
+            return False                                   # golden's saved WiFi (@wifi) — restore_wifi clones it,
+                                                           # then Lock strips it; skipped if @wifi was off at Save
         for pkg in pay_pkgs:                                # internal dirs for included PAYLOAD apps only
             d = P.internal_for(pkg)
             tar = pay / f"internal_{d}.tar" if d else None
@@ -629,6 +633,7 @@ OVERLAY_DIR = BUNDLE / "provision" / "root" / "overlay"   # overlay.d boot-grant
 
 GRANT_PERSIST = BUNDLE / "provision" / "root" / "grant-persist.sh"   # permanent shell-grant writer (root)
 DEV_GRANT = "/data/local/tmp/cas_grant.sh"                           # where it lands on the device
+BOOT_GRANT_MARK = "/data/local/tmp/cas_boot_grant.done"             # cas-grant.sh's boot-grant result marker
 GRANT_PROMPT_BTN = r"grant"          # MagiskSU su-request "Grant" button (matched case-insensitively)
 # NOTE: MAGISK_PKG ("com.topjohnwu.magisk") is defined at the top of this module; grant_shell_root's
 # tap gate reuses it to fence taps to the Magisk prompt so we never mis-tap another app.
@@ -665,6 +670,43 @@ def _inject_boot_grant(adb, dev_patch, log=print):
         return True
     log(f"  ⚠ boot-grant inject failed: {((err or out) or '').strip()[:160]} — flashing plain image.")
     return False
+
+
+def _await_boot_grant(adb, log=print, timeout=25, step=2):
+    """Give the baked overlay.d boot-grant a bounded window to authorize the adb shell before root()
+    falls back to the (screen-dependent) auto-tap. The boot-grant service and root()'s check both hang
+    off sys.boot_completed=1, and the service waits for magiskd before writing the shell-allow policy —
+    so right after boot is_root() is briefly False even when the grant is landing. We poll the boot-
+    grant's OWN marker (a plain `cat`, so no `su` is run and no Grant prompt is raised while we wait) and
+    confirm with is_root(). Returns True once the shell holds root via the boot-grant; False (→ fall
+    back) when the marker reports it couldn't, or it never reports in within `timeout`.
+
+    cas-grant.sh writes the marker: 'cas-grant ok …' once it writes the policy, 'cas-grant daemon-not-
+    ready' if magiskd never came up. Absent = its overlay.d service never ran (e.g. a magiskinit that
+    doesn't honor overlay.d) — we wait out `timeout` then fall back."""
+    def rooted():
+        # short-bounded: a granted su replies instantly; an ungranted one may raise a MagiskSU prompt, so
+        # cap it (8s) rather than block the grace loop on the 30s is_root() default.
+        return "uid=0" in adb.su("id", timeout=8)[1]
+    if rooted():                                       # persisted policy / grant already landed
+        return True
+    for s in range(step, timeout + 1, step):
+        if adb.cancel is not None and adb.cancel.is_set():
+            return False
+        time.sleep(step)
+        mark = adb.shell(f"cat {BOOT_GRANT_MARK} 2>/dev/null", timeout=8)[1]
+        if "cas-grant ok" in mark:
+            if rooted():
+                log(f"  ✓ boot-grant authorized the shell after ~{s}s (zero-touch, no prompt).")
+                return True
+            log("  boot-grant wrote the policy but the shell still isn't root — falling back.")
+            return False
+        if "daemon-not-ready" in mark:
+            log("  boot-grant ran but magiskd wasn't ready in time — falling back to auto-grant.")
+            return False
+        log(f"  …waiting for the zero-touch boot-grant to authorize the shell ({s}s)")
+    log("  boot-grant never reported in (overlay.d service may not have run) — falling back to auto-grant.")
+    return rooted()
 
 
 def patch_init_boot_on_device(adb, stock_init_boot, dest, log=print):
@@ -756,7 +798,7 @@ def provision_all(make_adb, devices, root="profiles", log=print, profile=None, p
                 # re-attaches after the reboot (adb wait-for-device) then confirms sys.boot_completed, so the
                 # chain CONTINUES across the reboot. A unit that never returns is FAILED, not carried to Lock.
                 _wlog("waiting for the post-download reboot before the next step (Lock)…")
-                if not adb.wait_boot(on_tick=lambda s: _wlog(f"  …still booting ({s}s)")):
+                if not adb.wait_boot(on_tick=lambda s, st: _wlog(boot_tick_msg(s, st))):
                     if adb.cancel is not None and adb.cancel.is_set():
                         return ("cancelled", prof.name)
                     return ("fail", "did not boot back after the Download reboot (Lock skipped)")
@@ -1485,21 +1527,25 @@ def root(adb, fastboot, stock_init_boot, magisk_apk=None, log=print, wait=True, 
         if not flasher(adb, target, patched, log):
             return False
     log("flashed; rebooting to system. step 4/4: waiting for the device to finish booting (1-3 min)...")
-    if wait and not adb.wait_boot(on_tick=lambda s: log(f"  …still booting ({s}s)")):
+    if wait and not adb.wait_boot(on_tick=lambda s, st: log(boot_tick_msg(s, st))):
         log("ERROR: unit did not boot after the root flash — investigate before retrying.")
         return False
     log("device booted.")
 
-    # (4) verify adb-shell root.
+    # (4) verify adb-shell root. The overlay.d boot-grant service fires on the SAME sys.boot_completed=1
+    # this wait rode and needs a beat to write the shell-allow policy (it waits for magiskd first), so
+    # give it a bounded grace window before deciding it didn't take — otherwise we check a hair too early
+    # and drop to the screen-dependent auto-tap even while the zero-touch grant is landing.
     if not wait:
         return True
-    if adb.is_root():
+    from . import config as _cfg
+    granted = _await_boot_grant(adb, log=log) if _cfg.bake_boot_grant() else adb.is_root()
+    if granted:
         log("✓ ROOTED — shell pre-authorized at boot (zero-touch, no Magisk prompt). "
             "Ready to '② Download to selected device'.")
         return True
-    from . import config as _cfg
     if _cfg.auto_grant_shell():
-        log("shell not granted yet — auto-granting via the on-device Magisk prompt (zero-touch)…")
+        log("shell not granted by the boot-grant — auto-granting via the on-device Magisk prompt…")
         if grant_shell_root(adb, log=log):
             log("✓ ROOTED — shell auto-granted. Ready to '② Download'.")
             return True
@@ -1540,6 +1586,11 @@ def grant_shell_root(adb, log=print, attempts=3, ui_timeout=15):
         return True
     for i in range(attempts):
         log(f"  auto-grant {i + 1}/{attempts}: raising the Magisk Superuser prompt…")
+        # The unit reboots to a locked/asleep screen; wake it and slide past a NON-secure keyguard first
+        # or uiautomator can't see/tap the Grant dialog — the exact reason the auto-tap silently missed
+        # and root had to be granted by hand. Both are idempotent / no-ops on an already-awake unit.
+        adb.shell("input keyevent 224")               # KEYCODE_WAKEUP — turn the screen on
+        adb.shell("wm dismiss-keyguard")              # slide past a swipe/none lock (no-op on a secure PIN)
         adb.shell(f"{SU} -c id >/dev/null 2>&1 &")    # device-side background: returns immediately
         for _ in range(ui_timeout):
             if MAGISK_PKG in uiauto.foreground(adb) and uiauto.tap(adb, GRANT_PROMPT_BTN):
@@ -1628,7 +1679,7 @@ def seal(adb, fastboot, stock_init_boot, log=print, wait=True, model_match=None,
         return False
     log("flashed stock init_boot; waiting for the device to finish booting (1-3 min)...")
     if wait:
-        if not adb.wait_boot(on_tick=lambda s: log(f"  …still booting ({s}s)")):
+        if not adb.wait_boot(on_tick=lambda s, st: log(boot_tick_msg(s, st))):
             log("ERROR: unit did not boot after un-root flash — NOT disabling USB debugging. Investigate.")
             return False
         if adb.is_root():

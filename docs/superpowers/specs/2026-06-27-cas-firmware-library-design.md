@@ -8,6 +8,7 @@
 
 ---
 
+
 ## 1. Background
 
 CAS provisions GameCove handhelds. Rooting is per-device (Magisk-patched ramdisk), and the partition/slot to flash is already auto-derived by `Adb.boot_flash_target()` (`init_boot`/`boot` × `_a`/`_b`). What's missing is a way to know **which firmware build** a given connected unit needs — the marketing model alone is insufficient (two AIR X hardware revisions ship the *same* `ro.product.model` and even the *same* baked `ro.mangmi.dev.code`).
