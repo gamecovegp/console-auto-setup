@@ -1903,13 +1903,33 @@ class TestProvision(unittest.TestCase):
                 tar.addfile(ti, io.BytesIO(data))
         return buf.getvalue()
 
+    def test_pack_cmd_is_one_command_no_shell_metacharacters(self):
+        # ROOT CAUSE of the 'on-device pack of /data/local/tmp/cas_cap failed (rc=1)' abort (RP6, 2.1G
+        # golden, 90G free — never a space problem): adb SPACE-JOINS the argv after shell/exec-out, so the
+        # DEVICE's shell parsed the line before `su` ever saw it. `su -c cd DIR && tar -cf - .` therefore
+        # ran ONLY the `cd` under su (in su's own subshell, moving nothing) and then ran `tar` as the
+        # unprivileged SHELL user from adb's CWD `/` — archiving the filesystem ROOT until it hit
+        # "tar: can't open './sys/wifi/feature': Permission denied" -> "short read" -> rc 1.
+        # The pack must stay ONE command using `tar -C <dir>`, with NO shell metacharacters to steal.
+        r = FakeRunner()
+        with tempfile.TemporaryDirectory() as t:
+            Adb(serial="S1", runner=r).su_pack_to_file(PV.TMPCAP, pathlib.Path(t) / "p.tar",
+                                                       0, lambda m: None)
+        pack = [c for c in r.calls if "exec-out" in c]
+        self.assertEqual(len(pack), 1, f"expected exactly one exec-out pack call; got {r.calls}")
+        cmd = pack[0][-1]
+        self.assertEqual(cmd, f"tar -C {PV.TMPCAP} -cf - .")
+        for meta in ("&&", "||", ";", "|", "cd ", '"', "'"):
+            self.assertNotIn(meta, cmd,
+                             f"`su -c` space-joining lets the DEVICE shell steal {meta!r}: {cmd!r}")
+
     def test_capture_streams_one_tar_never_stages_a_device_copy(self):
         # UNIVERSAL transfer (Windows + Linux): Save must move the golden as ONE archive that STREAMS off
-        # the device (`adb exec-out ... tar -cf - .` -> PC file -> PC-unpack), NEVER `adb pull <dir>` (a
-        # directory pull can silently drop files on Windows and write an incomplete golden) and NEVER by
-        # staging a second full-size `<dir>.tar` on the device first (that doubled /data usage and ENOSPC-
-        # aborted a big golden with 'on-device pack failed (rc=1)'). Guards: the pack streams to stdout
-        # (`-`), no device-side tar file is created, no directory is pulled, and the profile unpacks whole.
+        # the device (`adb exec-out ... tar -C <dir> -cf - .` -> PC file -> PC-unpack), NEVER `adb pull
+        # <dir>` (a directory pull can silently drop files on Windows and write an incomplete golden) and
+        # NEVER by staging a second full-size `<dir>.tar` on the device first (a needless full extra copy
+        # on the same partition). Guards: the pack streams to stdout (`-`), no device-side tar file is
+        # created, no directory is pulled, and the profile unpacks whole.
         class _CapRunner(FakeRunner):
             def __call__(self, args, input_text=None, timeout=900):
                 if "exec-out" in args:                   # the pack streams the tar to stdout -> return BYTES
@@ -1926,24 +1946,24 @@ class TestProvision(unittest.TestCase):
             for c in r.calls:
                 self.assertNotIn("pull", c, f"pulled a directory/file instead of streaming: {c}")
             cmds = r.cmds()
-            self.assertTrue(any("exec-out" in c and "tar -cf - ." in c for c in cmds),
-                            f"pack must stream `tar -cf - .` via exec-out; got {cmds}")
-            # ROOT-CAUSE guard: never write a device-side staging archive (that is the space-doubling bug).
-            for c in cmds:
+            self.assertTrue(any("exec-out" in c and f"tar -C {PV.TMPCAP} -cf - ." in c for c in cmds),
+                            f"pack must stream `tar -C <dir> -cf - .` via exec-out; got {cmds}")
+            for c in cmds:                               # never write a device-side staging archive
                 self.assertNotIn(f"tar -cf {PV.TMPCAP}.tar", c,
-                                 f"staged a full second copy on the device (ENOSPC risk): {c}")
+                                 f"staged a full second copy on the device: {c}")
 
-    def test_pull_dir_surfaces_reason_and_free_space_on_pack_failure(self):
-        # When the pack+stream fails (e.g. ENOSPC), the abort must say WHY: the device stderr AND the
-        # free-space line — not the old opaque 'failed (rc=1)'. (Regression: stderr used to be discarded.)
+    def test_pull_dir_surfaces_device_reason_on_pack_failure(self):
+        # The abort must say WHY: the device stderr AND a free-space line — not the old opaque 'rc=1'.
+        # (Regression: stderr was discarded, which is exactly why this bug hid as a space/'pack' mystery.)
         class _FailRunner(FakeRunner):
             def __call__(self, args, input_text=None, timeout=900):
-                if "exec-out" in args:                   # tar dies mid-write, no space left
+                if "exec-out" in args:                   # the real observed failure, verbatim
                     self.calls.append(list(args))
-                    return 1, b"", "tar: ./com.foo/data.tar: write: No space left on device"
+                    return 1, b"", ("tar: can't open './sys/wifi/feature': Permission denied\n"
+                                    "tar: short read")
                 if "shell" in args and "/debug_ramdisk/su" in args and "df -h" in args[-1]:
                     self.calls.append(list(args))
-                    return 0, "Filesystem  Size  Used Avail Use% Mounted on\n/dev/dm-5 118G 118G 12M 100% /data", ""
+                    return 0, "Filesystem  Size  Used Avail Use% Mounted on\n/dev/dm-14 101G 11G 90G 11% /data", ""
                 return super().__call__(args, input_text, timeout)
         with tempfile.TemporaryDirectory() as t:
             r = _FailRunner()
@@ -1951,8 +1971,8 @@ class TestProvision(unittest.TestCase):
             ok = PV._pull_dir(Adb(runner=r), PV.TMPCAP, pathlib.Path(t) / "in", msgs.append)
             self.assertFalse(ok)
             blob = "\n".join(msgs)
-            self.assertIn("No space left on device", blob)                   # the real reason
-            self.assertIn("100%", blob)                                      # the free-space context
+            self.assertIn("short read", blob)                                # the device's real reason
+            self.assertIn("90G", blob)                                       # free-space context
 
     def test_seed_default_manifest_populates_empty_placeholder(self):
         # A 'New profile' leaves a placeholder manifest with NO app lines; after the first capture the
