@@ -577,6 +577,30 @@ def ingest(src, root, firmware_id=None, label=None, match=None, copy=True):
 # Task 7 (adapted): resolve() — uses fw-local get/set_device_firmware
 # ---------------------------------------------------------------------------
 
+def _no_match_reasons(identity_dict, root):
+    """Why did nothing match? Distinguishes the two situations, because they imply DIFFERENT operator
+    actions: 'the library has no build for this silicon' (ingest one) vs 'entries exist but record no
+    chip' (run backfill). A bare 'no match' leaves the operator with no next step — and this spec
+    deletes a warning for being uninformative, so it must not add one."""
+    rejected, legacy = 0, 0
+    for fw in list_firmware(root):
+        ok, _reason, agreed = gate_check(fw, identity_dict)
+        if not ok:
+            rejected += 1
+        elif agreed == 0 and not fw.match_rules().get("board_platform"):
+            legacy += 1
+    out = []
+    chip = identity_dict.get("board_platform") or identity_dict.get("soc") or "unknown"
+    if rejected:
+        out.append(f"no firmware matches this chip ({chip}) — {rejected} rejected by the gate; "
+                   f"ingest a build for it")
+    if legacy:
+        out.append(f"{legacy} firmware(s) record no chip — run 'python3 -m cas.firmware backfill'")
+    if not out:
+        out.append("no match — select manually")
+    return out
+
+
 def resolve(serial, identity_dict, root):
     """Decide the firmware for a connected device. Manual override (sticky) wins; else match() and
     remember it (manual=False). Version = pinned rollback or the firmware's current. Always runs
@@ -619,7 +643,7 @@ def resolve(serial, identity_dict, root):
             "manual": False,
             "suggested": None,
             "ok": False,
-            "warnings": ["no match — select manually"],
+            "warnings": _no_match_reasons(identity_dict, root),
             "firmware": None,
         }
     ok, warns = logic_check(fw, identity_dict)

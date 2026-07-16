@@ -940,5 +940,49 @@ class TestDefaultKitFirmware(unittest.TestCase):
             self.assertIsNone(r["firmware"])                       # no designation → falls back as before
 
 
+# ---------------------------------------------------------------------------
+# Task 8: _no_match_reasons() — (no match) explains itself
+# ---------------------------------------------------------------------------
+
+class TestNoMatchReasons(unittest.TestCase):
+    def setUp(self):
+        self._saved_cas_config = os.environ.get("CAS_CONFIG")
+        self.tmp = tempfile.mkdtemp()
+        os.environ["CAS_CONFIG"] = os.path.join(self.tmp, "cas-config.json")
+        self.root = pathlib.Path(self.tmp) / "_firmware"
+        self.root.mkdir(parents=True)
+
+    def tearDown(self):
+        if self._saved_cas_config is None:
+            os.environ.pop("CAS_CONFIG", None)
+        else:
+            os.environ["CAS_CONFIG"] = self._saved_cas_config
+
+    def _rp6(self):
+        return {"serial": "RP6x", "device": "RP6", "brand": "Retroid", "board_platform": "kalama",
+                "soc": "SM8550", "android_release": "13", "bootdevice": "1d84000.ufshc"}
+
+    def test_reason_names_the_chip_when_all_entries_were_rejected(self):
+        make_fw(self.root, "ayn-odin3", device="odin3", storage="ufs",
+                match={"board_platform": "sun"})
+        r = FW.resolve("RP6x", self._rp6(), self.root)
+        self.assertIsNone(r["firmware_id"])
+        self.assertTrue(any("kalama" in w for w in r["warnings"]),
+                        f"expected the chip named in {r['warnings']}")
+
+    def test_reason_says_run_backfill_when_entries_have_no_chip(self):
+        make_fw(self.root, "legacy-a", device="x", storage="", match={})
+        make_fw(self.root, "legacy-b", device="y", storage="", match={})
+        r = FW.resolve("RP6x", self._rp6(), self.root)
+        self.assertIsNone(r["firmware_id"])
+        self.assertTrue(any("backfill" in w for w in r["warnings"]),
+                        f"expected a backfill hint in {r['warnings']}")
+
+    def test_empty_library_says_neither(self):
+        r = FW.resolve("RP6x", self._rp6(), self.root)
+        self.assertIsNone(r["firmware_id"])
+        self.assertTrue(any("no match" in w for w in r["warnings"]))
+
+
 if __name__ == "__main__":
     unittest.main()
