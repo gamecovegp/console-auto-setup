@@ -137,6 +137,49 @@ eventually wrong, that guard is what stands between the operator and another bri
 - **`meta.json`** — new optional `match` keys: `board_platform`, `soc`, `android_release`. All optional;
   absence means the axis doesn't gate.
 
+## Operator workflow: adding a new chip or firmware
+
+**The normal path requires no chip knowledge from the operator.** Adding a new firmware is unchanged
+from today: `FirmwareWindow` → "Add / update…" → `ingest()`. The build self-describes — `ingest()`
+already detects `device`, `storage`, `flash_target`, `version`, and `fingerprint` from its own
+`super_*.img`; this spec adds `board_platform`, `soc`, and `android_release` to that same pass and
+seeds them into `match{}`.
+
+Worked example — the Odin 3 (SD 8 Elite) build arrives:
+
+1. Operator ingests it like any other build. No new step.
+2. It seeds its own `match{}` with its detected chip / android / storage.
+3. Every Odin 3 unit now auto-matches it. Every kalama unit is **rejected by the gate**, so an Odin 3
+   build can never be offered for an RP6 (and vice versa) — which is the kernel-less-brick pair from
+   the Odin 3 bring-up notes.
+
+The operator never types a chip codename anywhere. `firmware_rows()` (`cas/dialogs.py`) already renders
+a *match rules* column, so detected chip/android/storage become visible in the Firmware window without
+new UI.
+
+### Escape hatch: detection came up empty
+
+`_grep_value()` greps `super_*.img` / `system_*.img`. A build whose props live elsewhere (vendor image,
+compressed payload) yields `""` → chip unknown → entry stays legacy → gate abstains. Per the core rule
+this is *safe*, but it is **silent**, and its symptom (`(no match)`) is indistinguishable from the
+problem this spec exists to fix.
+
+Add `python3 -m cas.firmware set <id> [--chip X] [--android Y] [--storage emmc|ufs]` to write the gate
+fields on an existing entry without re-ingesting. Today the only recourse is hand-editing `meta.json`.
+
+### `(no match)` must explain itself
+
+This spec deletes a warning that was noisy and false. It must not replace it with a dead end that is
+quiet and uninformative. When `resolve()` returns no candidate, the reason string must distinguish:
+
+- `no firmware matches this chip (kalama)` — 4 entries rejected on chip → the library genuinely lacks a
+  build for this silicon; ingest one.
+- `2 firmware(s) have no chip recorded — run 'cas.firmware backfill'` — legacy entries abstained; the
+  data is missing, not the build.
+
+These are different operator actions, so they must be different messages. The existing
+`{"warnings": [...]}` field on the `resolve()` dict carries them; no new plumbing.
+
 ## Migration / backfill
 
 Existing firmware entries have payloads on the library drive, so backfill is re-detection, not
@@ -159,6 +202,12 @@ is what earns the silent auto-select.
 - The proven RP6 ≡ Odin 2 pair passes the gate once both are backfilled, and produces **no warning**.
 - `logic_check()` no longer emits a device-inequality warning.
 - `_img_kernel_size()` behavior is untouched (existing tests must pass unmodified).
+- `ingest()` on a build with detectable props seeds chip/android into `match{}` with no caller input
+  (the zero-knowledge operator path).
+- `ingest()` on a build with **no** detectable chip leaves the entry legacy and does not raise.
+- `set --chip/--android/--storage` writes the gate fields on an existing entry and is idempotent.
+- `resolve()` with no candidate distinguishes "no build for this chip" from "entries have no chip
+  recorded — run backfill". Two distinct reason strings, because they imply different operator actions.
 
 ## Open items — verify before/during implementation
 
