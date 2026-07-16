@@ -68,11 +68,31 @@ A firmware rejected by the gate is not a candidate at all — no score, absent f
 
 ### Stage 2 — score (survivors only)
 
-Unchanged: `serial_prefix=3, device=2, brand=1`. The `soc=1` rule is retired — chip is now a gate, not
-a tiebreaker. Unique highest score wins; tie or zero → `None`, operator selects (as today).
+Soft rules unchanged: `serial_prefix=3, device=2, brand=1`. The `soc=1` rule is **retired** — chip is
+now a gate, not a tiebreaker. Unique highest score wins; a tie → `None`, operator selects (as today).
 
 Consequence: no soft rule can promote a firmware the gate rejected. The `serial_prefix`-outvotes-chip
 bug becomes structurally impossible.
+
+#### Affirmed vs vacuous gate passes (candidacy at score 0)
+
+`gate_check()` must report not just *whether* it passed but *whether it actually compared anything*.
+This is not a refinement — without it the feature fails on its motivating case:
+
+> An RP6 matched against the Odin 2 build scores **zero**: no `serial_prefix` hit, `device` differs,
+> `brand` differs. Under a naive `if score > 0` it would pass the gate and then be discarded.
+
+So `gate_check()` returns `(ok, reason, agreed)`, where `agreed` counts the axes that **compared and
+agreed** (rather than abstained):
+
+- **Affirmed pass (`agreed > 0`)** — the gate positively confirmed chip/android/storage compatibility.
+  The firmware is a candidate **even at score 0**. This is what makes cross-model reuse work.
+- **Vacuous pass (`agreed == 0`)** — every axis abstained (a legacy, un-backfilled entry). The gate
+  affirmed nothing, so the firmware still needs a positive score to be a candidate — today's behavior,
+  preserved exactly.
+
+This keeps the core rule intact in both directions: missing data never rejects a firmware, and it never
+promotes one either.
 
 ### Selection behavior
 
