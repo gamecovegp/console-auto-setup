@@ -187,6 +187,59 @@ class TestFirmwareClass(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Task 2b: _storage_from_bootdevice() + _android_major() — gate helpers
+# ---------------------------------------------------------------------------
+
+class TestStorageProbe(unittest.TestCase):
+    """ro.boot.bootdevice -> 'ufs'|'emmc'|''. UNVERIFIED against real hardware: the '' fallback is what
+    makes a wrong guess safe (unrecognized -> axis abstains -> legacy behavior, never a wrong flash)."""
+
+    def test_ufs_controller(self):
+        self.assertEqual(FW._storage_from_bootdevice("1d84000.ufshc"), "ufs")
+
+    def test_emmc_sdhci_controller(self):
+        self.assertEqual(FW._storage_from_bootdevice("4804000.sdhci"), "emmc")
+
+    def test_emmc_mmc_controller(self):
+        self.assertEqual(FW._storage_from_bootdevice("7c4000.mmc0"), "emmc")
+
+    def test_case_insensitive(self):
+        self.assertEqual(FW._storage_from_bootdevice("1D84000.UFSHC"), "ufs")
+
+    def test_unknown_returns_empty_so_axis_abstains(self):
+        self.assertEqual(FW._storage_from_bootdevice("something.weird"), "")
+
+    def test_none_and_empty_return_empty(self):
+        self.assertEqual(FW._storage_from_bootdevice(None), "")
+        self.assertEqual(FW._storage_from_bootdevice(""), "")
+
+
+class TestAndroidMajor(unittest.TestCase):
+    """ro.build.version.release -> major version string; '' -> ''."""
+
+    def test_android_13(self):
+        self.assertEqual(FW._android_major("13"), "13")
+
+    def test_android_13_1(self):
+        self.assertEqual(FW._android_major("13.1"), "13")
+
+    def test_android_14(self):
+        self.assertEqual(FW._android_major("14"), "14")
+
+    def test_android_14_with_patch(self):
+        self.assertEqual(FW._android_major("14.0.1"), "14")
+
+    def test_empty_string(self):
+        self.assertEqual(FW._android_major(""), "")
+
+    def test_none_returns_empty(self):
+        self.assertEqual(FW._android_major(None), "")
+
+    def test_whitespace_stripped(self):
+        self.assertEqual(FW._android_major("  13  "), "13")
+
+
+# ---------------------------------------------------------------------------
 # Task 4: match() — suggestion by identity
 # ---------------------------------------------------------------------------
 

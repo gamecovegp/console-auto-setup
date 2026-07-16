@@ -270,6 +270,29 @@ def default_kit_firmware(root):
 
 
 # ---------------------------------------------------------------------------
+# Task 2b: _storage_from_bootdevice() + _android_major() — gate helpers
+# ---------------------------------------------------------------------------
+
+def _storage_from_bootdevice(bootdevice):
+    """'ufs' | 'emmc' | '' from ro.boot.bootdevice (e.g. '1d84000.ufshc' -> 'ufs', '4804000.sdhci' ->
+    'emmc'). '' = unrecognized, which makes the storage gate axis ABSTAIN.
+
+    UNVERIFIED against real hardware — the '' fallback is deliberate: a wrong guess here degrades to
+    'storage does not gate' (legacy behavior), never to a wrong flash."""
+    b = (bootdevice or "").strip().lower()
+    if "ufs" in b:
+        return "ufs"
+    if "sdhci" in b or "mmc" in b:
+        return "emmc"
+    return ""
+
+
+def _android_major(release):
+    """'13.1' -> '13'; '' -> ''. Android gates on MAJOR only."""
+    return str(release or "").strip().split(".")[0]
+
+
+# ---------------------------------------------------------------------------
 # Task 4: match() — suggestion by device identity
 # ---------------------------------------------------------------------------
 
