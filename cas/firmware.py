@@ -352,12 +352,27 @@ def gate_check(firmware, identity_dict):
 
 
 def match(identity_dict, root):
-    """Suggest a Firmware for a device identity. Score per rule (serial_prefix=3, device=2, brand=1,
-    soc=1); the unique highest score wins. Tie or zero -> None (operator selects). Returns
-    (Firmware, current_version) or None."""
+    """Suggest a Firmware for a device identity. TWO STAGES:
+
+      1. gate_check() — a hard compatibility gate (chip/android/storage). A rejected firmware is not a
+         candidate at all; no soft rule can promote it. This is what fixes the latent bug where
+         serial_prefix (3) outvoted soc (1) and could carry a wrong-chip build to the top.
+      2. score, among survivors only — serial_prefix=3, device=2, brand=1. `soc` is NOT scored: chip is
+         a gate now, not a tiebreaker.
+
+    Candidacy: score>0, OR an AFFIRMED gate pass (agreed>0). The affirmed case is essential — an RP6 on
+    the Odin 2 build scores zero on every soft rule, and the gate's affirmation is the only evidence
+    there is. A VACUOUS pass (agreed==0, a legacy chip-less entry) affirms nothing and still requires a
+    positive score, preserving today's behavior.
+
+    The unique highest score wins. Tie -> None (operator selects). Returns (Firmware, version) or None.
+    """
     serial = identity_dict.get("serial") or ""
     scored = []
     for fw in list_firmware(root):
+        ok, _reason, agreed = gate_check(fw, identity_dict)
+        if not ok:
+            continue
         r = fw.match_rules()
         score = 0
         if _serial_prefix_hit(r, serial):
@@ -366,9 +381,7 @@ def match(identity_dict, root):
             score += 2
         if r.get("brand") and r["brand"].lower() == (identity_dict.get("brand") or "").lower():
             score += 1
-        if r.get("soc") and r["soc"] == identity_dict.get("soc"):
-            score += 1
-        if score > 0:
+        if score > 0 or agreed > 0:
             scored.append((score, fw))
     if not scored:
         return None

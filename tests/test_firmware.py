@@ -282,6 +282,37 @@ class TestMatch(unittest.TestCase):
     def test_no_match_returns_none(self):
         self.assertIsNone(FW.match({"serial": "ZZ", "device": "OTHER"}, self.root))
 
+    def test_gate_rejected_firmware_cannot_be_promoted_by_serial_prefix(self):
+        # THE LATENT BUG: serial_prefix (3) used to outvote soc (1). A stale serial rule must no
+        # longer be able to carry a wrong-chip build to the top.
+        make_fw(self.root, "wrong-chip-but-serial-hit",
+                match={"serial_prefix": ["MQ66"], "board_platform": "sun"})
+        m = FW.match({"serial": "MQ66999", "device": "AIR_X", "board_platform": "bengal",
+                      "soc": "SM6115", "brand": "MANGMI"}, self.root)
+        self.assertNotEqual(getattr(m and m[0], "id", None), "wrong-chip-but-serial-hit")
+
+    def test_affirmed_gate_pass_is_a_candidate_at_score_zero(self):
+        # THE MOTIVATING CASE: an RP6 on the Odin 2 build hits no serial prefix, and its device and
+        # brand both differ -> score 0. The affirmed gate pass alone must carry it.
+        root = pathlib.Path(tempfile.mkdtemp()) / "_firmware"
+        root.mkdir(parents=True)
+        make_fw(root, "ayn-odin2", device="odin2", storage="ufs",
+                match={"device": "odin2", "board_platform": "kalama", "android_release": "13"})
+        m = FW.match({"serial": "RP6x", "device": "RP6", "brand": "Retroid",
+                      "board_platform": "kalama", "soc": "SM8550", "android_release": "13",
+                      "bootdevice": "1d84000.ufshc"}, root)
+        self.assertIsNotNone(m)
+        self.assertEqual(m[0].id, "ayn-odin2")
+
+    def test_vacuous_gate_pass_at_score_zero_is_not_a_candidate(self):
+        # A legacy chip-less entry affirms nothing. It must still need a positive score - today's
+        # behavior, preserved. Otherwise every legacy entry would tie at 0 and matching would break.
+        root = pathlib.Path(tempfile.mkdtemp()) / "_firmware"
+        root.mkdir(parents=True)
+        make_fw(root, "legacy", device="whatever", storage="", match={})
+        self.assertIsNone(FW.match({"serial": "RP6x", "device": "RP6",
+                                    "board_platform": "kalama"}, root))
+
 
 # ---------------------------------------------------------------------------
 # Task 4b: gate_check() — the core rule
