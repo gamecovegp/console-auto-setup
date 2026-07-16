@@ -283,13 +283,31 @@ class TestMatch(unittest.TestCase):
         self.assertIsNone(FW.match({"serial": "ZZ", "device": "OTHER"}, self.root))
 
     def test_gate_rejected_firmware_cannot_be_promoted_by_serial_prefix(self):
-        # THE LATENT BUG: serial_prefix (3) used to outvote soc (1). A stale serial rule must no
-        # longer be able to carry a wrong-chip build to the top.
-        make_fw(self.root, "wrong-chip-but-serial-hit",
-                match={"serial_prefix": ["MQ66"], "board_platform": "sun"})
+        # The wrong-chip build must be the TOP soft scorer, or the gate is never exercised.
+        root = pathlib.Path(tempfile.mkdtemp()) / "_firmware"
+        root.mkdir(parents=True)
+        make_fw(root, "wrong-chip-but-serial-hit",
+                match={"serial_prefix": ["MQ66"], "device": "AIR_X", "board_platform": "sun"})
+        make_fw(root, "right-chip-weak-rules", match={"device": "AIR_X", "board_platform": "bengal"})
         m = FW.match({"serial": "MQ66999", "device": "AIR_X", "board_platform": "bengal",
-                      "soc": "SM6115", "brand": "MANGMI"}, self.root)
-        self.assertNotEqual(getattr(m and m[0], "id", None), "wrong-chip-but-serial-hit")
+                      "soc": "SM6115", "brand": "MANGMI"}, root)
+        self.assertEqual(m[0].id, "right-chip-weak-rules")   # old code: wrong-chip, 5 vs 2
+
+    def test_gate_rejected_firmware_is_not_a_candidate_even_when_alone(self):
+        root = pathlib.Path(tempfile.mkdtemp()) / "_firmware"
+        root.mkdir(parents=True)
+        make_fw(root, "wrong-chip-but-serial-hit",
+                match={"serial_prefix": ["MQ66"], "device": "AIR_X", "board_platform": "sun"})
+        self.assertIsNone(FW.match({"serial": "MQ66999", "device": "AIR_X",
+                                    "board_platform": "bengal"}, root))
+
+    def test_soc_is_not_scored(self):
+        # soc is a gate, not a tiebreaker: both score 2 on device alone -> tie -> None.
+        root = pathlib.Path(tempfile.mkdtemp()) / "_firmware"
+        root.mkdir(parents=True)
+        make_fw(root, "aaa-soc-rule", match={"device": "AIR_X", "soc": "SM6115"})
+        make_fw(root, "bbb-no-soc-rule", match={"device": "AIR_X"})
+        self.assertIsNone(FW.match({"serial": "MQ66999", "device": "AIR_X", "soc": "SM6115"}, root))
 
     def test_affirmed_gate_pass_is_a_candidate_at_score_zero(self):
         # THE MOTIVATING CASE: an RP6 on the Odin 2 build hits no serial prefix, and its device and
