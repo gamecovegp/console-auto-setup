@@ -300,6 +300,53 @@ def _serial_prefix_hit(rules, serial):
     return bool(serial) and any(serial.startswith(p) for p in (rules.get("serial_prefix") or []))
 
 
+# ---------------------------------------------------------------------------
+# Task 4b: gate_check() — the core rule (hard compatibility gate, before scoring)
+# ---------------------------------------------------------------------------
+
+def gate_check(firmware, identity_dict):
+    """Hard compatibility gate, evaluated BEFORE scoring. Returns (ok, reason, agreed).
+
+    CORE RULE: reject only on a KNOWN CONFLICT — never on missing data. An axis gates only when the
+    SAME field is populated on BOTH sides and the values differ; absence on either side abstains. That
+    is what lets today's chip-less meta.json entries keep resolving exactly as they always have.
+
+    NEVER compare ro.board.platform against ro.soc.model. 'kalama' and 'SM8550' name the same silicon,
+    so a cross-prop compare would read as a conflict and disqualify the whole library. Each chip prop is
+    compared only against its own counterpart.
+
+    `agreed` = how many axes actually COMPARED AND AGREED (as opposed to abstaining). agreed>0 is a
+    positive affirmation of compatibility and makes a firmware a candidate even at score 0 — which is
+    what makes cross-model reuse work at all (an RP6 on the Odin 2 build scores zero on every soft
+    rule). agreed==0 is a vacuous pass: the gate affirmed nothing, so match() still requires a positive
+    score, preserving today's behavior for un-backfilled entries.
+    """
+    r = firmware.match_rules()
+    agreed = 0
+
+    for key in ("board_platform", "soc"):
+        want, live = r.get(key), identity_dict.get(key)
+        if want and live:
+            if want.strip().lower() != live.strip().lower():
+                return (False, f"chip {live} != firmware {want}", agreed)
+            agreed += 1
+
+    want_a, live_a = r.get("android_release"), identity_dict.get("android_release")
+    if want_a and live_a:
+        if _android_major(want_a) != _android_major(live_a):
+            return (False, f"android {live_a} != firmware {want_a}", agreed)
+        agreed += 1
+
+    want_s = firmware.storage
+    live_s = _storage_from_bootdevice(identity_dict.get("bootdevice"))
+    if want_s and live_s:
+        if want_s.strip().lower() != live_s:
+            return (False, f"storage {live_s} != firmware {want_s}", agreed)
+        agreed += 1
+
+    return (True, None, agreed)
+
+
 def match(identity_dict, root):
     """Suggest a Firmware for a device identity. Score per rule (serial_prefix=3, device=2, brand=1,
     soc=1); the unique highest score wins. Tie or zero -> None (operator selects). Returns

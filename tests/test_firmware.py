@@ -284,6 +284,105 @@ class TestMatch(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Task 4b: gate_check() — the core rule
+# ---------------------------------------------------------------------------
+
+class TestGateCheck(unittest.TestCase):
+    """CORE RULE: reject only on a KNOWN CONFLICT (same field populated both sides, values differ);
+    never on missing data."""
+
+    def setUp(self):
+        self.root = pathlib.Path(tempfile.mkdtemp()) / "_firmware"
+        self.root.mkdir(parents=True)
+
+    def _fw(self, fid="ayn-odin2", storage="ufs", **rules):
+        return make_fw(self.root, fid, device="odin2", storage=storage, match=rules)
+
+    def _rp6(self, **over):
+        idn = {"serial": "RP6x", "device": "RP6", "brand": "Retroid", "board_platform": "kalama",
+               "soc": "SM8550", "android_release": "13", "bootdevice": "1d84000.ufshc"}
+        idn.update(over)
+        return idn
+
+    # --- the motivating case ---------------------------------------------------------------------
+    def test_proven_cross_brand_pair_passes_and_is_affirmed(self):
+        # RP6 on the Odin 2 build: known to boot. Must PASS and must be AFFIRMED (agreed>0), or
+        # match() would discard it at score 0.
+        fw = self._fw(board_platform="kalama", soc="SM8550", android_release="13")
+        ok, reason, agreed = FW.gate_check(fw, self._rp6())
+        self.assertTrue(ok)
+        self.assertIsNone(reason)
+        self.assertGreater(agreed, 0)
+
+    # --- known conflicts reject ------------------------------------------------------------------
+    def test_chip_conflict_rejects(self):
+        fw = self._fw(board_platform="sun")                      # Odin 3 build
+        ok, reason, agreed = FW.gate_check(fw, self._rp6())      # kalama unit
+        self.assertFalse(ok)
+        self.assertIn("kalama", reason)
+
+    def test_soc_conflict_rejects(self):
+        fw = self._fw(soc="SM8750")
+        ok, reason, _ = FW.gate_check(fw, self._rp6())
+        self.assertFalse(ok)
+        self.assertIn("SM8550", reason)
+
+    def test_android_major_conflict_rejects(self):
+        fw = self._fw(board_platform="kalama", android_release="15")
+        ok, reason, _ = FW.gate_check(fw, self._rp6())
+        self.assertFalse(ok)
+        self.assertIn("android", reason)
+
+    def test_storage_conflict_rejects(self):
+        fw = self._fw(storage="emmc", board_platform="kalama")   # ufs unit
+        ok, reason, _ = FW.gate_check(fw, self._rp6())
+        self.assertFalse(ok)
+        self.assertIn("storage", reason)
+
+    # --- missing data ABSTAINS (never rejects) ----------------------------------------------------
+    def test_legacy_entry_with_no_chip_abstains_vacuously(self):
+        fw = self._fw(storage="")                                # today's meta.json: no gate fields
+        ok, reason, agreed = FW.gate_check(fw, self._rp6())
+        self.assertTrue(ok)
+        self.assertEqual(agreed, 0)                              # vacuous: affirmed nothing
+
+    def test_device_not_reporting_props_abstains(self):
+        fw = self._fw(board_platform="kalama", android_release="13")
+        ok, _, agreed = FW.gate_check(fw, self._rp6(board_platform="", android_release="",
+                                                    soc="", bootdevice=""))
+        self.assertTrue(ok)
+        self.assertEqual(agreed, 0)
+
+    def test_unrecognized_bootdevice_makes_storage_abstain_not_reject(self):
+        fw = self._fw(storage="emmc", board_platform="kalama")
+        ok, _, _ = FW.gate_check(fw, self._rp6(bootdevice="something.weird"))
+        self.assertTrue(ok)                                      # storage abstained, chip agreed
+
+    # --- the cross-prop trap ----------------------------------------------------------------------
+    def test_never_compares_board_platform_against_soc(self):
+        # fw records only soc; device reports only board_platform. 'kalama' vs 'SM8550' must NOT
+        # be read as a conflict — they name the same silicon.
+        # bootdevice is neutralized too: _fw()'s default storage="ufs" would otherwise silently AGREE
+        # against _rp6()'s default ufs bootdevice, contaminating the agreed count this test isolates.
+        fw = self._fw(soc="SM8550")
+        ok, _, agreed = FW.gate_check(fw, self._rp6(soc="", bootdevice=""))
+        self.assertTrue(ok)
+        self.assertEqual(agreed, 0)
+
+    # --- comparison semantics ---------------------------------------------------------------------
+    def test_android_minor_does_not_conflict(self):
+        fw = self._fw(board_platform="kalama", android_release="13")
+        ok, _, _ = FW.gate_check(fw, self._rp6(android_release="13.1"))
+        self.assertTrue(ok)
+
+    def test_chip_compare_is_case_insensitive(self):
+        fw = self._fw(board_platform="KALAMA")
+        ok, _, agreed = FW.gate_check(fw, self._rp6())
+        self.assertTrue(ok)
+        self.assertGreater(agreed, 0)
+
+
+# ---------------------------------------------------------------------------
 # Task 5: logic_check() — brick-guard
 # ---------------------------------------------------------------------------
 
