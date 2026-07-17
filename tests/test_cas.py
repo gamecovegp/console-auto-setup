@@ -1,7 +1,9 @@
 """Unit tests for the cas package — mock adb runner, no real device. Run from project root:
     python3 -m unittest discover -s tests -p 'test_*.py' -t .
 """
+import io
 import os
+import re
 import sys
 import tarfile
 import tempfile
@@ -2002,6 +2004,40 @@ class TestProvision(unittest.TestCase):
             blob = "\n".join(msgs)
             self.assertIn("short read", blob)                                # the device's real reason
             self.assertIn("90G", blob)                                       # free-space context
+
+    def test_pull_dir_reports_progress_while_unpacking(self):
+        # The pack stream ends at '[ 100%]' and the PC-side unpack of a multi-GB tar then runs for MINUTES.
+        # With no line out of that phase the GUI bar sits frozen at 100 and the operator reads a healthy
+        # unpack as a HANG (observed 2026-07-17: an 11-min exFAT unpack looked dead). The unpack must emit
+        # the same '[ NN%]' the GUI already parses, so the bar keeps moving and says what it is doing.
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tf:
+            for i in range(8):
+                blob = (f"payload-{i}".encode() * 4096)
+                ti = tarfile.TarInfo(f"dir{i}/file{i}.bin")
+                ti.size = len(blob)
+                tf.addfile(ti, io.BytesIO(blob))
+        tar_bytes = buf.getvalue()
+
+        class _TarRunner(FakeRunner):
+            def __call__(self, args, input_text=None, timeout=900):
+                if "exec-out" in args:                       # su_pack_to_file test path writes this to the tar
+                    self.calls.append(list(args))
+                    return 0, tar_bytes, ""
+                return super().__call__(args, input_text, timeout)
+
+        with tempfile.TemporaryDirectory() as t:
+            msgs = []
+            dest = pathlib.Path(t) / "in"
+            ok = PV._pull_dir(Adb(runner=_TarRunner()), PV.TMPCAP, dest, msgs.append)
+            self.assertTrue(ok, f"pull failed: {msgs}")
+            self.assertTrue((dest / "dir0" / "file0.bin").is_file(), "tar was not unpacked")
+            unpack = [m for m in msgs if "unpacked" in m]
+            self.assertTrue(unpack, f"unpack phase emitted NO progress — bar freezes at 100: {msgs}")
+            self.assertTrue(any(PV._PCT_RE.search(m) for m in unpack) if hasattr(PV, "_PCT_RE")
+                            else any(re.search(r"\[\s*\d+%\]", m) for m in unpack),
+                            f"unpack progress is not in the '[ NN%]' form the GUI parses: {unpack}")
+            self.assertTrue(any("100%" in m for m in unpack), f"unpack never reported completion: {unpack}")
 
     def test_seed_default_manifest_populates_empty_placeholder(self):
         # A 'New profile' leaves a placeholder manifest with NO app lines; after the first capture the

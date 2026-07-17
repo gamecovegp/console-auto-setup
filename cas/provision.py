@@ -316,6 +316,44 @@ def _free_space_note(adb, path):
     return ""
 
 
+def _unpack_progress(tar, total_b, log, every=10.0):
+    """Yield `tar`'s members in archive order, emitting the '[ NN%]' line the GUI bar already parses.
+
+    WHY THIS EXISTS: the pack stream ends at '[ 100%]' and extractall() of a multi-GB golden then runs for
+    MINUTES with nothing on the log — so the bar sits frozen at 100 and a healthy unpack is indistinguishable
+    from a hang (observed 2026-07-17: an 11-minute exFAT unpack, contended by a concurrent firmware backfill
+    on the same drive, read as dead). Progress here is what tells those two apart.
+
+    WHY A GENERATOR: extractall() consumes members lazily, so this rides the SINGLE sequential pass it already
+    makes. Calling getmembers() to count first would re-read the entire archive — a second multi-GB pass on the
+    slow drive that is the very reason the phase is long. Handing extractall() an iterator (rather than
+    hand-rolling the loop) also keeps its directory-attribute fixup and member filtering exactly as they were:
+    this changes what the phase SAYS, never what it writes.
+
+    Position is the member's own offset INSIDE the archive, not a file count, so a golden's few big .apk/.img
+    members carry the weight they actually cost instead of counting the same as a 4 KB pref file. Emission is
+    throttled to a percent change or `every` seconds so a tar of many tiny files cannot flood the log.
+
+    GRANULARITY IS PER MEMBER — a line lands only BETWEEN members, so the bar pauses for however long the
+    single largest member takes (the observed 2.2 GB golden's biggest is a ~240 MB Chrome.apk ≈ 10%, so ~1 min
+    of an 11-min unpack; a hypothetical one-huge-file tar would report nothing until the end and is NOT covered
+    by this fix). That is the honest limit: this turns a totally silent phase into a mostly-moving one. Going
+    finer means wrapping the archive fileobj to count raw reads — worth it only if a real golden ever grows a
+    member big enough to make the pause read as a hang again.
+    """
+    last_pct, last_emit, t0 = -1, 0.0, time.monotonic()
+    for m in tar:
+        yield m                                            # extractall() resumes us AFTER extracting `m`
+        done_b = m.offset_data + m.size
+        now = time.monotonic()
+        pct = min(99, done_b * 100 // total_b) if total_b > 0 else 0
+        if pct != last_pct or now - last_emit >= every:
+            rate = (done_b / 1048576.0) / max(0.001, now - t0)
+            log(f"[ {pct}%] unpacked {done_b // 1048576} / {max(total_b, done_b) // 1048576} MB ({rate:.1f} MB/s)")
+            last_pct, last_emit = pct, now
+    log(f"[ 100%] unpacked {total_b // 1048576} MB")
+
+
 def _pull_dir(adb, dev_dir, pc_dir, log):
     """Pull a DEVICE directory tree to `pc_dir` on the PC as ONE tar — the mirror of _push_dir, so Save is
     OS-independent too. A plain `adb pull <dir>` can silently drop files on Windows the same way
@@ -353,8 +391,9 @@ def _pull_dir(adb, dev_dir, pc_dir, log):
                 log(f"  free space ({dev_dir}): {free}")
             return False
         try:
+            total_b = tmp.stat().st_size                   # the '[ NN%]' denominator: bytes of archive consumed
             with tarfile.open(str(tmp), "r") as tar:
-                tar.extractall(str(pc_dir))
+                tar.extractall(str(pc_dir), members=_unpack_progress(tar, total_b, log))
         except (OSError, tarfile.TarError) as e:
             log(f"could not unpack the pulled payload ({e}) — aborting (a partial golden is unsafe).")
             return False
