@@ -1787,13 +1787,15 @@ def root_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
             # Brand-agnostic flash: a resolved device-root-firmware supplies the unit's OWN stock init_boot
             # and — for EDL units whose bootloader fastboot can't write (e.g. MANGMI) — the Firehose flasher.
             # Fail-safe: any firmware-lookup error → fall back to the fastboot path + profile/default stock.
+            from . import firmware as FW
             flasher = None
+            proven = None                     # (identity, firmware_id, version) once firmware resolves
             phase = "fastboot_flash"          # coarse recovery hint; the EDL branch below flips it
             try:
-                from . import firmware as FW
                 idn = FW.identity(adb)
                 fwres = FW.resolve(serial, idn, FW.firmware_root())
                 fw = fwres.get("firmware")
+                proven = (idn, fwres.get("firmware_id"), fwres.get("version"))
                 if fw is None and fwres.get("firmware_id") != FW.DEFAULT_FW_ID and FW.edl_only_device(idn):
                     # EDL-only unit (MANGMI): fastboot can't write init_boot, so a fallback flash is doomed.
                     # Fail-fast with the fix instead of rebooting to a bootloader flash that can only fail.
@@ -1830,6 +1832,10 @@ def root_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
             if adb.cancel is not None and adb.cancel.is_set():
                 return ("cancelled", prof.name)
             if ok:
+                if proven and proven[1]:
+                    # Root returned ok, which means the unit BOOTED — record the combination that
+                    # worked. Evidence only; nothing gates on it.
+                    FW.log_proven_pair(*proven)
                 return ("ok", prof.name)
             return _fail_with_recovery("root", phase, adb, fb, "fail",
                                        msgs[-1] if msgs else prof.name, _wlog)

@@ -751,6 +751,35 @@ def log_event(serial, firmware_id, version, action, manual, when=None):
         pass
 
 
+def log_proven_pair(identity_dict, firmware_id, version, when=None):
+    """Record a (chip, android, storage, model, firmware_id, version) tuple that ACTUALLY BOOTED.
+
+    EVIDENCE, NOT A GATE — nothing reads this to allow or block a flash. It exists so a proven
+    cross-model pair (an RP6 rooted from the Odin 2 build) stops being knowledge in one person's head
+    and becomes data in the library. Best-effort; never raises."""
+    try:
+        if when is None:
+            import datetime
+            when = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        idn = identity_dict or {}
+        rec = {
+            "when": when,
+            "serial": idn.get("serial"),
+            "model": idn.get("model"),
+            "chip": idn.get("board_platform") or idn.get("soc"),
+            "android": _android_major(idn.get("android_release")),
+            "storage": _storage_from_bootdevice(idn.get("bootdevice")),
+            "firmware_id": firmware_id,
+            "version": version,
+        }
+        p = pathlib.Path(config.history_dir()) / config.history_filename("firmware-proven")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a") as f:
+            f.write(json.dumps(rec) + "\n")
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Task 8 (CLI adaptation): main() — `python3 -m cas.firmware`
 # ---------------------------------------------------------------------------

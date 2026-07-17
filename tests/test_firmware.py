@@ -1238,5 +1238,40 @@ class TestMainBackfillSubcommand(unittest.TestCase):
         self.assertEqual(meta["match"]["board_platform"], "kalama")   # and the write still happened
 
 
+class TestProvenPair(unittest.TestCase):
+    """Task 11: log_proven_pair() records a (chip, android, storage, model, firmware_id, version)
+    tuple that ACTUALLY BOOTED. EVIDENCE, NOT A GATE -- nothing reads this file to allow or block a
+    flash. Mirrors log_event()'s jsonl pattern and its never-raises guarantee."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._saved = os.environ.get("CAS_PROFILES")
+        os.environ["CAS_PROFILES"] = self.tmp
+
+    def tearDown(self):
+        if self._saved is None:
+            os.environ.pop("CAS_PROFILES", None)
+        else:
+            os.environ["CAS_PROFILES"] = self._saved
+
+    def _idn(self):
+        return {"serial": "RP6x", "model": "RP6", "board_platform": "kalama", "soc": "SM8550",
+                "android_release": "13", "bootdevice": "1d84000.ufshc"}
+
+    def test_logs_the_tuple(self):
+        FW.log_proven_pair(self._idn(), "ayn-odin2", "20260507-165105", when="2026-07-16 10:00")
+        p = pathlib.Path(C.history_dir()) / C.history_filename("firmware-proven")
+        rec = json.loads(p.read_text().strip().splitlines()[-1])
+        self.assertEqual(rec["chip"], "kalama")
+        self.assertEqual(rec["android"], "13")
+        self.assertEqual(rec["storage"], "ufs")
+        self.assertEqual(rec["model"], "RP6")
+        self.assertEqual(rec["firmware_id"], "ayn-odin2")
+        self.assertEqual(rec["version"], "20260507-165105")
+
+    def test_never_raises_on_a_bad_identity(self):
+        FW.log_proven_pair(None, None, None)        # must not raise
+
+
 if __name__ == "__main__":
     unittest.main()
