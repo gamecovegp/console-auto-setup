@@ -1078,6 +1078,7 @@ def warmup_all(make_adb, devices, root="profiles", log=print, profile=None, prof
     seal is never blocked by it.
     Distinguishing fail from cancelled mirrors provision_all: warmup() itself returns a bare False either
     way, so check adb.cancel AFTER the call to tell them apart."""
+    t0 = time.monotonic()
     def worker(serial, state):
         if state != "device":
             log(f"[{serial}] skip (state={state})")
@@ -1124,7 +1125,7 @@ def warmup_all(make_adb, devices, root="profiles", log=print, profile=None, prof
             log(f"[{serial}] ERROR: {e}")
             return _fail_with_recovery("warmup", "", adb, None, "error", str(e), log)
     results = _each_device(devices, worker, parallel)
-    log_run(root, "warmup", results, log)                  # per-device pass/fail (+ reason) -> run history
+    log_run(root, "warmup", results, log, elapsed=time.monotonic() - t0)   # + BATCH wall-clock
     return results
 
 
@@ -1757,6 +1758,7 @@ def root_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
     confirmed assignment). Devices with no profile / no stock_init_boot / the golden are skipped. Returns
     {serial: (status, detail)}, failures isolated.
     (param is profiles_root, NOT root, so it can't shadow the root() function called below.)"""
+    t0 = time.monotonic()
     appdir = pathlib.Path(appdir) if appdir else pathlib.Path(".")
     force_serials = force_serials or set()
 
@@ -1850,7 +1852,7 @@ def root_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
             log(f"[{serial}] ERROR: {e}")
             return _fail_with_recovery("root", "", adb, fb, "error", str(e), log)
     results = _each_device(devices, worker, parallel)
-    log_run(profiles_root, "root", results, log)           # per-device pass/fail (+ reason) -> run history
+    log_run(profiles_root, "root", results, log, elapsed=time.monotonic() - t0)   # + BATCH wall-clock
     return results
 
 
@@ -1861,6 +1863,7 @@ def seal_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
     force_serials = serials to seal even on a model mismatch (deliberate, already-confirmed). The golden and
     devices with no profile / no stock_init_boot are skipped. Per-device isolated. Returns {serial: (status,
     detail)}."""
+    t0 = time.monotonic()
     appdir = pathlib.Path(appdir) if appdir else pathlib.Path(".")
     force_serials = force_serials or set()
 
@@ -1953,5 +1956,5 @@ def seal_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
             log(f"[{serial}] ERROR: {e}")
             return _fail_with_recovery("lock", "", adb, fb, "error", str(e), log)
     results = _each_device(devices, worker, parallel)
-    log_run(profiles_root, "lock", results, log)           # per-device pass/fail (+ reason) -> run history
+    log_run(profiles_root, "lock", results, log, elapsed=time.monotonic() - t0)   # + BATCH wall-clock
     return results

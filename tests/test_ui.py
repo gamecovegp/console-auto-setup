@@ -1215,6 +1215,45 @@ class TestFmtRunDuration(unittest.TestCase):
         self.assertIn("boom", out)
 
 
+class TestRunCallersMeasureElapsed(unittest.TestCase):
+    """Each *_all action must pass a measured elapsed to log_run. A caller that silently stops timing
+    breaks nothing and fails nothing — it just logs '—s' forever. So pin every call site."""
+
+    def _capture_elapsed(self, fn_name, *args, **kw):
+        """Call PV.<fn_name> with log_run stubbed; return the `elapsed` it was handed."""
+        from cas import provision as PV
+        seen = {}
+
+        def fake_log_run(root, action, results, log=print, elapsed=None):
+            seen["action"] = action
+            seen["elapsed"] = elapsed
+        with mock.patch.object(PV, "log_run", fake_log_run), \
+             mock.patch.object(PV, "_each_device", lambda devices, worker, parallel: {"S1": ("ok", "p")}):
+            getattr(PV, fn_name)(*args, **kw)
+        return seen
+
+    def test_root_all_passes_measured_elapsed(self):
+        seen = self._capture_elapsed("root_all", lambda s: None, lambda s: None, ["S1"],
+                                     profiles_root="r", log=lambda m: None)
+        self.assertEqual(seen["action"], "root")
+        self.assertIsNotNone(seen["elapsed"], "root_all passed no elapsed — it stopped timing")
+        self.assertGreaterEqual(seen["elapsed"], 0.0)
+
+    def test_seal_all_passes_measured_elapsed(self):
+        seen = self._capture_elapsed("seal_all", lambda s: None, lambda s: None, ["S1"],
+                                     profiles_root="r", log=lambda m: None)
+        self.assertEqual(seen["action"], "lock")
+        self.assertIsNotNone(seen["elapsed"], "seal_all passed no elapsed — it stopped timing")
+        self.assertGreaterEqual(seen["elapsed"], 0.0)
+
+    def test_warmup_all_passes_measured_elapsed(self):
+        seen = self._capture_elapsed("warmup_all", lambda s: None, ["S1"],
+                                     root="r", log=lambda m: None)
+        self.assertEqual(seen["action"], "warmup")
+        self.assertIsNotNone(seen["elapsed"], "warmup_all passed no elapsed — it stopped timing")
+        self.assertGreaterEqual(seen["elapsed"], 0.0)
+
+
 class TestSetProfileModel(unittest.TestCase):
     """The Profile library 'Set model…' button edits a profile's model_match (what auto-assigns a device
     to it), writing profile.meta in place and leaving other keys intact."""
