@@ -1150,14 +1150,26 @@ class TestNoMatchReasons(unittest.TestCase):
         # gate_check() treats board_platform AND soc as chip axes; _no_match_reasons must too. An
         # entry recording only a `soc` rule is not "legacy"/"records no chip" just because the LIVE
         # device didn't report soc (so the axis abstained rather than compared).
+        #
+        # "records no chip" now has TWO phrasings (scannable -> backfill hint, unscannable -> set
+        # --chip hint) — this fixture's payload is empty (make_fw's default), so a board_platform-only
+        # chip-less check would misfile it as UNSCANNABLE, whose message contains no "backfill"
+        # substring. Asserting only the absence of "backfill" would pass on that wrong output. Assert
+        # on the concept instead: no "record no chip" advice of ANY kind, since a soc rule means the
+        # entry isn't chip-less at all. With no other firmware present and this entry gate-passing,
+        # the only correct outcome is the generic fallback.
         make_fw(self.root, "soc-only", device="x", storage="", match={"soc": "SM7999"})
         idn = self._rp6()
         idn = dict(idn)
         idn.pop("soc", None)   # device doesn't report soc -> soc axis abstains, agreed stays 0
         r = FW.resolve("RP6x", idn, self.root)
         self.assertIsNone(r["firmware_id"])
-        self.assertFalse(any("backfill" in w for w in r["warnings"]),
-                         f"a soc-recording entry must not be reported as 'records no chip': {r['warnings']}")
+        self.assertFalse(any("record no chip" in w for w in r["warnings"]),
+                         f"a soc-recording entry must not be reported as 'records no chip' in any "
+                         f"phrasing (backfill or set --chip): {r['warnings']}")
+        self.assertEqual(r["warnings"], ["no match — select manually"],
+                         f"soc-only entry gate-passes with agreed=0 and isn't chip-less, so no "
+                         f"chip-axis advice should fire at all: {r['warnings']}")
 
     # --- Task 3: don't recommend backfill for an entry it can never fix --------------------------
 
