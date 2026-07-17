@@ -85,14 +85,44 @@ This is not a refinement — without it the feature fails on its motivating case
 So `gate_check()` returns `(ok, reason, agreed)`, where `agreed` counts the axes that **compared and
 agreed** (rather than abstained):
 
-- **Affirmed pass (`agreed > 0`)** — the gate positively confirmed chip/android/storage compatibility.
-  The firmware is a candidate **even at score 0**. This is what makes cross-model reuse work.
-- **Vacuous pass (`agreed == 0`)** — every axis abstained (a legacy, un-backfilled entry). The gate
+- **Affirmed pass (`agreed > 0`)** — the gate positively confirmed **chip** compatibility. The firmware
+  is a candidate **even at score 0**. This is what makes cross-model reuse work.
+- **Vacuous pass (`agreed == 0`)** — no chip axis compared (a legacy, un-backfilled entry). The gate
   affirmed nothing, so the firmware still needs a positive score to be a candidate — today's behavior,
   preserved exactly.
 
 This keeps the core rule intact in both directions: missing data never rejects a firmware, and it never
 promotes one either.
+
+#### Only the CHIP axes affirm — android and storage reject but never promote
+
+**`agreed` counts `board_platform` and `soc` only.** Android and storage keep their full **reject**
+power on a known conflict; they simply never contribute to `agreed`.
+
+This distinction is load-bearing, and an earlier draft of this spec got it wrong by conflating "the
+gate affirmed *something*" with "the gate affirmed *the chip*". The final review caught the
+consequence on the operator's real library:
+
+> `_firmware/odin3` records `storage=ufs` and **no chip**. Under the old rule it returned `agreed=1`
+> for *every UFS device* — candidacy at score 0 on the strength of "we are both UFS". It was saved only
+> by an accidental tie with `pocket-max` (also ufs, also chip-less). **Running the migration this very
+> spec prescribes breaks that tie**: `backfill` gives `pocket-max` a chip, it starts rejecting, and
+> `odin3` becomes the sole score-0 candidate — silently auto-selecting an SD 8 Elite (`sun`) ramdisk
+> onto SD 8 Gen 2 (`kalama`) silicon. `_img_kernel_size` does not catch it: both are kernel-less
+> `init_boot` images, so the partition type is *right* and only the chip is wrong. And `odin3`'s
+> payload carries no super image, so `backfill` can never give it a chip — it is a permanent universal
+> UFS wildcard.
+
+The principle: **storage is a one-bit axis.** "Both UFS" is not evidence of ramdisk compatibility.
+Chip agreement is the only signal strong enough to justify selecting a firmware that scores zero on
+every soft rule (the proven RP6 ≡ Odin 2 pair). Android and storage are corroborating axes — strong
+enough to **reject** on conflict, far too weak to **promote** on agreement.
+
+This also repairs a hole in Open Item 1's safety argument: it justified the unverified storage probe
+only in the *reject* direction ("unrecognized → abstains → never a wrong flash"). That argument never
+covered the *affirm* direction, where a recognized-but-weak agreement actively **promotes** a
+wrong-chip build. With storage no longer contributing to `agreed`, the argument holds in both
+directions.
 
 ### Selection behavior
 
