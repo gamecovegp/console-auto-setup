@@ -633,13 +633,40 @@ def set_gate_fields(firmware_id, root, chip=None, soc=None, android=None, storag
 # Task 10: backfill() — migration without a flag day
 # ---------------------------------------------------------------------------
 
-def backfill(root):
+# The exact skip reason for an entry backfill can NEVER fix. It carries the next command, because the
+# operator's alternative is a 91-minute scan that ends in "0 firmware backfilled" and no explanation.
+NO_BUILD_IMAGES = ("no super/system image in payload — backfill can never detect this; "
+                   "use 'set --chip'")
+
+
+def _payload_has_build_images(firmware, version=None):
+    """True when the payload holds a super_*/system_*.img for detect_build() to grep. Mirrors
+    detect_build()'s own base-directory logic (payload/<emmc|ufs>/ if present, else payload/) so the
+    two can never disagree about whether an entry is detectable.
+
+    False means backfill can NEVER fill this entry's chip no matter how long it scans — its payload is
+    a bare init_boot.img/boot.img (odin2-default, odin3, retroid-pocket-5 are all this shape). That is
+    a different situation from 'scanned and found nothing new', and the operator needs to know which."""
+    pd = firmware.payload_dir(version)
+    if not pd or not pd.is_dir():
+        return False
+    storage = "emmc" if (pd / "emmc").is_dir() else ("ufs" if (pd / "ufs").is_dir() else "")
+    base = (pd / storage) if storage else pd
+    return bool(list(base.glob("super_*.img")) or list(base.glob("system_*.img")))
+
+
+def backfill(root, log=print):
     """Re-run detect_build() over every firmware's CURRENT version payload and fill the gate fields it
     is MISSING. The payload is a verbatim copy of the build tree, so detect_build() works on it as-is.
 
-    Never overwrites an existing value — an operator's `set` wins over detection. Best-effort per entry:
-    an unreadable or undetectable payload is skipped, never raised. Returns [(firmware_id, filled)] for
-    entries actually changed, so the CLI can report what moved.
+    Returns (filled, skipped): filled = [(id, {field: value})] for entries actually changed;
+    skipped = [(id, reason)] for every entry that was not. NOTHING IS SKIPPED SILENTLY — a measured run
+    on a real library took 91 MINUTES, printed nothing, and quietly passed over the three entries it
+    could never help, which is indistinguishable from a hang followed by a shrug. Progress is emitted
+    via `log` BEFORE each entry is scanned, for the same reason.
+
+    Never overwrites an existing value — an operator's `set` wins over detection. Best-effort per
+    entry: an unreadable or undetectable payload is skipped, never raised.
 
     CORRUPT-META GUARD: list_firmware() only returns dirs that CONTAIN a meta.json — so if fw.meta is
     empty/falsy, the file exists but did NOT parse (_read_json() swallows the error and returns {}).
@@ -647,29 +674,41 @@ def backfill(root):
     missing" would call set_gate_fields(), which re-reads the same unparseable file, also gets {}, and
     writes back a meta.json containing almost nothing — silently dropping device/storage/flash_target/
     current/history/label/id. Skip it instead, before touching anything."""
-    out = []
-    for fw in list_firmware(root):
+    filled_out, skipped = [], []
+    fws = list_firmware(root)
+    total = len(fws)
+    for i, fw in enumerate(fws, 1):
+        head = f"[{i}/{total}] {fw.id}"
+
+        def skip(reason):
+            skipped.append((fw.id, reason))
+            log(f"{head}: skipped — {reason}")
+
         if not fw.meta:
+            skip("meta.json did not parse — left untouched")
             continue
-        pd = fw.payload_dir()
-        if not pd or not pd.is_dir():
+        if not _payload_has_build_images(fw):
+            skip(NO_BUILD_IMAGES)
             continue
+        log(f"{head}: scanning payload…")
         try:
-            info = detect_build(pd)
-        except Exception:
+            info = detect_build(fw.payload_dir())
+        except Exception as e:
+            skip(f"payload unreadable ({e})")
             continue
         r = fw.match_rules()
         filled = {}
-        for meta_key, info_key in (("board_platform", "board_platform"), ("soc", "soc"),
-                                   ("android_release", "android_release")):
-            if info.get(info_key) and not r.get(meta_key):
-                filled[meta_key] = info[info_key]
+        for key in ("board_platform", "soc", "android_release"):
+            if info.get(key) and not r.get(key):
+                filled[key] = info[key]
         if not filled:
+            skip("nothing new detected")
             continue
         set_gate_fields(fw.id, root, chip=filled.get("board_platform"),
                         soc=filled.get("soc"), android=filled.get("android_release"))
-        out.append((fw.id, filled))
-    return out
+        filled_out.append((fw.id, filled))
+        log(f"{head}: filled {filled}")
+    return (filled_out, skipped)
 
 
 # ---------------------------------------------------------------------------
@@ -911,10 +950,12 @@ def main(argv=None):
         print(f"{fw.id}: match={fw.match_rules()} storage={fw.storage}")
 
     elif args.cmd == "backfill":
-        rows = backfill(root)
-        for fid, filled in rows:
-            print(f"{fid}: filled {filled}")
-        print(f"{len(rows)} firmware backfilled")
+        filled, skipped = backfill(root)
+        for fid, fields in filled:
+            print(f"{fid}: filled {fields}")
+        for fid, reason in skipped:
+            print(f"{fid}: skipped — {reason}")
+        print(f"{len(filled)} firmware backfilled, {len(skipped)} skipped")
 
     elif args.cmd in ("show", "assign"):
         a = Adb(serial=getattr(args, "serial", None), adb=find_adb("adb"))

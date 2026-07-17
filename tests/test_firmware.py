@@ -1285,7 +1285,7 @@ class TestBackfill(unittest.TestCase):
 
     def test_backfill_fills_gate_fields_from_the_payload(self):
         self._ingest_then_strip("ayn-odin2", board_platform="kalama", soc="SM8550", android="13")
-        filled = FW.backfill(self.root)
+        filled, _skipped = FW.backfill(self.root)
         self.assertEqual([fid for fid, _ in filled], ["ayn-odin2"])
         fw = FW.find("ayn-odin2", self.root)
         self.assertEqual(fw.match_rules()["board_platform"], "kalama")
@@ -1294,7 +1294,8 @@ class TestBackfill(unittest.TestCase):
     def test_backfill_is_idempotent_and_reports_nothing_second_time(self):
         self._ingest_then_strip("ayn-odin2", board_platform="kalama", soc="SM8550", android="13")
         FW.backfill(self.root)
-        self.assertEqual(FW.backfill(self.root), [])
+        filled, _skipped = FW.backfill(self.root)
+        self.assertEqual(filled, [])
 
     def test_backfill_never_overwrites_an_operator_set_value(self):
         self._ingest_then_strip("ayn-odin2", board_platform="kalama", soc="SM8550", android="13")
@@ -1305,7 +1306,8 @@ class TestBackfill(unittest.TestCase):
 
     def test_backfill_skips_undetectable_entry_without_raising(self):
         self._ingest_then_strip("legacy", board_platform="", soc="", android="")
-        self.assertEqual(FW.backfill(self.root), [])
+        filled, _skipped = FW.backfill(self.root)
+        self.assertEqual(filled, [])
 
     def test_backfill_skips_corrupt_json_syntax_entry_without_clobbering_it(self):
         # Reviewer's literal example: meta.json with broken JSON syntax alongside a healthy entry.
@@ -1318,7 +1320,7 @@ class TestBackfill(unittest.TestCase):
         (corrupt_dir / "versions" / "20260101-000000" / "payload").mkdir(parents=True)
         before = (corrupt_dir / "meta.json").read_bytes()
 
-        filled = FW.backfill(self.root)
+        filled, _skipped = FW.backfill(self.root)
 
         self.assertEqual([fid for fid, _ in filled], ["ayn-odin2"])   # only the healthy entry
         after = (corrupt_dir / "meta.json").read_bytes()
@@ -1342,11 +1344,97 @@ class TestBackfill(unittest.TestCase):
         (corrupt_dir / "versions" / "20260101-000000" / "payload").mkdir(parents=True)
         before = (corrupt_dir / "meta.json").read_bytes()
 
-        filled = FW.backfill(self.root)   # must not raise
+        filled, _skipped = FW.backfill(self.root)   # must not raise
 
         self.assertEqual([fid for fid, _ in filled], ["ayn-odin2"])
         after = (corrupt_dir / "meta.json").read_bytes()
         self.assertEqual(after, before)
+
+
+class TestPayloadHasBuildImages(unittest.TestCase):
+    """Distinguishes 'backfill can never help this' from 'backfill had nothing to add'."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.root = pathlib.Path(self.tmp) / "_firmware"
+        self.root.mkdir(parents=True)
+
+    def test_true_when_payload_has_a_super_image(self):
+        src = fake_build(self.tmp, "hasimg-20260507.165105")
+        fw = FW.ingest(src, self.root, firmware_id="hasimg")
+        self.assertTrue(FW._payload_has_build_images(fw))
+
+    def test_false_when_payload_has_no_super_or_system_image(self):
+        # The real shape of odin2-default / odin3 / retroid-pocket-5: a bare init_boot.img payload.
+        fw = make_fw(self.root, "bare", storage="")
+        (fw.payload_dir() / "init_boot.img").write_bytes(b"x")
+        self.assertFalse(FW._payload_has_build_images(fw))
+
+    def test_false_when_there_is_no_payload_at_all(self):
+        d = self.root / "nopayload"
+        (d / "versions").mkdir(parents=True)
+        FW._write_json(d / "meta.json", {"id": "nopayload", "current": "v1", "match": {}})
+        self.assertFalse(FW._payload_has_build_images(FW.Firmware(d)))
+
+
+class TestBackfillReporting(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.root = pathlib.Path(self.tmp) / "_firmware"
+        self.root.mkdir(parents=True)
+        self.lines = []
+
+    def _log(self, m):
+        self.lines.append(str(m))
+
+    def _bare(self, fid):
+        """An entry with no super image — backfill can NEVER detect its chip."""
+        fw = make_fw(self.root, fid, storage="")
+        (fw.payload_dir() / "init_boot.img").write_bytes(b"x")
+        return fw
+
+    def test_returns_filled_and_skipped(self):
+        src = fake_build(self.tmp, "good-20260507.165105", board_platform="kalama",
+                         soc="QCS8550", android="13")
+        FW.ingest(src, self.root, firmware_id="good")
+        meta = FW._read_json(self.root / "good" / "meta.json")
+        meta["match"] = {}
+        FW._write_json(self.root / "good" / "meta.json", meta)
+        self._bare("bare")
+
+        filled, skipped = FW.backfill(self.root, log=self._log)
+        self.assertEqual([fid for fid, _ in filled], ["good"])
+        self.assertIn("bare", [fid for fid, _ in skipped])
+
+    def test_no_super_image_skip_names_the_reason_and_the_fix(self):
+        self._bare("bare")
+        _filled, skipped = FW.backfill(self.root, log=self._log)
+        reason = dict(skipped)["bare"]
+        self.assertIn("no super", reason.lower())
+        self.assertIn("set --chip", reason)
+
+    def test_nothing_new_detected_is_reported_not_silent(self):
+        src = fake_build(self.tmp, "done-20260507.165105", board_platform="kalama",
+                         soc="QCS8550", android="13")
+        FW.ingest(src, self.root, firmware_id="done")      # ingest already seeded every gate field
+        _filled, skipped = FW.backfill(self.root, log=self._log)
+        self.assertIn("done", [fid for fid, _ in skipped])
+        self.assertIn("nothing new", dict(skipped)["done"].lower())
+
+    def test_progress_is_emitted_for_every_entry_including_skipped_ones(self):
+        # A skipped entry that prints nothing is exactly the bug being fixed.
+        self._bare("bare")
+        FW.backfill(self.root, log=self._log)
+        self.assertTrue(any("bare" in l for l in self.lines),
+                        f"no progress line mentioned the skipped entry: {self.lines}")
+        self.assertTrue(any("1/1" in l or "[1/" in l for l in self.lines),
+                        f"no [i/n] progress counter emitted: {self.lines}")
+
+    def test_corrupt_meta_is_reported_not_silently_skipped(self):
+        d = self.root / "corrupt"; d.mkdir()
+        (d / "meta.json").write_text("null")
+        _filled, skipped = FW.backfill(self.root, log=self._log)
+        self.assertIn("corrupt", [fid for fid, _ in skipped])
 
 
 # ---------------------------------------------------------------------------
