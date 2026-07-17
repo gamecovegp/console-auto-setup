@@ -47,9 +47,14 @@ def _fmt_download(r):
 
 
 def _fmt_run(r):
-    """root / lock / warmup run: pass/fail counts + each device (with the error reason on a failure)."""
+    """root / lock / warmup run: pass/fail counts, BATCH wall-clock, then each device (with the error
+    reason on a failure). The duration goes BEFORE the device list — like _fmt_download — because the
+    device list is unbounded (one entry per bench unit, each carrying a failure reason) and would push
+    the duration off the end of the line. total_secs is absent on records written before it existed;
+    _secs() renders those '—s'."""
     who = " | ".join(_dev_line(d) for d in (r.get("devices") or [])) or "—"
-    return f"{r.get('ok', 0)} ok · {r.get('failed', 0)} failed · {who}"
+    return (f"{r.get('ok', 0)} ok · {r.get('failed', 0)} failed · "
+            f"{_secs(r.get('total_secs'))}  ·  {who}")
 
 
 def _fmt_save(r):

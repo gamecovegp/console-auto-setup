@@ -1182,6 +1182,39 @@ class TestRunLogging(unittest.TestCase):
             self.assertEqual(self._read_run_record(td, "warmup")["total_secs"], 0.0)
 
 
+class TestFmtRunDuration(unittest.TestCase):
+    """_fmt_run renders BATCH wall-clock before the (unbounded) device list, like _fmt_download."""
+
+    def test_renders_duration(self):
+        import cas.history as H
+        out = H._fmt_run({"ok": 3, "failed": 0, "total_secs": 612,
+                          "devices": [{"serial": "S1", "status": "ok", "profile": "p"}]})
+        self.assertIn("612s", out)
+
+    def test_duration_precedes_the_device_list(self):
+        import cas.history as H
+        out = H._fmt_run({"ok": 1, "failed": 0, "total_secs": 612,
+                          "devices": [{"serial": "S1", "status": "ok", "profile": "p"}]})
+        self.assertLess(out.index("612s"), out.index("S1"),
+                        f"duration must precede the unbounded device list: {out!r}")
+
+    def test_old_record_without_total_secs_degrades_to_dash(self):
+        # Every record written before this field existed. Must render, must not raise.
+        import cas.history as H
+        out = H._fmt_run({"ok": 1, "failed": 0,
+                          "devices": [{"serial": "S1", "status": "ok", "profile": "p"}]})
+        self.assertIn("—s", out)
+        self.assertIn("S1", out)
+
+    def test_still_shows_counts_and_failure_reason(self):
+        import cas.history as H
+        out = H._fmt_run({"ok": 0, "failed": 1, "total_secs": 5,
+                          "devices": [{"serial": "S1", "status": "fail", "error": "boom"}]})
+        self.assertIn("0 ok", out)
+        self.assertIn("1 failed", out)
+        self.assertIn("boom", out)
+
+
 class TestSetProfileModel(unittest.TestCase):
     """The Profile library 'Set model…' button edits a profile's model_match (what auto-assigns a device
     to it), writing profile.meta in place and leaving other keys intact."""
