@@ -165,12 +165,20 @@ So, three changes, all reporting:
    `[2/9] air-x: scanning 4.8 GB…`. The count and size are already derivable (`list_firmware`,
    `payload_dir`).
 2. **`backfill()` returns skips as well as fills**, each with a reason. New return shape:
-   `(filled: [(id, dict)], skipped: [(id, reason)])`. Reasons, exactly these three:
-   - `"already has a chip"`
-   - `"no super/system image in payload — backfill can never detect this; use 'set --chip'"`
-   - `"nothing new detected"`
-   The CLI prints every skip. The second reason is the one that matters: it tells the operator the
-   truth (this entry is unfixable by scanning) and the exact next command.
+   `(filled: [(id, dict)], skipped: [(id, reason)])`. The CLI prints every skip. Reasons:
+   - `"no super/system image in payload — backfill can never detect this; use 'set --chip'"` — the one
+     that matters: it tells the operator the truth (this entry is unfixable by scanning, forever) and
+     the exact next command.
+   - `"nothing new detected"` — scanned, found nothing missing to add.
+   - `"meta.json did not parse — left untouched"` — the corrupt-entry guard.
+   - `"payload unreadable (<err>)"` — `detect_build` raised.
+
+   **Correction (found while planning):** an earlier draft of this spec listed `"already has a chip"`
+   as a skip reason. That is wrong and must NOT be implemented. `backfill` fills ANY missing gate
+   field, not just the chip — skipping a chip-having entry would silently prevent its
+   `android_release`/`soc` from ever being filled. `retroid-pocket-6` is exactly that shape today
+   (`board_platform` + `android_release`, no `soc`). `"nothing new detected"` covers the case
+   correctly. The governing principle is unchanged: no silent skips.
 3. **`_no_match_reasons` stops recommending backfill for entries it cannot help.** Today it counts any
    chip-less entry toward "run backfill". It must only count entries whose payload actually has a
    super/system image. An entry with no super image is reported as
