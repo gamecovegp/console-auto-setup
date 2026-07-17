@@ -7,6 +7,7 @@ import os
 import pathlib
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -1220,15 +1221,24 @@ class TestRunCallersMeasureElapsed(unittest.TestCase):
     breaks nothing and fails nothing — it just logs '—s' forever. So pin every call site."""
 
     def _capture_elapsed(self, fn_name, *args, **kw):
-        """Call PV.<fn_name> with log_run stubbed; return the `elapsed` it was handed."""
+        """Call PV.<fn_name> with log_run stubbed; return the `elapsed` it was handed.
+
+        The _each_device stub sleeps 0.05s so a t0 that doesn't span the fan-out
+        (e.g. moved to after this call) can only measure a near-zero elapsed —
+        that's what makes the caller's timing window actually provable.
+        """
         from cas import provision as PV
         seen = {}
 
         def fake_log_run(root, action, results, log=print, elapsed=None):
             seen["action"] = action
             seen["elapsed"] = elapsed
+
+        def fake_each_device(devices, worker, parallel):
+            time.sleep(0.05)
+            return {"S1": ("ok", "p")}
         with mock.patch.object(PV, "log_run", fake_log_run), \
-             mock.patch.object(PV, "_each_device", lambda devices, worker, parallel: {"S1": ("ok", "p")}):
+             mock.patch.object(PV, "_each_device", fake_each_device):
             getattr(PV, fn_name)(*args, **kw)
         return seen
 
@@ -1237,21 +1247,21 @@ class TestRunCallersMeasureElapsed(unittest.TestCase):
                                      profiles_root="r", log=lambda m: None)
         self.assertEqual(seen["action"], "root")
         self.assertIsNotNone(seen["elapsed"], "root_all passed no elapsed — it stopped timing")
-        self.assertGreaterEqual(seen["elapsed"], 0.0)
+        self.assertGreaterEqual(seen["elapsed"], 0.05)
 
     def test_seal_all_passes_measured_elapsed(self):
         seen = self._capture_elapsed("seal_all", lambda s: None, lambda s: None, ["S1"],
                                      profiles_root="r", log=lambda m: None)
         self.assertEqual(seen["action"], "lock")
         self.assertIsNotNone(seen["elapsed"], "seal_all passed no elapsed — it stopped timing")
-        self.assertGreaterEqual(seen["elapsed"], 0.0)
+        self.assertGreaterEqual(seen["elapsed"], 0.05)
 
     def test_warmup_all_passes_measured_elapsed(self):
         seen = self._capture_elapsed("warmup_all", lambda s: None, ["S1"],
                                      root="r", log=lambda m: None)
         self.assertEqual(seen["action"], "warmup")
         self.assertIsNotNone(seen["elapsed"], "warmup_all passed no elapsed — it stopped timing")
-        self.assertGreaterEqual(seen["elapsed"], 0.0)
+        self.assertGreaterEqual(seen["elapsed"], 0.05)
 
 
 class TestSetProfileModel(unittest.TestCase):
