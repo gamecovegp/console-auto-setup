@@ -1019,5 +1019,78 @@ class TestSetGateFields(unittest.TestCase):
             FW.set_gate_fields("nope", self.root, chip="kalama")
 
 
+# ---------------------------------------------------------------------------
+# Task 9 (review fix): main() 'set' subcommand — argparse dispatch is untested no longer
+# ---------------------------------------------------------------------------
+
+class TestMainSetSubcommand(unittest.TestCase):
+    """Reviewer finding: main()'s dispatch had ZERO test coverage (no test called main() at all for
+    any subcommand). Two things specifically must be pinned for `set`:
+      1. `main(["set", ...])` actually works end-to-end through real argparse parsing and writes
+         meta.json via the real CLI path (not just set_gate_fields() called directly).
+      2. `set` dispatches BEFORE the ("show", "assign") elif branch, which constructs an Adb and
+         talks to hardware over adb. If a future refactor lets 'set' fall into that branch (e.g. the
+         device-touching branch becomes a catch-all), `set` would try to open an adb connection and
+         hang/fail on a bench with no device plugged in — `set` must never require a device."""
+
+    def setUp(self):
+        # CAS_CONFIG isolation: save+restore (not a bare pop) — see TestDeviceFirmware.setUp above.
+        self._saved_cas_config = os.environ.get("CAS_CONFIG")
+        self._saved_cas_profiles = os.environ.get("CAS_PROFILES")
+        self.tmp = tempfile.mkdtemp()
+        os.environ["CAS_CONFIG"] = os.path.join(self.tmp, "cas-config.json")
+        os.environ["CAS_PROFILES"] = self.tmp   # pins firmware_root() to tmp/_firmware
+        self.root = pathlib.Path(self.tmp) / "_firmware"
+        self.root.mkdir(parents=True)
+        make_fw(self.root, "legacy-fw", device="x", storage="", match={})
+
+    def tearDown(self):
+        if self._saved_cas_config is None:
+            os.environ.pop("CAS_CONFIG", None)
+        else:
+            os.environ["CAS_CONFIG"] = self._saved_cas_config
+        if self._saved_cas_profiles is None:
+            os.environ.pop("CAS_PROFILES", None)
+        else:
+            os.environ["CAS_PROFILES"] = self._saved_cas_profiles
+
+    def _meta(self):
+        return FW._read_json(self.root / "legacy-fw" / "meta.json")
+
+    def test_set_writes_gate_fields_through_real_cli(self):
+        FW.main(["set", "legacy-fw", "--chip", "kalama", "--soc", "SM8550",
+                 "--android", "13", "--storage", "ufs"])
+        meta = self._meta()
+        self.assertEqual(meta["match"]["board_platform"], "kalama")
+        self.assertEqual(meta["match"]["soc"], "SM8550")
+        self.assertEqual(meta["match"]["android_release"], "13")
+        self.assertEqual(meta["storage"], "ufs")
+
+    def test_set_partial_flags_leave_others_intact(self):
+        FW.main(["set", "legacy-fw", "--chip", "kalama", "--storage", "ufs"])
+        FW.main(["set", "legacy-fw", "--android", "13"])   # only android this time — no --chip/--storage
+        meta = self._meta()
+        self.assertEqual(meta["match"]["board_platform"], "kalama")   # survives the second call
+        self.assertEqual(meta["storage"], "ufs")                      # survives the second call
+        self.assertEqual(meta["match"]["android_release"], "13")
+
+    def test_set_storage_rejects_invalid_choice(self):
+        with self.assertRaises(SystemExit) as cm:
+            FW.main(["set", "legacy-fw", "--storage", "nvme"])
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_set_never_constructs_adb(self):
+        # THE PIN: `set` must dispatch before the ("show","assign") branch, which does
+        # `Adb(serial=..., adb=find_adb("adb"))`. Patch cas.adb.Adb to explode if instantiated — main()
+        # imports it locally via `from .adb import Adb`, which is a live lookup on cas.adb at call time,
+        # so patching the module attribute here is visible to that import. If `set` ever reached the
+        # device-touching branch, this raises immediately instead of hanging on a bench with no device.
+        with mock.patch("cas.adb.Adb", side_effect=AssertionError(
+                "set must not construct Adb -- it dispatched into the device-touching branch")):
+            FW.main(["set", "legacy-fw", "--chip", "kalama"])   # must complete without raising
+        meta = self._meta()
+        self.assertEqual(meta["match"]["board_platform"], "kalama")   # and the write still happened
+
+
 if __name__ == "__main__":
     unittest.main()
