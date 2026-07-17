@@ -1,4 +1,6 @@
 # tests/test_firmware.py
+import contextlib
+import io
 import os
 import sys
 import json
@@ -200,8 +202,9 @@ class TestFirmwareClass(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestStorageProbe(unittest.TestCase):
-    """ro.boot.bootdevice -> 'ufs'|'emmc'|''. UNVERIFIED against real hardware: the '' fallback is what
-    makes a wrong guess safe (unrecognized -> axis abstains -> legacy behavior, never a wrong flash)."""
+    """ro.boot.bootdevice -> 'ufs'|'emmc'|''. CONFIRMED on real hardware (RP6 -> '1d84000.ufshc' ->
+    'ufs' — see test_ufs_controller). The '' fallback is what makes an unrecognized value safe
+    regardless (axis abstains -> legacy behavior, never a wrong flash)."""
 
     def test_ufs_controller(self):
         self.assertEqual(FW._storage_from_bootdevice("1d84000.ufshc"), "ufs")
@@ -1482,6 +1485,66 @@ class TestBackfillReporting(unittest.TestCase):
         _filled, skipped = FW.backfill(self.root, log=self._log)
         self.assertIn("corrupt", [fid for fid, _ in skipped])
 
+    def test_progress_line_precedes_the_scan_not_follows_it(self):
+        # ORDERING invariant, not a substring: the measured 91-minute defect is silence INSIDE
+        # detect_build() -- the operator must be told BEFORE the wait, never only after. A fixture
+        # where the only entry is SKIPPED (as in
+        # test_progress_is_emitted_for_every_entry_including_skipped_ones) can never catch a
+        # regression here, because a skipped entry never reaches detect_build() at all. This uses a
+        # SCANNABLE entry (payload has a super_*.img, gate fields stripped) so the scan is actually
+        # reached, and snapshots self.lines the instant detect_build() is entered. If the pre-scan log
+        # call is deleted (or moved to after detect_build() returns, alongside 'filled'/'nothing new'),
+        # the snapshot is empty and this fails.
+        src = fake_build(self.tmp, "big-20260507.165105", board_platform="kalama",
+                         soc="QCS8550", android="13")
+        FW.ingest(src, self.root, firmware_id="big")
+        meta = FW._read_json(self.root / "big" / "meta.json")
+        meta["match"] = {}
+        FW._write_json(self.root / "big" / "meta.json", meta)
+
+        seen = []
+        real = FW.detect_build
+
+        def spy(pd):
+            seen.extend(self.lines)          # snapshot whatever has been logged so far, THEN scan
+            return real(pd)
+
+        with mock.patch.object(FW, "detect_build", side_effect=spy):
+            FW.backfill(self.root, log=self._log)
+
+        self.assertTrue(any("big" in l for l in seen),
+                        f"nothing logged BEFORE the scan began: {seen}")
+
+    def test_scan_progress_line_includes_the_payload_size(self):
+        # The spec's example is "[2/9] air-x: scanning 4.8 GB..." -- for a 91-minute run the size is
+        # the operator's only ETA signal, so it must ride the SAME pre-scan line pinned above.
+        fw = make_fw(self.root, "big", storage="emmc", match={})
+        img_dir = fw.payload_dir() / "emmc"
+        img_dir.mkdir(parents=True, exist_ok=True)
+        with open(img_dir / "super_1.img", "wb") as f:
+            f.truncate(4_800_000_000)   # exactly 4.8 GB decimal
+
+        FW.backfill(self.root, log=self._log)
+
+        self.assertTrue(any("4.8 GB" in l for l in self.lines),
+                        f"no sized scan line: {self.lines}")
+
+    def test_scan_size_oserror_falls_back_to_sizeless_wording_without_aborting(self):
+        # Best-effort: a stat() failure while sizing must not abort the entry -- it must still reach
+        # detect_build(), just with the size-less wording.
+        fw = make_fw(self.root, "big", storage="emmc", match={})
+        img_dir = fw.payload_dir() / "emmc"
+        img_dir.mkdir(parents=True, exist_ok=True)
+        (img_dir / "super_1.img").write_bytes(b"x" * 100)
+
+        with mock.patch.object(FW, "_payload_scan_size_bytes", side_effect=OSError("boom")):
+            filled, skipped = FW.backfill(self.root, log=self._log)   # must not raise
+
+        self.assertTrue(any(l.endswith("scanning payload…") for l in self.lines),
+                        f"sizing OSError should fall back to the size-less wording: {self.lines}")
+        # and the entry still got processed (not silently dropped by the sizing failure)
+        self.assertEqual(len(filled) + len(skipped), 1)
+
 
 # ---------------------------------------------------------------------------
 # Task 10 (CLI): main() 'backfill' subcommand
@@ -1541,6 +1604,33 @@ class TestMainBackfillSubcommand(unittest.TestCase):
             FW.main(["backfill"])   # must complete without raising
         meta = FW._read_json(self.root / "ayn-odin2" / "meta.json")
         self.assertEqual(meta["match"]["board_platform"], "kalama")   # and the write still happened
+
+    def test_cli_prints_skip_progress_and_summary_via_real_stdout(self):
+        # backfill() is well tested at the return-value level, but main() is its ONLY caller -- the
+        # CLI IS the entire user-visible surface. Three independent assertions, one per surviving
+        # mutant: (1) a dedicated per-skip line from the CLI's own reporting -- anchored to the START
+        # of the line (no '[i/n] ' prefix) so it targets the CLI's explicit `for fid, reason in
+        # skipped: print(...)` loop specifically, distinct from backfill()'s own live progress line
+        # for the same entry; (2) the summary tally names the skipped count; (3) pre-scan progress
+        # (the 91-minute-silence fix) actually reaches stdout during a real run, which only holds if
+        # main() still lets backfill()'s default log=print through.
+        self._ingest_then_strip("good", board_platform="kalama", soc="SM8550", android="13")
+        bare = make_fw(self.root, "bare", storage="")
+        (bare.payload_dir() / "init_boot.img").write_bytes(b"x")
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            FW.main(["backfill"])
+        out = buf.getvalue()
+
+        # Mutant: CLI stops printing skips entirely.
+        self.assertRegex(out, r"(?m)^bare: skipped — ",
+                         f"no dedicated CLI skip line for 'bare': {out!r}")
+        # Mutant: summary drops ', {len(skipped)} skipped'.
+        self.assertRegex(out, r"\d+ firmware backfilled, 1 skipped",
+                         f"summary line missing the skipped count: {out!r}")
+        # Mutant: main() passes log=lambda *a: None -- restores the measured 91-minute silence.
+        self.assertIn("scanning", out, f"no pre-scan progress reached stdout: {out!r}")
 
 
 class TestProvenPair(unittest.TestCase):

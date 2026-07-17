@@ -277,8 +277,10 @@ def _storage_from_bootdevice(bootdevice):
     """'ufs' | 'emmc' | '' from ro.boot.bootdevice (e.g. '1d84000.ufshc' -> 'ufs', '4804000.sdhci' ->
     'emmc'). '' = unrecognized, which makes the storage gate axis ABSTAIN.
 
-    UNVERIFIED against real hardware — the '' fallback is deliberate: a wrong guess here degrades to
-    'storage does not gate' (legacy behavior), never to a wrong flash."""
+    CONFIRMED on real hardware: a live Retroid Pocket 6 (serial caecc295) returned
+    ro.boot.bootdevice = '1d84000.ufshc' — the exact string this design guessed — and this probe
+    correctly mapped it to 'ufs'. The '' fallback stays deliberate regardless: an unrecognized value
+    degrades to 'storage does not gate' (legacy behavior), never to a wrong flash."""
     b = (bootdevice or "").strip().lower()
     if "ufs" in b:
         return "ufs"
@@ -655,6 +657,26 @@ def _payload_has_build_images(firmware, version=None):
     return bool(list(base.glob("super_*.img")) or list(base.glob("system_*.img")))
 
 
+def _payload_scan_size_bytes(firmware, version=None):
+    """Total size (bytes) of the super_*/system_*.img files detect_build() is about to read for this
+    entry, or None if it can't be sized. Mirrors _payload_has_build_images()'s base-dir/glob logic (same
+    files, so the two can never disagree on which images are in play) — duplicated rather than shared,
+    since _payload_has_build_images() only needs to know whether any exist, not their size.
+
+    For a 91-minute scan the size is the operator's ONLY ETA signal. Raises OSError upward on a stat()
+    failure (e.g. a file that vanishes mid-scan) — the caller is responsible for treating that as
+    best-effort and falling back to the size-less wording; sizing must never abort an entry."""
+    pd = firmware.payload_dir(version)
+    if not pd or not pd.is_dir():
+        return None
+    storage = "emmc" if (pd / "emmc").is_dir() else ("ufs" if (pd / "ufs").is_dir() else "")
+    base = (pd / storage) if storage else pd
+    imgs = list(base.glob("super_*.img")) + list(base.glob("system_*.img"))
+    if not imgs:
+        return None
+    return sum(f.stat().st_size for f in imgs)
+
+
 def backfill(root, log=print):
     """Re-run detect_build() over every firmware's CURRENT version payload and fill the gate fields it
     is MISSING. The payload is a verbatim copy of the build tree, so detect_build() works on it as-is.
@@ -663,7 +685,8 @@ def backfill(root, log=print):
     skipped = [(id, reason)] for every entry that was not. NOTHING IS SKIPPED SILENTLY — a measured run
     on a real library took 91 MINUTES, printed nothing, and quietly passed over the three entries it
     could never help, which is indistinguishable from a hang followed by a shrug. Progress is emitted
-    via `log` BEFORE each entry is scanned, for the same reason.
+    via `log` BEFORE each entry is scanned, for the same reason — and the pre-scan line names the
+    payload size (best-effort) since that is the operator's only ETA signal during the wait.
 
     Never overwrites an existing value — an operator's `set` wins over detection. Best-effort per
     entry: an unreadable or undetectable payload is skipped, never raised.
@@ -690,7 +713,14 @@ def backfill(root, log=print):
         if not _payload_has_build_images(fw):
             skip(NO_BUILD_IMAGES)
             continue
-        log(f"{head}: scanning payload…")
+        try:
+            size_bytes = _payload_scan_size_bytes(fw)
+        except OSError:
+            size_bytes = None
+        if size_bytes is not None:
+            log(f"{head}: scanning {size_bytes / 1e9:.1f} GB…")
+        else:
+            log(f"{head}: scanning payload…")
         try:
             info = detect_build(fw.payload_dir())
         except Exception as e:
