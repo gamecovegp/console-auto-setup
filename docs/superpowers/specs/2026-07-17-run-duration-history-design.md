@@ -38,9 +38,21 @@ Three changes:
    `elapsed` is not None, the record gains `"total_secs": round(elapsed, 1)`. When None, the field is
    omitted entirely (not written as null).
 2. **The three callers measure and pass it** — `warmup_all` (`provision.py:1127`), `root_all`
-   (`:1846`), `seal_all` (`:1949`). Each takes `t0 = time.monotonic()` before its `_each_device()`
-   fan-out and passes the delta. The measurement must span the whole action, not just the fan-out —
-   each of these does real work outside `_each_device()`.
+   (`:1846`), `seal_all` (`:1949`). Each takes `t0 = time.monotonic()` as the first statement after
+   its docstring and passes the delta at its `log_run` call.
+
+   **Correction (post-review):** an earlier draft justified that placement by claiming "each of these
+   does real work outside `_each_device()`". That is false, and the final review caught it —
+   `warmup_all` has *zero* statements between `t0` and the fan-out (`t0` is immediately followed by
+   `def worker`), and `root_all`/`seal_all` have two lines of argument normalization. The delta is
+   sub-microsecond against a `round(…, 1)` = 0.1s storage quantum, so the choice is immaterial to the
+   recorded number. Top-of-function is kept because it is the more conservative placement and cannot
+   drift later — not because there is meaningful work there. Download's own `t0` sits immediately
+   before its fan-out; either is correct.
+
+   What *does* matter, and is enforced: `t0` must precede the fan-out. Moving it AFTER
+   `_each_device()` makes the caller measure nothing while still passing a plausible float — see
+   Testing.
 3. **`_fmt_run` renders it** — placed like Download's, i.e. BEFORE the device list, not after it. The
    device list is unbounded (one entry per unit on the bench, with failure reasons), so a duration
    appended after it would be pushed off the end of the line. Compare:
@@ -87,9 +99,18 @@ Free. `_secs()` already returns `"—s"` on `TypeError`, so every pre-existing h
 - `log_run()` OMITS the key entirely when `elapsed` is None (not `null`).
 - `_fmt_run` renders a duration when present.
 - `_fmt_run` degrades to `—s` on a record with no `total_secs` (the old-record path).
-- Each of the three callers passes a real measured value — mutation: remove a caller's `t0`/argument
-  and a test must fail. A caller that silently stopped timing is the failure mode this spec exists to
-  prevent, so it must be pinned per call site, not just on `log_run` in isolation.
+- Each of the three callers passes a real measured value — mutation: remove a caller's `elapsed=`
+  argument and a test must fail. A caller that silently stopped timing is the failure mode this spec
+  exists to prevent, so it must be pinned per call site, not just on `log_run` in isolation.
+- **The measurement must actually span the fan-out, and `assertGreaterEqual(elapsed, 0.0)` does NOT
+  pin that.** The final review proved it: moving a caller's `t0` to AFTER `_each_device()` — so it
+  measures nothing — left all 595 tests passing while logging `elapsed=1.3e-06`. A sub-microsecond
+  non-measurement satisfied "is it a real measured value?".
+  The stubbed `_each_device` must therefore take measurable time (`time.sleep(0.05)`) and the
+  assertion must be `assertGreaterEqual(elapsed, 0.05)`. Then a `t0` that does not span the fan-out
+  can only produce a near-zero value, which fails. Cost: ~0.15s across the three tests.
+  Keep the separate `assertIsNotNone(elapsed)` — it catches a caller that drops the argument entirely,
+  which is a different mutation.
 - Existing `log_run` tests pass unmodified (the new param is optional and trailing).
 
 ## Future — Phase 2 (separate spec, not now)
