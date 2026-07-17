@@ -1148,12 +1148,17 @@ def _append_history(root, stem, rec, log=print, summary=""):
         return False
 
 
-def log_run(root, action, results, log=print):
+def log_run(root, action, results, log=print, elapsed=None):
     """Append ONE per-run record to <action>-history.<machine>.jsonl (action ∈ root/lock/warmup): which
     devices passed, and — the point of this — the ERROR REASON for each that failed. A successful device
     carries only its 'ok' status (no noise); a failed one carries the last line it logged before bailing.
     Best-effort via _append_history (a write failure only warns). `results` is {serial:(status, detail)}.
-    Download + Save keep their own byte-carrying history; this covers the actions that had none."""
+    Download + Save keep their own byte-carrying history; this covers the actions that had none.
+
+    `elapsed` (seconds) is the action's BATCH WALL-CLOCK — these actions fan out across devices in
+    PARALLEL, so four units rooting together for ten minutes is 600, not 2400. That is the number that
+    predicts a bench day. Omitted entirely when None (never written as null): absence means 'not
+    recorded', which is exactly what every record written before this field existed means."""
     import datetime
     devs, ok, failed = [], 0, 0
     for serial, res in (results or {}).items():
@@ -1171,6 +1176,8 @@ def log_run(root, action, results, log=print):
         return                                              # only skips/cancels -> nothing worth a record
     rec = {"when": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
            "action": action, "ok": ok, "failed": failed, "devices": devs}
+    if elapsed is not None:                                  # 0.0 is a real measurement, not "unknown"
+        rec["total_secs"] = round(elapsed, 1)
     _append_history(root, f"{action}-history", rec, log,
                     summary=f"{action} run logged: {ok} ok, {failed} failed")
 

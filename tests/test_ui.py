@@ -1144,6 +1144,43 @@ class TestRunLogging(unittest.TestCase):
         self.assertIn("FAILED: device went offline mid-capture", recs[0]["text"])
         self.assertTrue(history.is_failure(recs[0]))
 
+    def _read_run_record(self, td, action):
+        """The single record log_run just wrote to <action>-history.<machine>.jsonl under td."""
+        import glob
+        import json
+        hits = glob.glob(os.path.join(td, "**", f"{action}-history*.jsonl"), recursive=True)
+        self.assertTrue(hits, f"no {action}-history jsonl written under {td}")
+        return json.loads(pathlib.Path(hits[0]).read_text().strip().splitlines()[-1])
+
+    def test_log_run_records_total_secs_when_elapsed_given(self):
+        from cas import provision as PV
+        with tempfile.TemporaryDirectory() as td:
+            PV.log_run(td, "root", {"S1": ("ok", "p")}, log=lambda m: None, elapsed=612.34)
+            rec = self._read_run_record(td, "root")
+            self.assertEqual(rec["total_secs"], 612.3)          # rounded to 1dp
+
+    def test_log_run_omits_total_secs_when_elapsed_is_none(self):
+        # ABSENT, not null — absence is what every pre-existing record means.
+        with tempfile.TemporaryDirectory() as td:
+            from cas import provision as PV
+            PV.log_run(td, "root", {"S1": ("ok", "p")}, log=lambda m: None)
+            rec = self._read_run_record(td, "root")
+            self.assertNotIn("total_secs", rec)
+
+    def test_log_run_elapsed_is_optional_and_trailing(self):
+        # Every existing caller passes (root, action, results, log) positionally and must keep working.
+        from cas import provision as PV
+        with tempfile.TemporaryDirectory() as td:
+            PV.log_run(td, "lock", {"S1": ("ok", "p")}, lambda m: None)
+            self.assertNotIn("total_secs", self._read_run_record(td, "lock"))
+
+    def test_log_run_records_zero_elapsed(self):
+        # 0.0 is a real measurement, not "unknown" — `if elapsed is not None`, never `if elapsed`.
+        from cas import provision as PV
+        with tempfile.TemporaryDirectory() as td:
+            PV.log_run(td, "warmup", {"S1": ("ok", "p")}, log=lambda m: None, elapsed=0.0)
+            self.assertEqual(self._read_run_record(td, "warmup")["total_secs"], 0.0)
+
 
 class TestSetProfileModel(unittest.TestCase):
     """The Profile library 'Set model…' button edits a profile's model_match (what auto-assigns a device
