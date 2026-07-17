@@ -331,6 +331,18 @@ class TestMatch(unittest.TestCase):
         self.assertIsNone(FW.match({"serial": "RP6x", "device": "RP6",
                                     "board_platform": "kalama"}, root))
 
+    def test_storage_only_agreement_is_not_a_match_candidate(self):
+        # C1: a firmware with only a storage rule and no chip recorded must NOT become a candidate at
+        # score 0 just because storage agrees. This is the exact mechanism that let "odin3" (a
+        # permanent UFS wildcard — its payload has no super image, so backfill can never give it a
+        # chip) auto-select onto ANY ufs device, including wrong-chip ones, once a tie-breaking
+        # legacy competitor picked up a chip via backfill.
+        root = pathlib.Path(tempfile.mkdtemp()) / "_firmware"
+        root.mkdir(parents=True)
+        make_fw(root, "odin3-like", storage="ufs", match={})
+        self.assertIsNone(FW.match({"serial": "X", "device": "OTHER",
+                                    "bootdevice": "1d84000.ufshc"}, root))
+
 
 # ---------------------------------------------------------------------------
 # Task 4b: gate_check() — the core rule
@@ -357,12 +369,13 @@ class TestGateCheck(unittest.TestCase):
     def test_proven_cross_brand_pair_passes_and_is_affirmed(self):
         # RP6 on the Odin 2 build: known to boot. Must PASS and must be AFFIRMED (agreed>0), or
         # match() would discard it at score 0. All four axes are populated on both sides and agree
-        # (board_platform, soc, android_release, storage) — exact count so a dropped axis is observable.
+        # (board_platform, soc, android_release, storage), but ONLY board_platform/soc count into
+        # `agreed` (C1 fix) — android_release and storage corroborate but don't affirm the chip.
         fw = self._fw(board_platform="kalama", soc="SM8550", android_release="13")
         ok, reason, agreed = FW.gate_check(fw, self._rp6())
         self.assertTrue(ok)
         self.assertIsNone(reason)
-        self.assertEqual(agreed, 4)
+        self.assertEqual(agreed, 2)
 
     # --- known conflicts reject ------------------------------------------------------------------
     def test_chip_conflict_rejects(self):
@@ -438,11 +451,12 @@ class TestGateCheck(unittest.TestCase):
 
     def test_chip_compare_is_case_insensitive(self):
         # board_platform agrees case-insensitively; storage also agrees (fw default storage="ufs" vs
-        # rp6's ufs bootdevice) -> exact count of 2 so a dropped axis is observable.
+        # rp6's ufs bootdevice) but storage does NOT count into `agreed` (C1 fix) -> exact count of 1
+        # so a dropped/over-counted axis is observable.
         fw = self._fw(board_platform="KALAMA")
         ok, _, agreed = FW.gate_check(fw, self._rp6())
         self.assertTrue(ok)
-        self.assertEqual(agreed, 2)
+        self.assertEqual(agreed, 1)
 
     # --- per-axis contribution isolation -----------------------------------------------------------
     def test_chip_only_axis_populated_agreed_is_exactly_one(self):
@@ -454,6 +468,18 @@ class TestGateCheck(unittest.TestCase):
         ok, _, agreed = FW.gate_check(fw, self._rp6(bootdevice=""))
         self.assertTrue(ok)
         self.assertEqual(agreed, 1)
+
+    # --- C1: storage-only agreement must not confer candidacy --------------------------------------
+    def test_storage_only_agreement_is_vacuous_not_affirmed(self):
+        # THE C1 FIX: an entry recording NO chip at all — just a storage rule (the real "odin3"
+        # shape: its payload has no super image, so backfill can never give it a chip; it is a
+        # permanent universal UFS wildcard) — must gate-pass (nothing conflicts) but `agreed` must be
+        # 0 (vacuous). Storage agreement is corroborating, never chip-affirming: "we are both UFS" is
+        # not evidence of ramdisk compatibility.
+        fw = make_fw(self.root, "odin3-like", storage="ufs", match={})
+        ok, _, agreed = FW.gate_check(fw, self._rp6())
+        self.assertTrue(ok)
+        self.assertEqual(agreed, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -710,6 +736,63 @@ class TestResolve(unittest.TestCase):
         r = FW.resolve("ZZ", {"serial": "ZZ", "device": "OTHER"}, self.root)
         self.assertIsNone(r["firmware_id"])
         self.assertFalse(r["ok"])
+
+
+# ---------------------------------------------------------------------------
+# I1: resolve() must re-gate a cached NON-MANUAL assignment before trusting it
+# ---------------------------------------------------------------------------
+
+class TestResolveRegatesCachedAssignment(unittest.TestCase):
+    """A cached assignment with manual=False was an AUTO-SUGGESTION cached earlier — possibly by the
+    OLD flat-score code (the very "stale serial_prefix outvotes chip" bug this branch fixes). Those
+    stale suggestions live in the operator's cas-config.json and survive the C1/match() fix untouched
+    unless resolve() itself re-validates them. Proven bug: gate_check(odin3-sun, RP6) rejects on chip,
+    match(RP6) correctly picks rp6-kalama, yet resolve(RP6) returned the STALE cached odin3-sun with
+    ok=True warnings=[] — a confident green light to brick the device."""
+
+    def setUp(self):
+        self._saved_cas_config = os.environ.get("CAS_CONFIG")
+        self.tmp = tempfile.mkdtemp()
+        os.environ["CAS_CONFIG"] = os.path.join(self.tmp, "cas-config.json")
+        self.root = pathlib.Path(self.tmp) / "_firmware"
+        self.root.mkdir(parents=True)
+        make_fw(self.root, "odin3-sun", device="odin3", storage="ufs",
+                match={"board_platform": "sun"})
+        make_fw(self.root, "rp6-kalama", device="RP6", storage="ufs",
+                match={"device": "RP6", "board_platform": "kalama"})
+
+    def tearDown(self):
+        if self._saved_cas_config is None:
+            os.environ.pop("CAS_CONFIG", None)
+        else:
+            os.environ["CAS_CONFIG"] = self._saved_cas_config
+
+    def _rp6(self, serial="RP6x"):
+        return {"serial": serial, "device": "RP6", "brand": "Retroid",
+                "board_platform": "kalama", "soc": "SM8550", "android_release": "13",
+                "bootdevice": "1d84000.ufshc"}
+
+    def test_stale_non_manual_assignment_failing_gate_is_discarded_and_rematched(self):
+        FW.set_device_firmware("RP6x", "odin3-sun", manual=False)   # stale auto-suggestion, wrong chip
+        r = FW.resolve("RP6x", self._rp6(), self.root)
+        self.assertEqual(r["firmware_id"], "rp6-kalama")
+        self.assertFalse(r["manual"])
+        self.assertTrue(r["ok"])
+        # the cache itself is corrected too, not left pointing at the wrong-chip build
+        self.assertEqual(FW.get_device_firmware()["RP6x"]["firmware_id"], "rp6-kalama")
+
+    def test_manual_assignment_failing_gate_is_retained_not_dropped(self):
+        FW.set_device_firmware("RP6x", "odin3-sun", manual=True)    # explicit operator override
+        r = FW.resolve("RP6x", self._rp6(), self.root)
+        self.assertEqual(r["firmware_id"], "odin3-sun")
+        self.assertTrue(r["manual"])
+
+    def test_non_manual_assignment_still_passing_gate_is_kept_no_churn(self):
+        FW.set_device_firmware("RP6x", "rp6-kalama", manual=False)
+        r = FW.resolve("RP6x", self._rp6(), self.root)
+        self.assertEqual(r["firmware_id"], "rp6-kalama")
+        self.assertFalse(r["manual"])
+        self.assertTrue(r["ok"])
 
 
 # ---------------------------------------------------------------------------
@@ -982,6 +1065,54 @@ class TestNoMatchReasons(unittest.TestCase):
         r = FW.resolve("RP6x", self._rp6(), self.root)
         self.assertIsNone(r["firmware_id"])
         self.assertTrue(any("no match" in w for w in r["warnings"]))
+
+    # --- I2: use the per-axis reason instead of throwing it away -----------------------------------
+
+    def test_android_rejection_does_not_tell_operator_to_ingest_a_chip_they_already_have(self):
+        # The build for this chip EXISTS (kalama, matches) and was rejected on ANDROID. "ingest a
+        # build for it" is impossible advice — the operator already owns the build; the mismatch is
+        # elsewhere. The message must name android specifically instead.
+        make_fw(self.root, "ayn-odin2-old-android", device="odin2", storage="ufs",
+                match={"board_platform": "kalama", "android_release": "12"})
+        r = FW.resolve("RP6x", self._rp6(), self.root)   # rp6 android_release="13"
+        self.assertIsNone(r["firmware_id"])
+        self.assertFalse(any("ingest a build for it" in w for w in r["warnings"]),
+                         f"must not tell the operator to ingest a chip build they already have: {r['warnings']}")
+        self.assertTrue(any("android" in w for w in r["warnings"]),
+                        f"expected android named specifically in {r['warnings']}")
+
+    def test_storage_rejection_does_not_tell_operator_to_ingest_a_chip_they_already_have(self):
+        make_fw(self.root, "ayn-odin2-emmc", device="odin2", storage="emmc",
+                match={"board_platform": "kalama"})
+        r = FW.resolve("RP6x", self._rp6(), self.root)   # rp6 bootdevice is ufs
+        self.assertIsNone(r["firmware_id"])
+        self.assertFalse(any("ingest a build for it" in w for w in r["warnings"]),
+                         f"must not tell the operator to ingest a chip build they already have: {r['warnings']}")
+        self.assertTrue(any("storage" in w for w in r["warnings"]),
+                        f"expected storage named specifically in {r['warnings']}")
+
+    def test_chip_rejection_still_says_ingest_a_build_for_it(self):
+        # Unchanged behavior for a genuine chip miss — pinned alongside the new axes so a future edit
+        # can't silently drop the original (correct) chip-rejection message.
+        make_fw(self.root, "ayn-odin3", device="odin3", storage="ufs",
+                match={"board_platform": "sun"})
+        r = FW.resolve("RP6x", self._rp6(), self.root)
+        self.assertIsNone(r["firmware_id"])
+        self.assertTrue(any("ingest a build for it" in w and "kalama" in w for w in r["warnings"]),
+                        f"expected the chip-miss ingest hint in {r['warnings']}")
+
+    def test_soc_only_entry_is_not_reported_as_records_no_chip(self):
+        # gate_check() treats board_platform AND soc as chip axes; _no_match_reasons must too. An
+        # entry recording only a `soc` rule is not "legacy"/"records no chip" just because the LIVE
+        # device didn't report soc (so the axis abstained rather than compared).
+        make_fw(self.root, "soc-only", device="x", storage="", match={"soc": "SM7999"})
+        idn = self._rp6()
+        idn = dict(idn)
+        idn.pop("soc", None)   # device doesn't report soc -> soc axis abstains, agreed stays 0
+        r = FW.resolve("RP6x", idn, self.root)
+        self.assertIsNone(r["firmware_id"])
+        self.assertFalse(any("backfill" in w for w in r["warnings"]),
+                         f"a soc-recording entry must not be reported as 'records no chip': {r['warnings']}")
 
 
 # ---------------------------------------------------------------------------

@@ -315,11 +315,21 @@ def gate_check(firmware, identity_dict):
     so a cross-prop compare would read as a conflict and disqualify the whole library. Each chip prop is
     compared only against its own counterpart.
 
-    `agreed` = how many axes actually COMPARED AND AGREED (as opposed to abstaining). agreed>0 is a
-    positive affirmation of compatibility and makes a firmware a candidate even at score 0 — which is
-    what makes cross-model reuse work at all (an RP6 on the Odin 2 build scores zero on every soft
-    rule). agreed==0 is a vacuous pass: the gate affirmed nothing, so match() still requires a positive
-    score, preserving today's behavior for un-backfilled entries.
+    `agreed` = how many CHIP axes (board_platform, soc — and ONLY those two) actually COMPARED AND
+    AGREED (as opposed to abstaining). agreed>0 is a positive affirmation of compatibility and makes a
+    firmware a candidate even at score 0 — which is what makes cross-model reuse work at all (an RP6 on
+    the Odin 2 build scores zero on every soft rule). agreed==0 is a vacuous pass: the gate affirmed
+    nothing, so match() still requires a positive score, preserving today's behavior for un-backfilled
+    entries.
+
+    WHY ONLY CHIP COUNTS: `agreed` exists to answer "did the gate affirm the CHIP?" — because chip
+    agreement is the only evidence strong enough to justify selecting a firmware that scores zero on
+    every soft rule (the proven Retroid Pocket 6 ≡ AYN Odin 2 cross-brand pair). Android and storage
+    are corroborating axes: strong enough to REJECT on a known conflict (below), far too weak to
+    PROMOTE on agreement. Storage in particular is a 1-bit axis — "we are both UFS" says nothing about
+    ramdisk compatibility — yet counting it into `agreed` let a chip-less, storage-only entry (e.g. a
+    build whose payload has no super image to grep a chip out of — a permanent universal wildcard for
+    its storage type) become a score-0 candidate for EVERY device sharing that storage, chip be damned.
 
     CONTRACT: `agreed` is 0 whenever `ok` is False. A rejected firmware affirmed nothing — whatever
     partial agreement accumulated on earlier axes before the conflicting axis tripped is discarded, so
@@ -339,14 +349,14 @@ def gate_check(firmware, identity_dict):
     if want_a and live_a:
         if _android_major(want_a) != _android_major(live_a):
             return (False, f"android {live_a} != firmware {want_a}", 0)
-        agreed += 1
+        # Agreement here corroborates but does not AFFIRM the chip — does not count into `agreed`.
 
     want_s = firmware.storage
     live_s = _storage_from_bootdevice(identity_dict.get("bootdevice"))
     if want_s and live_s:
         if want_s.strip().lower() != live_s:
             return (False, f"storage {live_s} != firmware {want_s}", 0)
-        agreed += 1
+        # Same as android: rejects on conflict, never promotes on agreement (see docstring above).
 
     return (True, None, agreed)
 
@@ -644,22 +654,43 @@ def backfill(root):
 # ---------------------------------------------------------------------------
 
 def _no_match_reasons(identity_dict, root):
-    """Why did nothing match? Distinguishes the two situations, because they imply DIFFERENT operator
-    actions: 'the library has no build for this silicon' (ingest one) vs 'entries exist but record no
-    chip' (run backfill). A bare 'no match' leaves the operator with no next step — and this spec
-    deletes a warning for being uninformative, so it must not add one."""
-    rejected, legacy = 0, 0
+    """Why did nothing match? Distinguishes situations, because they imply DIFFERENT operator actions:
+    'the library has no build for this silicon' (ingest one) vs 'a build for this chip exists but was
+    rejected on android/storage' (the mismatch is elsewhere — ingesting another chip build won't help)
+    vs 'entries exist but record no chip' (run backfill). A bare 'no match' leaves the operator with no
+    next step — and this spec deletes a warning for being uninformative, so it must not add one.
+
+    USES THE PER-AXIS REASON (I2 fix): gate_check() already computes a precise reason per rejected
+    firmware ("chip X != firmware Y" / "android ..." / "storage ..."); this used to discard it
+    (`ok, _reason, agreed = ...`) and lump every rejection into one 'no firmware matches this chip'
+    bucket — impossible advice when the rejection was actually on android or storage and the chip build
+    is sitting right there in the library. Rejections are now split by axis: only a CHIP-axis rejection
+    ("chip ..." reason) is reported as a missing chip build; android/storage rejections name their own
+    conflict instead, so the operator isn't told to ingest a build for a chip they already have.
+
+    'records no chip' checks BOTH board_platform and soc (mirrors gate_check(), which treats both as
+    chip axes) — an entry with a `soc` rule recorded is not legacy just because board_platform is
+    unset, even if THIS device's identity happened not to report soc (abstain, not "no chip on file")."""
+    chip_rejected = 0
+    axis_rejections = []
+    legacy = 0
     for fw in list_firmware(root):
-        ok, _reason, agreed = gate_check(fw, identity_dict)
+        ok, reason, agreed = gate_check(fw, identity_dict)
         if not ok:
-            rejected += 1
-        elif agreed == 0 and not fw.match_rules().get("board_platform"):
+            if reason and reason.startswith("chip "):
+                chip_rejected += 1
+            else:
+                axis_rejections.append(reason)
+        elif agreed == 0 and not (fw.match_rules().get("board_platform") or fw.match_rules().get("soc")):
             legacy += 1
     out = []
     chip = identity_dict.get("board_platform") or identity_dict.get("soc") or "unknown"
-    if rejected:
-        out.append(f"no firmware matches this chip ({chip}) — {rejected} rejected by the gate; "
+    if chip_rejected:
+        out.append(f"no firmware matches this chip ({chip}) — {chip_rejected} rejected by the gate; "
                    f"ingest a build for it")
+    for reason in axis_rejections:
+        out.append(f"a build for this chip exists but was rejected on {reason} — ingest won't help; "
+                   f"the mismatch is elsewhere")
     if legacy:
         out.append(f"{legacy} firmware(s) record no chip — run 'python3 -m cas.firmware backfill'")
     if not out:
@@ -670,7 +701,18 @@ def _no_match_reasons(identity_dict, root):
 def resolve(serial, identity_dict, root):
     """Decide the firmware for a connected device. Manual override (sticky) wins; else match() and
     remember it (manual=False). Version = pinned rollback or the firmware's current. Always runs
-    logic_check. Returns a dict the UI/CLI render directly."""
+    logic_check. Returns a dict the UI/CLI render directly.
+
+    RE-GATE ON READ (I1): a cached assignment with manual=False is an AUTO-SUGGESTION cached at some
+    earlier resolve() — possibly by code that predates gate_check() as a hard gate (the very
+    "stale serial_prefix outvotes chip" class of bug this module exists to fix). Trusting it blindly
+    would mean a stale cache entry in the operator's cas-config.json survives the fix forever, handing
+    back a confident ok=True on a firmware that gate_check() would now reject outright. So a non-manual
+    cached assignment is re-run through gate_check() here; if it now fails, it is discarded and
+    resolve() falls through to match() as if the device had never been assigned — re-matching against
+    the CURRENT gate, not trusting old history. An explicit operator override (manual=True) is left
+    alone: it is spec'd, intentional behavior, and must keep working even against a firmware
+    gate_check() would reject (logic_check below still surfaces warnings on it, same as today)."""
     assigned = get_device_firmware().get(serial)
     fw, manual, suggested, pinned = None, False, None, None
     if assigned and assigned["firmware_id"] == DEFAULT_FW_ID:
@@ -695,6 +737,13 @@ def resolve(serial, identity_dict, root):
         fw = find(assigned["firmware_id"], root)
         manual = assigned["manual"]
         pinned = assigned.get("version")
+        if fw is not None and not manual:
+            gate_ok, _gate_reason, _agreed = gate_check(fw, identity_dict)
+            if not gate_ok:
+                # Stale auto-suggestion that no longer passes the gate — discard and fall through to
+                # match() below as if unassigned. manual=False already, so a fresh suggestion writes
+                # back through the same manual=False path a few lines down.
+                fw, pinned = None, None
     if fw is None:
         m = match(identity_dict, root)
         if m:
