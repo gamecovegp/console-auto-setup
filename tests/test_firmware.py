@@ -1094,8 +1094,13 @@ class TestNoMatchReasons(unittest.TestCase):
                         f"expected the chip named in {r['warnings']}")
 
     def test_reason_says_run_backfill_when_entries_have_no_chip(self):
-        make_fw(self.root, "legacy-a", device="x", storage="", match={})
-        make_fw(self.root, "legacy-b", device="y", storage="", match={})
+        # Chip-less but SCANNABLE (payload has a super image) — backfill can actually fill these, so
+        # the hint must still point there. (Pinned by Task 3: an empty payload is the unscannable case
+        # and must NOT be conflated with this one — see test_does_not_recommend_backfill_* below.)
+        fw_a = make_fw(self.root, "legacy-a", device="x", storage="", match={})
+        (fw_a.payload_dir() / "super_1.img").write_bytes(b"x")
+        fw_b = make_fw(self.root, "legacy-b", device="y", storage="", match={})
+        (fw_b.payload_dir() / "super_1.img").write_bytes(b"x")
         r = FW.resolve("RP6x", self._rp6(), self.root)
         self.assertIsNone(r["firmware_id"])
         self.assertTrue(any("backfill" in w for w in r["warnings"]),
@@ -1153,6 +1158,35 @@ class TestNoMatchReasons(unittest.TestCase):
         self.assertIsNone(r["firmware_id"])
         self.assertFalse(any("backfill" in w for w in r["warnings"]),
                          f"a soc-recording entry must not be reported as 'records no chip': {r['warnings']}")
+
+    # --- Task 3: don't recommend backfill for an entry it can never fix --------------------------
+
+    def _bare_legacy(self, fid):
+        """Chip-less AND no super image: backfill can never help it."""
+        fw = make_fw(self.root, fid, storage="", match={})
+        (fw.payload_dir() / "init_boot.img").write_bytes(b"x")
+        return fw
+
+    def test_does_not_recommend_backfill_when_the_entry_has_no_super_image(self):
+        # The measured dead end: "run backfill" -> 91 min -> "0 backfilled" -> still (no match).
+        self._bare_legacy("bare-legacy")
+        r = FW.resolve("RP6x", self._rp6(), self.root)
+        self.assertIsNone(r["firmware_id"])
+        self.assertFalse(any("backfill" in w for w in r["warnings"]),
+                         f"recommended backfill for an entry it can never fix: {r['warnings']}")
+        self.assertTrue(any("set --chip" in w for w in r["warnings"]),
+                        f"expected a 'set --chip' hint in {r['warnings']}")
+
+    def test_still_recommends_backfill_when_a_chip_less_entry_has_a_super_image(self):
+        src = fake_build(self.tmp, "scan-20260507.165105", storage="ufs", board_platform="kalama",
+                         soc="QCS8550", android="13")
+        FW.ingest(src, self.root, firmware_id="scannable")
+        meta = FW._read_json(self.root / "scannable" / "meta.json")
+        meta["match"] = {}
+        FW._write_json(self.root / "scannable" / "meta.json", meta)
+        r = FW.resolve("RP6x", self._rp6(), self.root)
+        self.assertTrue(any("backfill" in w for w in r["warnings"]),
+                        f"expected a backfill hint in {r['warnings']}")
 
 
 # ---------------------------------------------------------------------------

@@ -732,10 +732,17 @@ def _no_match_reasons(identity_dict, root):
 
     'records no chip' checks BOTH board_platform and soc (mirrors gate_check(), which treats both as
     chip axes) — an entry with a `soc` rule recorded is not legacy just because board_platform is
-    unset, even if THIS device's identity happened not to report soc (abstain, not "no chip on file")."""
+    unset, even if THIS device's identity happened not to report soc (abstain, not "no chip on file").
+
+    NEVER RECOMMEND BACKFILL FOR AN ENTRY IT CANNOT FIX: a chip-less entry whose payload has no
+    super/system image (a bare init_boot.img — odin2-default, odin3, retroid-pocket-5) can never be
+    filled by scanning, no matter how long. Sending the operator to backfill for those is a measured
+    91-MINUTE round trip ending in "0 firmware backfilled" and the same (no match). Those are reported
+    with the command that actually works: `set --chip`."""
     chip_rejected = 0
     axis_rejections = []
-    legacy = 0
+    legacy_scannable = 0        # chip-less, payload HAS a super image -> backfill can fill it
+    legacy_unscannable = 0      # chip-less, no super image -> backfill can NEVER fill it
     for fw in list_firmware(root):
         ok, reason, agreed = gate_check(fw, identity_dict)
         if not ok:
@@ -743,8 +750,12 @@ def _no_match_reasons(identity_dict, root):
                 chip_rejected += 1
             else:
                 axis_rejections.append(reason)
-        elif agreed == 0 and not (fw.match_rules().get("board_platform") or fw.match_rules().get("soc")):
-            legacy += 1
+        elif agreed == 0 and not (fw.match_rules().get("board_platform")
+                                  or fw.match_rules().get("soc")):
+            if _payload_has_build_images(fw):
+                legacy_scannable += 1
+            else:
+                legacy_unscannable += 1
     out = []
     chip = identity_dict.get("board_platform") or identity_dict.get("soc") or "unknown"
     if chip_rejected:
@@ -753,8 +764,12 @@ def _no_match_reasons(identity_dict, root):
     for reason in axis_rejections:
         out.append(f"a build for this chip exists but was rejected on {reason} — ingest won't help; "
                    f"the mismatch is elsewhere")
-    if legacy:
-        out.append(f"{legacy} firmware(s) record no chip — run 'python3 -m cas.firmware backfill'")
+    if legacy_scannable:
+        out.append(f"{legacy_scannable} firmware(s) record no chip — "
+                   f"run 'python3 -m cas.firmware backfill'")
+    if legacy_unscannable:
+        out.append(f"{legacy_unscannable} firmware(s) record no chip and have no super image to scan "
+                   f"— use 'python3 -m cas.firmware set --chip <name> <id>'")
     if not out:
         out.append("no match — select manually")
     return out
