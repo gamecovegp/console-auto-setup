@@ -386,9 +386,11 @@ class TestGateCheck(unittest.TestCase):
         self.assertEqual(agreed, 0)
 
     def test_soc_conflict_rejects(self):
-        # board_platform agrees FIRST (same chip-axis loop, same return statement) before soc conflicts
-        # — this is the scenario that would otherwise leak agreed=1 out of a reject.
-        fw = self._fw(board_platform="kalama", soc="SM8750")
+        # Firmware records no board_platform, so soc is the sole/fallback chip axis under test. (A
+        # board_platform AGREEMENT now outranks a soc conflict instead of rejecting — see
+        # test_platform_agreement_outranks_a_soc_conflict below — so this scenario no longer pairs an
+        # agreeing platform with a conflicting soc; that combination is covered separately.)
+        fw = self._fw(soc="SM8750")
         ok, reason, agreed = FW.gate_check(fw, self._rp6())
         self.assertFalse(ok)
         self.assertIn("SM8550", reason)
@@ -480,6 +482,44 @@ class TestGateCheck(unittest.TestCase):
         ok, _, agreed = FW.gate_check(fw, self._rp6())
         self.assertTrue(ok)
         self.assertEqual(agreed, 0)
+
+    # --- board_platform outranks a soc SKU conflict (measured: live RP6 reports QCS8550) -----------
+    def test_platform_agreement_outranks_a_soc_conflict(self):
+        # A generic kalama build records soc=SM8550; the real RP6 reports soc=QCS8550. Same silicon
+        # (QCS is the IoT SKU), and board_platform agrees on both sides -> must NOT reject.
+        fw = self._fw(board_platform="kalama", soc="SM8550")
+        ok, reason, agreed = FW.gate_check(fw, self._rp6(soc="QCS8550"))
+        self.assertTrue(ok, f"platform agreed but the soc SKU rejected: {reason}")
+        self.assertIsNone(reason)
+        self.assertEqual(agreed, 1)     # platform affirmed; the conflicting soc adds nothing
+
+    def test_soc_conflict_still_rejects_when_firmware_has_no_board_platform(self):
+        # No platform to outrank it -> soc remains the fallback chip axis and must still reject.
+        fw = self._fw(soc="SM8550")
+        ok, reason, agreed = FW.gate_check(fw, self._rp6(soc="QCS8550"))
+        self.assertFalse(ok)
+        self.assertIn("QCS8550", reason)
+        self.assertEqual(agreed, 0)
+
+    def test_soc_conflict_still_rejects_when_device_reports_no_board_platform(self):
+        fw = self._fw(board_platform="kalama", soc="SM8550")
+        ok, reason, agreed = FW.gate_check(fw, self._rp6(board_platform="", soc="QCS8550"))
+        self.assertFalse(ok)
+        self.assertEqual(agreed, 0)
+
+    def test_board_platform_conflict_still_rejects_regardless_of_soc(self):
+        # A platform conflict is unconditional — an agreeing soc must not rescue it.
+        fw = self._fw(board_platform="sun", soc="QCS8550")
+        ok, reason, agreed = FW.gate_check(fw, self._rp6(soc="QCS8550"))
+        self.assertFalse(ok)
+        self.assertIn("kalama", reason)
+        self.assertEqual(agreed, 0)
+
+    def test_platform_and_soc_both_agree_still_affirms_twice(self):
+        fw = self._fw(board_platform="kalama", soc="QCS8550")
+        ok, _reason, agreed = FW.gate_check(fw, self._rp6(soc="QCS8550"))
+        self.assertTrue(ok)
+        self.assertEqual(agreed, 2)
 
 
 # ---------------------------------------------------------------------------

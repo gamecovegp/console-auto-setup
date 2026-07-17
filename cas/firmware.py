@@ -315,6 +315,12 @@ def gate_check(firmware, identity_dict):
     so a cross-prop compare would read as a conflict and disqualify the whole library. Each chip prop is
     compared only against its own counterpart.
 
+    PLATFORM OUTRANKS SKU: when board_platform is populated on both sides and AGREES, a differing
+    ro.soc.model does NOT reject (and does not affirm). board_platform names the platform (kalama);
+    soc names the SKU (SM8550 vs QCS8550 — the IoT variant of the same Snapdragon 8 Gen 2). Same
+    platform means the same ramdisk. soc still rejects on conflict when board_platform did not
+    compare, so it remains the fallback chip axis for a device or build that reports only soc.
+
     `agreed` = how many CHIP axes (board_platform, soc — and ONLY those two) actually COMPARED AND
     AGREED (as opposed to abstaining). agreed>0 is a positive affirmation of compatibility and makes a
     firmware a candidate even at score 0 — which is what makes cross-model reuse work at all (an RP6 on
@@ -338,11 +344,28 @@ def gate_check(firmware, identity_dict):
     r = firmware.match_rules()
     agreed = 0
 
-    for key in ("board_platform", "soc"):
-        want, live = r.get(key), identity_dict.get(key)
-        if want and live:
-            if want.strip().lower() != live.strip().lower():
+    # board_platform is the PLATFORM; soc is the SKU. Same platform + different SKU = the same
+    # silicon and the same ramdisk: a live RP6 reports soc=QCS8550 (the IoT SKU) where a generic
+    # kalama build's super image records SM8550, and board_platform is 'kalama' on both sides. So
+    # platform agreement OUTRANKS a soc conflict — otherwise that build falsely rejects the RP6 and
+    # _no_match_reasons blames "this chip (kalama)" when kalama agreed perfectly.
+    # A platform CONFLICT still rejects unconditionally, and soc still rejects when no platform
+    # compared (it remains the fallback chip axis).
+    platform_agreed = False
+    want, live = r.get("board_platform"), identity_dict.get("board_platform")
+    if want and live:
+        if want.strip().lower() != live.strip().lower():
+            return (False, f"chip {live} != firmware {want}", 0)
+        agreed += 1
+        platform_agreed = True
+
+    want, live = r.get("soc"), identity_dict.get("soc")
+    if want and live:
+        if want.strip().lower() != live.strip().lower():
+            if not platform_agreed:
                 return (False, f"chip {live} != firmware {want}", 0)
+            # else: the platform already agreed — a differing SKU neither rejects nor affirms.
+        else:
             agreed += 1
 
     want_a, live_a = r.get("android_release"), identity_dict.get("android_release")
