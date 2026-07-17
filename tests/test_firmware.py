@@ -1092,5 +1092,110 @@ class TestMainSetSubcommand(unittest.TestCase):
         self.assertEqual(meta["match"]["board_platform"], "kalama")   # and the write still happened
 
 
+# ---------------------------------------------------------------------------
+# Task 10: backfill() — migration without a flag day
+# ---------------------------------------------------------------------------
+
+class TestBackfill(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.root = pathlib.Path(self.tmp) / "_firmware"
+        self.root.mkdir(parents=True)
+
+    def _ingest_then_strip(self, fid, **kw):
+        """Ingest a build, then strip its gate fields to simulate a pre-existing legacy entry."""
+        src = fake_build(self.tmp, f"{fid}-20260507.165105", **kw)
+        fw = FW.ingest(src, self.root, firmware_id=fid)
+        meta = FW._read_json(fw.path / "meta.json")
+        meta["match"] = {k: v for k, v in (meta.get("match") or {}).items()
+                         if k not in ("board_platform", "soc", "android_release")}
+        FW._write_json(fw.path / "meta.json", meta)
+        return FW.Firmware(fw.path)
+
+    def test_backfill_fills_gate_fields_from_the_payload(self):
+        self._ingest_then_strip("ayn-odin2", board_platform="kalama", soc="SM8550", android="13")
+        filled = FW.backfill(self.root)
+        self.assertEqual([fid for fid, _ in filled], ["ayn-odin2"])
+        fw = FW.find("ayn-odin2", self.root)
+        self.assertEqual(fw.match_rules()["board_platform"], "kalama")
+        self.assertEqual(fw.match_rules()["android_release"], "13")
+
+    def test_backfill_is_idempotent_and_reports_nothing_second_time(self):
+        self._ingest_then_strip("ayn-odin2", board_platform="kalama", soc="SM8550", android="13")
+        FW.backfill(self.root)
+        self.assertEqual(FW.backfill(self.root), [])
+
+    def test_backfill_never_overwrites_an_operator_set_value(self):
+        self._ingest_then_strip("ayn-odin2", board_platform="kalama", soc="SM8550", android="13")
+        FW.set_gate_fields("ayn-odin2", self.root, chip="kalama-hand-set")
+        FW.backfill(self.root)
+        self.assertEqual(FW.find("ayn-odin2", self.root).match_rules()["board_platform"],
+                         "kalama-hand-set")
+
+    def test_backfill_skips_undetectable_entry_without_raising(self):
+        self._ingest_then_strip("legacy", board_platform="", soc="", android="")
+        self.assertEqual(FW.backfill(self.root), [])
+
+
+# ---------------------------------------------------------------------------
+# Task 10 (CLI): main() 'backfill' subcommand
+# ---------------------------------------------------------------------------
+
+class TestMainBackfillSubcommand(unittest.TestCase):
+    """Mirrors TestMainSetSubcommand: `backfill` must work through real argparse dispatch, and — like
+    `set` — must dispatch BEFORE the ("show", "assign") branch so it never constructs an Adb / needs a
+    device plugged in."""
+
+    def setUp(self):
+        # CAS_CONFIG isolation: save+restore (not a bare pop) — see TestDeviceFirmware.setUp above.
+        self._saved_cas_config = os.environ.get("CAS_CONFIG")
+        self._saved_cas_profiles = os.environ.get("CAS_PROFILES")
+        self.tmp = tempfile.mkdtemp()
+        os.environ["CAS_CONFIG"] = os.path.join(self.tmp, "cas-config.json")
+        os.environ["CAS_PROFILES"] = self.tmp   # pins firmware_root() to tmp/_firmware
+        self.root = pathlib.Path(self.tmp) / "_firmware"
+        self.root.mkdir(parents=True)
+
+    def tearDown(self):
+        if self._saved_cas_config is None:
+            os.environ.pop("CAS_CONFIG", None)
+        else:
+            os.environ["CAS_CONFIG"] = self._saved_cas_config
+        if self._saved_cas_profiles is None:
+            os.environ.pop("CAS_PROFILES", None)
+        else:
+            os.environ["CAS_PROFILES"] = self._saved_cas_profiles
+
+    def _ingest_then_strip(self, fid, **kw):
+        src = fake_build(self.tmp, f"{fid}-20260507.165105", **kw)
+        fw = FW.ingest(src, self.root, firmware_id=fid)
+        meta = FW._read_json(fw.path / "meta.json")
+        meta["match"] = {k: v for k, v in (meta.get("match") or {}).items()
+                         if k not in ("board_platform", "soc", "android_release")}
+        FW._write_json(fw.path / "meta.json", meta)
+        return FW.Firmware(fw.path)
+
+    def test_backfill_fills_gate_fields_through_real_cli(self):
+        self._ingest_then_strip("ayn-odin2", board_platform="kalama", soc="SM8550", android="13")
+        FW.main(["backfill"])
+        meta = FW._read_json(self.root / "ayn-odin2" / "meta.json")
+        self.assertEqual(meta["match"]["board_platform"], "kalama")
+        self.assertEqual(meta["match"]["soc"], "SM8550")
+        self.assertEqual(meta["match"]["android_release"], "13")
+
+    def test_backfill_never_constructs_adb(self):
+        # THE PIN: `backfill` must dispatch before the ("show","assign") branch, which does
+        # `Adb(serial=..., adb=find_adb("adb"))`. Patch cas.adb.Adb to explode if instantiated — main()
+        # imports it locally via `from .adb import Adb`, a live lookup on cas.adb at call time, so
+        # patching the module attribute here is visible to that import. If `backfill` ever reached the
+        # device-touching branch, this raises immediately instead of hanging on a bench with no device.
+        self._ingest_then_strip("ayn-odin2", board_platform="kalama", soc="SM8550", android="13")
+        with mock.patch("cas.adb.Adb", side_effect=AssertionError(
+                "backfill must not construct Adb -- it dispatched into the device-touching branch")):
+            FW.main(["backfill"])   # must complete without raising
+        meta = FW._read_json(self.root / "ayn-odin2" / "meta.json")
+        self.assertEqual(meta["match"]["board_platform"], "kalama")   # and the write still happened
+
+
 if __name__ == "__main__":
     unittest.main()

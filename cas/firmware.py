@@ -597,6 +597,40 @@ def set_gate_fields(firmware_id, root, chip=None, soc=None, android=None, storag
 
 
 # ---------------------------------------------------------------------------
+# Task 10: backfill() — migration without a flag day
+# ---------------------------------------------------------------------------
+
+def backfill(root):
+    """Re-run detect_build() over every firmware's CURRENT version payload and fill the gate fields it
+    is MISSING. The payload is a verbatim copy of the build tree, so detect_build() works on it as-is.
+
+    Never overwrites an existing value — an operator's `set` wins over detection. Best-effort per entry:
+    an unreadable or undetectable payload is skipped, never raised. Returns [(firmware_id, filled)] for
+    entries actually changed, so the CLI can report what moved."""
+    out = []
+    for fw in list_firmware(root):
+        pd = fw.payload_dir()
+        if not pd or not pd.is_dir():
+            continue
+        try:
+            info = detect_build(pd)
+        except Exception:
+            continue
+        r = fw.match_rules()
+        filled = {}
+        for meta_key, info_key in (("board_platform", "board_platform"), ("soc", "soc"),
+                                   ("android_release", "android_release")):
+            if info.get(info_key) and not r.get(meta_key):
+                filled[meta_key] = info[info_key]
+        if not filled:
+            continue
+        set_gate_fields(fw.id, root, chip=filled.get("board_platform"),
+                        soc=filled.get("soc"), android=filled.get("android_release"))
+        out.append((fw.id, filled))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Task 7 (adapted): resolve() — uses fw-local get/set_device_firmware
 # ---------------------------------------------------------------------------
 
@@ -745,6 +779,8 @@ def main(argv=None):
     st.add_argument("--android", help="major Android release, e.g. 13")
     st.add_argument("--storage", choices=["emmc", "ufs"])
 
+    sub.add_parser("backfill", help="fill gate fields on existing firmware from their payloads")
+
     args = ap.parse_args(argv)
     root = firmware_root()
 
@@ -762,6 +798,12 @@ def main(argv=None):
         fw = set_gate_fields(args.id, root, chip=args.chip, soc=args.soc,
                              android=args.android, storage=args.storage)
         print(f"{fw.id}: match={fw.match_rules()} storage={fw.storage}")
+
+    elif args.cmd == "backfill":
+        rows = backfill(root)
+        for fid, filled in rows:
+            print(f"{fid}: filled {filled}")
+        print(f"{len(rows)} firmware backfilled")
 
     elif args.cmd in ("show", "assign"):
         a = Adb(serial=getattr(args, "serial", None), adb=find_adb("adb"))
