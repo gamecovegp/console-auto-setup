@@ -984,5 +984,40 @@ class TestNoMatchReasons(unittest.TestCase):
         self.assertTrue(any("no match" in w for w in r["warnings"]))
 
 
+# ---------------------------------------------------------------------------
+# Task 9: set_gate_fields() — escape hatch for chip/android/storage gate fields
+# ---------------------------------------------------------------------------
+
+class TestSetGateFields(unittest.TestCase):
+    def setUp(self):
+        self.root = pathlib.Path(tempfile.mkdtemp()) / "_firmware"
+        self.root.mkdir(parents=True)
+        make_fw(self.root, "legacy-fw", device="x", storage="", match={})
+
+    def test_set_writes_gate_fields(self):
+        fw = FW.set_gate_fields("legacy-fw", self.root, chip="kalama", soc="SM8550",
+                                android="13", storage="ufs")
+        r = fw.match_rules()
+        self.assertEqual(r["board_platform"], "kalama")
+        self.assertEqual(r["soc"], "SM8550")
+        self.assertEqual(r["android_release"], "13")
+        self.assertEqual(fw.storage, "ufs")
+
+    def test_set_is_idempotent(self):
+        FW.set_gate_fields("legacy-fw", self.root, chip="kalama")
+        fw = FW.set_gate_fields("legacy-fw", self.root, chip="kalama")
+        self.assertEqual(fw.match_rules()["board_platform"], "kalama")
+
+    def test_set_only_touches_named_fields(self):
+        FW.set_gate_fields("legacy-fw", self.root, chip="kalama")
+        fw = FW.set_gate_fields("legacy-fw", self.root, android="13")
+        self.assertEqual(fw.match_rules()["board_platform"], "kalama")   # survives
+        self.assertEqual(fw.match_rules()["android_release"], "13")
+
+    def test_set_unknown_id_raises(self):
+        with self.assertRaises(ValueError):
+            FW.set_gate_fields("nope", self.root, chip="kalama")
+
+
 if __name__ == "__main__":
     unittest.main()

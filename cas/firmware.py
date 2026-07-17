@@ -574,6 +574,29 @@ def ingest(src, root, firmware_id=None, label=None, match=None, copy=True):
 
 
 # ---------------------------------------------------------------------------
+# Task 9: set_gate_fields() — the escape hatch
+# ---------------------------------------------------------------------------
+
+def set_gate_fields(firmware_id, root, chip=None, soc=None, android=None, storage=None):
+    """Write gate fields on an existing firmware without re-ingesting — the escape hatch for a build
+    whose props detect_build() can't grep out of its super image. Only the named fields are touched.
+    Raises ValueError on an unknown id. Returns the Firmware."""
+    fw = find(firmware_id, root)
+    if fw is None:
+        raise ValueError(f"no firmware '{firmware_id}' in {root}")
+    meta = _read_json(fw.path / "meta.json")
+    m = dict(meta.get("match") or {})
+    for key, val in (("board_platform", chip), ("soc", soc), ("android_release", android)):
+        if val:
+            m[key] = str(val)
+    meta["match"] = m
+    if storage:
+        meta["storage"] = str(storage)
+    _write_json(fw.path / "meta.json", meta)
+    return Firmware(fw.path)
+
+
+# ---------------------------------------------------------------------------
 # Task 7 (adapted): resolve() — uses fw-local get/set_device_firmware
 # ---------------------------------------------------------------------------
 
@@ -715,6 +738,13 @@ def main(argv=None):
     asg.add_argument("--serial")
     asg.add_argument("id")
 
+    st = sub.add_parser("set", help="write gate fields (chip/android/storage) on a firmware")
+    st.add_argument("id")
+    st.add_argument("--chip", help="ro.board.platform, e.g. kalama")
+    st.add_argument("--soc", help="ro.soc.model, e.g. SM8550")
+    st.add_argument("--android", help="major Android release, e.g. 13")
+    st.add_argument("--storage", choices=["emmc", "ufs"])
+
     args = ap.parse_args(argv)
     root = firmware_root()
 
@@ -727,6 +757,11 @@ def main(argv=None):
     elif args.cmd == "ingest":
         f = ingest(args.src, root, firmware_id=args.firmware_id, label=args.label)
         print(f"ingested {f.id} version {f.current()}")
+
+    elif args.cmd == "set":
+        fw = set_gate_fields(args.id, root, chip=args.chip, soc=args.soc,
+                             android=args.android, storage=args.storage)
+        print(f"{fw.id}: match={fw.match_rules()} storage={fw.storage}")
 
     elif args.cmd in ("show", "assign"):
         a = Adb(serial=getattr(args, "serial", None), adb=find_adb("adb"))
