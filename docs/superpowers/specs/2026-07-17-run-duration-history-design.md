@@ -41,8 +41,17 @@ Three changes:
    (`:1846`), `seal_all` (`:1949`). Each takes `t0 = time.monotonic()` before its `_each_device()`
    fan-out and passes the delta. The measurement must span the whole action, not just the fan-out —
    each of these does real work outside `_each_device()`.
-3. **`_fmt_run` renders it** — append `· in {_secs(r.get("total_secs"))}` to the existing
-   `N ok · M failed · <devices>` line.
+3. **`_fmt_run` renders it** — placed like Download's, i.e. BEFORE the device list, not after it. The
+   device list is unbounded (one entry per unit on the bench, with failure reasons), so a duration
+   appended after it would be pushed off the end of the line. Compare:
+
+   ```
+   download:  f"{ok} ok · {failed} failed · {_mb(...)} in {_secs(...)}  ·  {who}"
+   run (new): f"{ok} ok · {failed} failed · {_secs(...)}  ·  {who}"
+   ```
+
+   A run has no byte count, so it reads `3 ok · 0 failed · 612s  ·  S1→p | S2→p | S3→p` — the same
+   shape as Download minus the `X MB in` clause.
 
 ### Rejected alternatives
 
