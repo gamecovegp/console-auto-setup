@@ -606,9 +606,18 @@ def backfill(root):
 
     Never overwrites an existing value — an operator's `set` wins over detection. Best-effort per entry:
     an unreadable or undetectable payload is skipped, never raised. Returns [(firmware_id, filled)] for
-    entries actually changed, so the CLI can report what moved."""
+    entries actually changed, so the CLI can report what moved.
+
+    CORRUPT-META GUARD: list_firmware() only returns dirs that CONTAIN a meta.json — so if fw.meta is
+    empty/falsy, the file exists but did NOT parse (_read_json() swallows the error and returns {}).
+    That is a corrupt entry, never a legitimate backfill target: treating {} as "every gate field is
+    missing" would call set_gate_fields(), which re-reads the same unparseable file, also gets {}, and
+    writes back a meta.json containing almost nothing — silently dropping device/storage/flash_target/
+    current/history/label/id. Skip it instead, before touching anything."""
     out = []
     for fw in list_firmware(root):
+        if not fw.meta:
+            continue
         pd = fw.payload_dir()
         if not pd or not pd.is_dir():
             continue
@@ -747,7 +756,8 @@ def log_event(serial, firmware_id, version, action, manual, when=None):
 # ---------------------------------------------------------------------------
 
 def main(argv=None):
-    """Entry point for `python3 -m cas.firmware`. Four subcommands: list, ingest, show, assign."""
+    """Entry point for `python3 -m cas.firmware`. Six subcommands: list, ingest, show, assign, set,
+    backfill."""
     import argparse
     from .adb import Adb
     from . import find_adb

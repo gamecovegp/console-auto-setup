@@ -1136,6 +1136,47 @@ class TestBackfill(unittest.TestCase):
         self._ingest_then_strip("legacy", board_platform="", soc="", android="")
         self.assertEqual(FW.backfill(self.root), [])
 
+    def test_backfill_skips_corrupt_json_syntax_entry_without_clobbering_it(self):
+        # Reviewer's literal example: meta.json with broken JSON syntax alongside a healthy entry.
+        # _read_json() returns {} for this file, which would make match_rules() look like "everything
+        # missing" -- backfill must not treat that as a legitimate target.
+        self._ingest_then_strip("ayn-odin2", board_platform="kalama", soc="SM8550", android="13")
+        corrupt_dir = self.root / "corrupt-fw"
+        corrupt_dir.mkdir(parents=True)
+        (corrupt_dir / "meta.json").write_text("{not json")
+        (corrupt_dir / "versions" / "20260101-000000" / "payload").mkdir(parents=True)
+        before = (corrupt_dir / "meta.json").read_bytes()
+
+        filled = FW.backfill(self.root)
+
+        self.assertEqual([fid for fid, _ in filled], ["ayn-odin2"])   # only the healthy entry
+        after = (corrupt_dir / "meta.json").read_bytes()
+        self.assertEqual(after, before)   # the corrupt file's BYTES are unchanged on disk
+
+    def test_backfill_skips_non_dict_meta_without_crashing_or_clobbering_it(self):
+        # A DIFFERENT shape of corruption: meta.json is syntactically valid JSON (json.loads succeeds,
+        # so _read_json() does NOT fall back to {}) but parses to something other than a dict -- e.g.
+        # a bare 'null'. Firmware.meta is then None, which is exactly as falsy as {} and just as much
+        # "never a legitimate backfill target". Without the guard this doesn't just clobber the file --
+        # fw.payload_dir() -> fw.current() -> None.get("current") raises AttributeError, which is not
+        # caught anywhere in backfill(), so the WHOLE run aborts and even the healthy entry alongside it
+        # never gets processed. This is the construction that actually discriminates: unlike the
+        # syntax-broken-JSON case above (already saved by the pre-existing "no payload dir" check, since
+        # a {} meta can never yield a "current" version), a None meta reaches fw.payload_dir() and blows
+        # up there -- proving the new guard is load-bearing, not redundant.
+        self._ingest_then_strip("ayn-odin2", board_platform="kalama", soc="SM8550", android="13")
+        corrupt_dir = self.root / "corrupt-fw"
+        corrupt_dir.mkdir(parents=True)
+        (corrupt_dir / "meta.json").write_text("null")
+        (corrupt_dir / "versions" / "20260101-000000" / "payload").mkdir(parents=True)
+        before = (corrupt_dir / "meta.json").read_bytes()
+
+        filled = FW.backfill(self.root)   # must not raise
+
+        self.assertEqual([fid for fid, _ in filled], ["ayn-odin2"])
+        after = (corrupt_dir / "meta.json").read_bytes()
+        self.assertEqual(after, before)
+
 
 # ---------------------------------------------------------------------------
 # Task 10 (CLI): main() 'backfill' subcommand
