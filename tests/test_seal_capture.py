@@ -14,9 +14,10 @@ from cas import initboot_store as IBS
 FP = "qti/kalama/kalama:13/TKQ1.231222.001/eng.RP6.20260119.170007:user/release-keys"
 
 
-def _fake_adb(slot="_a", su_rc=0, pull_bytes=b"ANDROID!" + b"\x00" * 1024, fp=FP):
+def _fake_adb(slot="_a", su_rc=0, pull_bytes=b"ANDROID!" + b"\x00" * 1024, fp=FP, boot_partition="init_boot"):
     adb = mock.Mock()
     adb.slot_suffix.return_value = slot
+    adb.boot_partition.return_value = boot_partition
     adb.getprop.return_value = fp
     adb.su.return_value = (su_rc, "", "")
 
@@ -40,9 +41,20 @@ class TestCapture(unittest.TestCase):
         ok = PV.capture_factory_init_boot(adb, self.store, log=lambda *a: None)
         self.assertTrue(ok)
         self.assertTrue(IBS.has(self.store, FP))
-        # dumped the INACTIVE slot (_b) since active is _a
-        ddcmd = adb.su.call_args[0][0]
+        # dumped the INACTIVE slot (_b) since active is _a. su is called TWICE (dd, then rm of the temp
+        # dump) — the dd is the FIRST call, not necessarily the last.
+        ddcmd = adb.su.call_args_list[0][0][0]
         self.assertIn("init_boot_b", ddcmd)
+
+    def test_captures_boot_partition_on_pre_init_boot_unit(self):
+        # A unit that launched pre-Android-13 keeps its ramdisk in 'boot', not 'init_boot' — the capture
+        # must dd from THIS unit's real boot partition (adb.boot_partition()), not a hardcoded 'init_boot'.
+        adb = _fake_adb(slot="_a", boot_partition="boot")
+        ok = PV.capture_factory_init_boot(adb, self.store, log=lambda *a: None)
+        self.assertTrue(ok)
+        ddcmd = adb.su.call_args_list[0][0][0]
+        self.assertIn("boot_b", ddcmd)
+        self.assertNotIn("init_boot_b", ddcmd)
 
     def test_rejects_empty_inactive_slot(self):
         adb = _fake_adb(pull_bytes=b"\x00" * 4096)
@@ -71,8 +83,11 @@ class TestCapture(unittest.TestCase):
         # A valid, non-Magisk image reaches the store write — but the write itself blows up
         # (disk full / permission denied on the store). Capture must swallow it, log a skip,
         # and return False — never propagate. root() succeeds regardless is the whole point.
+        # The REAL store.put() runs (not mocked) — only its atomic os.replace() is made to fail, so this
+        # also proves put()'s own failure path (raise, no dest left behind — see test_initboot_store.py's
+        # TestAtomicWrite) is actually non-fatal one layer up, at the capture call site.
         adb = _fake_adb()
-        with mock.patch.object(PV._ibs, "put", side_effect=OSError("disk full")):
+        with mock.patch.object(IBS.os, "replace", side_effect=OSError("disk full")):
             ok = PV.capture_factory_init_boot(adb, self.store, log=lambda *a: None)
         self.assertFalse(ok)
         self.assertFalse(IBS.has(self.store, FP))

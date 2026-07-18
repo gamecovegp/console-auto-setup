@@ -106,7 +106,8 @@ def main(argv=None):
         magisk_rel = prof.meta.get("magisk_apk") or PV.DEFAULT_MAGISK_APK
         fb = Fastboot(serial=a.serial, fastboot=a.fastboot)
         from cas import firmware as _FW
-        _cap = _FW.firmware_root().parent / "_init_boot_factory"
+        from cas import initboot_store as _IBS
+        _cap = _IBS.store_root(_FW.firmware_root())
         return 0 if PV.root(adb, fb, P.resolve_asset(prof, APPDIR, stock_rel),
                             magisk_apk=P.resolve_asset(prof, APPDIR, magisk_rel),
                             model_match=prof.meta.get("model_match"), force=a.force,

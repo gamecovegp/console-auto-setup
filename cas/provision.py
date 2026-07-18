@@ -828,26 +828,27 @@ def capture_factory_init_boot(adb, store_root, log=print):
     fp = adb.getprop("ro.build.fingerprint")
     if _ibs.has(store_root, fp):
         return True                                     # already captured for this build
+    part = adb.boot_partition()               # 'init_boot' (A13+) or 'boot' (older/upgraded units)
     dev = "/data/local/tmp/cas_factory_ib.img"
-    rc, _out, err = adb.su(f"dd if=/dev/block/by-name/init_boot{inactive} of={dev}")
+    rc, _out, err = adb.su(f"dd if=/dev/block/by-name/{part}{inactive} of={dev}")
     if rc != 0:
-        log(f"  factory init_boot capture skipped: could not read init_boot{inactive} ({err.strip()}).")
+        log(f"  factory init_boot capture skipped: could not read {part}{inactive} ({err.strip()}).")
         return False
     with tempfile.TemporaryDirectory() as td:
         local = str(pathlib.Path(td) / "factory_init_boot.img")
         pulled = adb.pull(dev, local)
-        adb.shell(f"rm -f {dev}")
+        adb.su(f"rm -f {dev}")                # root removes its own dd output — one command, allowed
         if not pulled:
             log("  factory init_boot capture skipped: could not pull the dumped image off the device.")
             return False
         try:
             data = pathlib.Path(local).read_bytes()
             if not _ibs.looks_like_boot_image(data):
-                log(f"  factory init_boot capture skipped: init_boot{inactive} is not a valid boot image "
+                log(f"  factory init_boot capture skipped: {part}{inactive} is not a valid boot image "
                     "(empty/unpopulated inactive slot) — not storing.")
                 return False
             if _ibs.contains_magisk(data):
-                log(f"  factory init_boot capture skipped: init_boot{inactive} carries Magisk markers "
+                log(f"  factory init_boot capture skipped: {part}{inactive} carries Magisk markers "
                     "(not a factory image) — not storing.")
                 return False
             meta = {
@@ -1946,7 +1947,7 @@ def root_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
             def _wlog(m, s=serial):
                 msgs.append(m)
                 log(f"[{s}] {m}")
-            capture_store = FW.firmware_root().parent / "_init_boot_factory"
+            capture_store = _ibs.store_root(FW.firmware_root())
             ok = root(adb, fb, stock_path,
                       magisk_apk=_kit_apk(MAGISK_PKG, prof, appdir, magisk_rel),
                       log=_wlog,
@@ -2052,11 +2053,16 @@ def seal_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
                 msgs.append(m)
                 log(f"[{s}] {m}")
             # Prefer this unit's OWN captured factory init_boot (exact build) over the model-matched
-            # library image, so the sealed unit's device OTA source-verifies. Falls back + warns.
-            from . import firmware as FW
-            store_root = FW.firmware_root().parent / "_init_boot_factory"
-            _fp = adb.getprop("ro.build.fingerprint")
-            stock_path = resolve_seal_stock(stock_path, _ibs.get(store_root, _fp), _fp, log=_wlog)
+            # library image, so the sealed unit's device OTA source-verifies. Falls back + warns — but
+            # ONLY for capture-APPLICABLE units. capture_factory_init_boot only ever populates the store
+            # when there's a distinct inactive A/B slot to read (its own slot gate); an A-only unit (empty
+            # slot suffix) can NEVER have a capture, so running this lookup there would just emit a
+            # permanent false "OTA may fail (code 20)" warning on every seal. Skip it for those units —
+            # use the library-resolved stock_path with no warning.
+            if adb.slot_suffix() in ("_a", "_b"):
+                store_root = _ibs.store_root(FW.firmware_root())
+                _fp = adb.getprop("ro.build.fingerprint")
+                stock_path = resolve_seal_stock(stock_path, _ibs.get(store_root, _fp), _fp, log=_wlog)
             ok = seal(adb, fb, stock_path,
                       log=_wlog,
                       model_match=prof.meta.get("model_match"), force=(serial in force_serials),

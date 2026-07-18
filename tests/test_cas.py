@@ -58,9 +58,10 @@ class FakeRunner:
                  push_ok=True, pull_ok=True, su_blocked=False, slot="_a", first_api="33",
                  device_owner=False, do_set_ok=True, do_restrict=True, release_clears=True,
                  restrict_in="device_policy", do_set_err=None, dev_code="",
-                 sd_vols=None, sd_esde=False, sd_art=False):
+                 sd_vols=None, sd_esde=False, sd_art=False, fingerprint=""):
         self.calls = []
         self.model, self.golden, self.root, self.boot, self.sd = model, golden, root, boot, sd
+        self.fingerprint = fingerprint      # ro.build.fingerprint (default "" — most tests don't care)
         # External /storage volume ids present on the (fake) device — modeling ANY volume-id format, not
         # just the hyphenated FAT 'XXXX-XXXX'. Defaults follow `sd`: one dashed card when sd, none when not.
         self.sd_vols = list(sd_vols) if sd_vols is not None else (["9C33-6BBD"] if sd else [])
@@ -168,7 +169,8 @@ class FakeRunner:
                 val = {"ro.product.model": self.model, "sys.boot_completed": self.boot,
                        "ro.boot.slot_suffix": self.slot,
                        "ro.mangmi.dev.code": self.dev_code,
-                       "ro.product.first_api_level": self.first_api}.get(key, "")
+                       "ro.product.first_api_level": self.first_api,
+                       "ro.build.fingerprint": self.fingerprint}.get(key, "")
                 return 0, val + "\n", ""
             if "CAS_XOK" in tail:                       # box-art tar unpack confirmation sentinel
                 return 0, "CAS_XOK\n", ""
@@ -2545,6 +2547,103 @@ class TestBatch(unittest.TestCase):
                 profiles_root=t, appdir=t, log=lambda m: None, profile_map=pm)
             self.assertEqual(res["DEV1"][0], "ok")           # mapped profile used despite model not matching
             self.assertEqual(res["DEV2"][0], "no-profile")   # None in the map -> skipped
+
+    def test_seal_all_a_only_unit_skips_code20_warning(self):
+        # A-only units (empty slot suffix) can NEVER have a factory-init_boot capture (capture_factory_
+        # init_boot's own gate requires a distinct inactive A/B slot to read) — so seal_all must not run
+        # the capture-preferred lookup/resolver there, and must never emit its "OTA may fail (code 20)"
+        # warning for one. A/B units are covered by test_prefers_capture_over_library /
+        # test_falls_back_to_library_with_warning in tests/test_seal_capture.py (resolve_seal_stock unit
+        # tests) plus the wiring tests below.
+        with tempfile.TemporaryDirectory() as t:
+            self._profile_with_imgs(t)
+            msgs = []
+            fbs = {}
+
+            def mkfb(s):
+                fbs[s] = FbRunner()
+                return Fastboot(serial=s, runner=fbs[s])
+            PV.seal_all(
+                lambda s: Adb(serial=s, runner=FakeRunner(model="Odin2 Mini", root=True, slot="")),
+                mkfb, [("ABC123", "device")], profiles_root=t, appdir=t, log=msgs.append)
+            self.assertIn("flash init_boot", "\n".join(fbs["ABC123"].cmds()))  # the seal attempt ran
+            blob = "\n".join(msgs)
+            self.assertNotIn("OTA may fail", blob)
+            self.assertNotIn("code 20", blob)
+
+    def test_seal_all_passes_captured_init_boot_to_seal(self):
+        # Load-bearing wiring: on an A/B unit with a factory init_boot already captured (by an earlier
+        # Root) for its CURRENT fingerprint, seal_all must resolve THAT captured image and pass it to
+        # seal() as the un-root stock image — not the library/default-kit image.
+        from unittest import mock
+        from cas import firmware as FW
+        from cas import initboot_store as IBS
+        saved = os.environ.get("CAS_PROFILES")
+        try:
+            with tempfile.TemporaryDirectory() as t:
+                os.environ["CAS_PROFILES"] = t
+                self._profile_with_imgs(t)
+                fp = "qti/kalama/kalama:13/TKQ1.231222.001/eng.RP6.20260119.170007:user/release-keys"
+                store_root = IBS.store_root(FW.firmware_root())
+                src = pathlib.Path(t) / "captured.img"
+                src.write_bytes(b"ANDROID!" + b"\x00" * 512)
+                captured_path = IBS.put(store_root, fp, src, {"fingerprint": fp, "size": src.stat().st_size})
+
+                seen_stock = []
+
+                def fake_seal(adb, fb, stock, **kw):
+                    seen_stock.append(stock)
+                    return True
+
+                no_fw = {"firmware_id": None, "version": None, "manual": False,
+                         "suggested": None, "ok": False, "warnings": [], "firmware": None}
+                with mock.patch("cas.firmware.resolve", return_value=no_fw), \
+                     mock.patch.object(PV, "seal", side_effect=fake_seal):
+                    res = PV.seal_all(
+                        lambda s: Adb(serial=s, runner=FakeRunner(model="Odin2 Mini", root=True,
+                                                                   slot="_a", fingerprint=fp)),
+                        lambda s: Fastboot(serial=s, runner=FbRunner()),
+                        [("ABC123", "device")], profiles_root=t, appdir=t, log=lambda m: None)
+                self.assertEqual(res["ABC123"][0], "ok")
+                self.assertEqual(seen_stock, [str(captured_path)])
+        finally:
+            if saved is None:
+                os.environ.pop("CAS_PROFILES", None)
+            else:
+                os.environ["CAS_PROFILES"] = saved
+
+    def test_root_all_passes_capture_store_to_root(self):
+        # Load-bearing wiring: root_all must pass a non-None capture_store through to root() (which is
+        # what lets a successful Root capture the unit's OWN factory init_boot for seal to restore later).
+        from unittest import mock
+        saved = os.environ.get("CAS_PROFILES")
+        try:
+            with tempfile.TemporaryDirectory() as t:
+                os.environ["CAS_PROFILES"] = t
+                self._profile_with_imgs(t)
+
+                seen_capture_store = []
+
+                def fake_root(adb, fb, stock, **kw):
+                    seen_capture_store.append(kw.get("capture_store"))
+                    return True
+
+                no_fw = {"firmware_id": None, "version": None, "manual": False,
+                         "suggested": None, "ok": False, "warnings": [], "firmware": None}
+                with mock.patch("cas.firmware.resolve", return_value=no_fw), \
+                     mock.patch.object(PV, "root", side_effect=fake_root):
+                    res = PV.root_all(
+                        lambda s: Adb(serial=s, runner=FakeRunner(model="Odin2 Mini", root=True)),
+                        lambda s: Fastboot(serial=s, runner=FbRunner()),
+                        [("ABC123", "device")], profiles_root=t, appdir=t, log=lambda m: None)
+                self.assertEqual(res["ABC123"][0], "ok")
+                self.assertEqual(len(seen_capture_store), 1)
+                self.assertIsNotNone(seen_capture_store[0])
+        finally:
+            if saved is None:
+                os.environ.pop("CAS_PROFILES", None)
+            else:
+                os.environ["CAS_PROFILES"] = saved
 
 
 class TestEsMedia(unittest.TestCase):
