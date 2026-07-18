@@ -78,5 +78,19 @@ class TestCapture(unittest.TestCase):
         self.assertFalse(IBS.has(self.store, FP))
 
 
+class TestSealResolve(unittest.TestCase):
+    def test_prefers_capture_over_library(self):
+        logs = []
+        out = PV.resolve_seal_stock("/lib/kit_init_boot.img", "/store/cap.img", FP, log=logs.append)
+        self.assertEqual(out, "/store/cap.img")
+        self.assertTrue(any("captured factory init_boot" in m for m in logs))
+
+    def test_falls_back_to_library_with_warning(self):
+        logs = []
+        out = PV.resolve_seal_stock("/lib/kit_init_boot.img", None, FP, log=logs.append)
+        self.assertEqual(out, "/lib/kit_init_boot.img")
+        self.assertTrue(any("OTA may fail" in m for m in logs))
+
+
 if __name__ == "__main__":
     unittest.main()

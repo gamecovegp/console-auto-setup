@@ -1748,6 +1748,19 @@ def grant_shell_root(adb, log=print, attempts=3, ui_timeout=15):
     return False
 
 
+def resolve_seal_stock(library_stock, capture_path, fingerprint, log=print):
+    """Pick the init_boot seal() will flash to un-root: prefer this unit's OWN captured factory image
+    (exact-build → its device OTA source-verifies), else fall back to the model-matched library image
+    with a LOUD warning that the unit's OTA may break until it's re-captured."""
+    if capture_path:
+        log(f"  un-root: restoring this unit's own captured factory init_boot for build {fingerprint} "
+            "(keeps its device OTA healthy).")
+        return str(capture_path)
+    log(f"  ⚠ no factory init_boot captured for build {fingerprint} — sealing with the library image; "
+        "this unit's device OTA may fail (code 20) until it's rooted from a clean state to capture it.")
+    return library_stock
+
+
 def seal(adb, fastboot, stock_init_boot, log=print, wait=True, model_match=None, force=False, flasher=None):
     """Make a provisioned unit RETAIL-READY (run AFTER provision + verify):
       1) check the stock init_boot matches THIS device model (wrong-model flash bricks boot)
@@ -2033,6 +2046,12 @@ def seal_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
             def _wlog(m, s=serial):
                 msgs.append(m)
                 log(f"[{s}] {m}")
+            # Prefer this unit's OWN captured factory init_boot (exact build) over the model-matched
+            # library image, so the sealed unit's device OTA source-verifies. Falls back + warns.
+            from . import firmware as FW
+            store_root = FW.firmware_root().parent / "_init_boot_factory"
+            _fp = adb.getprop("ro.build.fingerprint")
+            stock_path = resolve_seal_stock(stock_path, _ibs.get(store_root, _fp), _fp, log=_wlog)
             ok = seal(adb, fb, stock_path,
                       log=_wlog,
                       model_match=prof.meta.get("model_match"), force=(serial in force_serials),
