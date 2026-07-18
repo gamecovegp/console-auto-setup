@@ -9,7 +9,9 @@ import os
 import re
 import time
 import shutil
+import hashlib
 import tarfile
+import datetime
 import tempfile
 import pathlib
 import concurrent.futures
@@ -17,6 +19,7 @@ import concurrent.futures
 from . import BUNDLE, DATA
 from . import profiles as P
 from . import recovery as RC
+from . import initboot_store as _ibs
 from .adb import boot_tick_msg, is_cancelled
 
 # RetroArch cores: resolved at provision time via config.cores_dir() (library_root()/retroarch-cores,
@@ -808,6 +811,55 @@ def patch_init_boot_on_device(adb, stock_init_boot, dest, log=print):
         log("ERROR: could not pull the patched init_boot off the device.")
         return False
     log("on-device patch complete — Magisk-patched init_boot pulled to the PC.")
+    return True
+
+
+def capture_factory_init_boot(adb, store_root, log=print):
+    """Capture this unit's OWN factory init_boot into the per-build store, for seal() to restore later so
+    the unit's device OTA still source-verifies. Read the INACTIVE A/B slot — CAS only ever flashes the
+    ACTIVE slot, so the inactive one still holds the pristine factory image. ADDITIVE & NON-FATAL: any
+    problem logs a warning and returns False; root() succeeds regardless. Returns True iff a valid factory
+    image is now stored for this build."""
+    slot = (adb.slot_suffix() or "").strip()
+    if slot not in ("_a", "_b"):
+        log("  factory init_boot capture skipped: no distinct inactive A/B slot on this unit.")
+        return False
+    inactive = "_b" if slot == "_a" else "_a"
+    fp = adb.getprop("ro.build.fingerprint")
+    if _ibs.has(store_root, fp):
+        return True                                     # already captured for this build
+    dev = "/data/local/tmp/cas_factory_ib.img"
+    rc, _out, err = adb.su(f"dd if=/dev/block/by-name/init_boot{inactive} of={dev}")
+    if rc != 0:
+        log(f"  factory init_boot capture skipped: could not read init_boot{inactive} ({err.strip()}).")
+        return False
+    with tempfile.TemporaryDirectory() as td:
+        local = str(pathlib.Path(td) / "factory_init_boot.img")
+        pulled = adb.pull(dev, local)
+        adb.shell(f"rm -f {dev}")
+        if not pulled:
+            log("  factory init_boot capture skipped: could not pull the dumped image off the device.")
+            return False
+        data = pathlib.Path(local).read_bytes()
+        if not _ibs.looks_like_boot_image(data):
+            log(f"  factory init_boot capture skipped: init_boot{inactive} is not a valid boot image "
+                "(empty/unpopulated inactive slot) — not storing.")
+            return False
+        if _ibs.contains_magisk(data):
+            log(f"  factory init_boot capture skipped: init_boot{inactive} carries Magisk markers "
+                "(not a factory image) — not storing.")
+            return False
+        meta = {
+            "fingerprint": fp,
+            "incremental": adb.getprop("ro.build.version.incremental"),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "size": len(data),
+            "source_serial": str(adb.serial),
+            "captured_utc": datetime.datetime.utcnow().isoformat() + "Z",
+        }
+        _ibs.put(store_root, fp, local, meta)
+    log(f"  ✓ captured this unit's factory init_boot for build {fp} (seal will restore it → OTA stays "
+        "healthy).")
     return True
 
 
