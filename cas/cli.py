@@ -105,9 +105,12 @@ def main(argv=None):
         stock_rel = prof.meta.get("stock_init_boot") or PV.DEFAULT_STOCK_INIT_BOOT
         magisk_rel = prof.meta.get("magisk_apk") or PV.DEFAULT_MAGISK_APK
         fb = Fastboot(serial=a.serial, fastboot=a.fastboot)
+        from cas import firmware as _FW
+        _cap = _FW.firmware_root().parent / "_init_boot_factory"
         return 0 if PV.root(adb, fb, P.resolve_asset(prof, APPDIR, stock_rel),
                             magisk_apk=P.resolve_asset(prof, APPDIR, magisk_rel),
-                            model_match=prof.meta.get("model_match"), force=a.force) else 1
+                            model_match=prof.meta.get("model_match"), force=a.force,
+                            capture_store=_cap) else 1
 
     if a.cmd == "provision":
         prof = _resolve_profile(adb, a.profile, proot)

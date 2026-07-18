@@ -1566,7 +1566,7 @@ def _img_kernel_size(path):
 
 
 def root(adb, fastboot, stock_init_boot, magisk_apk=None, log=print, wait=True, model_match=None,
-         force=False, flasher=None):
+         force=False, flasher=None, capture_store=None):
     """Root a FRESH unit — Magisk-FIRST, everything sourced from the PC (run BEFORE provision). Inverse of
     seal():
       1) install the Magisk APP from the PC (the manager — FIRST, so it's present to own root)
@@ -1680,12 +1680,16 @@ def root(adb, fastboot, stock_init_boot, magisk_apk=None, log=print, wait=True, 
     from . import config as _cfg
     granted = _await_boot_grant(adb, log=log) if _cfg.bake_boot_grant() else adb.is_root()
     if granted:
+        if capture_store:
+            capture_factory_init_boot(adb, capture_store, log=log)
         log("✓ ROOTED — shell pre-authorized at boot (zero-touch, no Magisk prompt). "
             "Ready to '② Download to selected device'.")
         return True
     if _cfg.auto_grant_shell():
         log("shell not granted by the boot-grant — auto-granting via the on-device Magisk prompt…")
         if grant_shell_root(adb, log=log):
+            if capture_store:
+                capture_factory_init_boot(adb, capture_store, log=log)
             log("✓ ROOTED — shell auto-granted. Ready to '② Download'.")
             return True
         return False                       # grant_shell_root already logged the manual fallback
@@ -1942,11 +1946,12 @@ def root_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
             def _wlog(m, s=serial):
                 msgs.append(m)
                 log(f"[{s}] {m}")
+            capture_store = FW.firmware_root().parent / "_init_boot_factory"
             ok = root(adb, fb, stock_path,
                       magisk_apk=_kit_apk(MAGISK_PKG, prof, appdir, magisk_rel),
                       log=_wlog,
                       model_match=prof.meta.get("model_match"), force=(serial in force_serials),
-                      flasher=flasher)
+                      flasher=flasher, capture_store=capture_store)
             if adb.cancel is not None and adb.cancel.is_set():
                 return ("cancelled", prof.name)
             if ok:

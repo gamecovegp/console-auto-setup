@@ -92,5 +92,59 @@ class TestSealResolve(unittest.TestCase):
         self.assertTrue(any("OTA may fail" in m for m in logs))
 
 
+class TestRootCaptureWiring(unittest.TestCase):
+    def test_root_calls_capture_on_success(self):
+        calls = []
+
+        def fake_capture(adb, store_root, log=print):
+            calls.append(store_root)
+            return True
+
+        adb = mock.Mock()
+        # Drive root() straight to its success return: booted + granted, no boot-grant bake.
+        # is_root() is checked TWICE: once up front ("already rooted?" — must be False so root()
+        # doesn't short-circuit before ever flashing/capturing) and once post-boot as the granted
+        # check (bake_boot_grant is patched False below, so `granted = adb.is_root()`) — must be True.
+        adb.wait_boot.return_value = True
+        adb.is_root.side_effect = [False, True]
+        adb.getprop.return_value = "init_boot"  # any nonempty; kernel-size guard is bypassed below
+
+        with mock.patch.object(PV, "capture_factory_init_boot", side_effect=fake_capture), \
+             mock.patch.object(PV, "_await_boot_grant", return_value=True), \
+             mock.patch.object(PV, "patch_init_boot_on_device", return_value=True), \
+             mock.patch.object(PV, "_img_kernel_size", return_value=0), \
+             mock.patch.object(PV.pathlib.Path, "exists", return_value=True), \
+             mock.patch("cas.config.bake_boot_grant", return_value=False), \
+             mock.patch("cas.config.auto_grant_shell", return_value=False):
+            adb.boot_flash_target.return_value = "init_boot_a"
+            adb.is_golden.return_value = False
+            ok = PV.root(adb, mock.Mock(), "/lib/stock_init_boot.img",
+                         magisk_apk=None, log=lambda *a: None,
+                         flasher=lambda *a, **k: True, capture_store="/store")
+        self.assertTrue(ok)
+        self.assertEqual(calls, ["/store"])
+
+    def test_root_does_not_capture_when_no_store(self):
+        adb = mock.Mock()
+        adb.wait_boot.return_value = True
+        adb.is_root.side_effect = [False, True]  # see comment above: unrooted, then granted post-boot
+        adb.getprop.return_value = "init_boot"
+
+        with mock.patch.object(PV, "capture_factory_init_boot") as cap, \
+             mock.patch.object(PV, "_await_boot_grant", return_value=True), \
+             mock.patch.object(PV, "patch_init_boot_on_device", return_value=True), \
+             mock.patch.object(PV, "_img_kernel_size", return_value=0), \
+             mock.patch.object(PV.pathlib.Path, "exists", return_value=True), \
+             mock.patch("cas.config.bake_boot_grant", return_value=False), \
+             mock.patch("cas.config.auto_grant_shell", return_value=False):
+            adb.boot_flash_target.return_value = "init_boot_a"
+            adb.is_golden.return_value = False
+            ok = PV.root(adb, mock.Mock(), "/lib/stock_init_boot.img",
+                         magisk_apk=None, log=lambda *a: None,
+                         flasher=lambda *a, **k: True)
+        self.assertTrue(ok)
+        cap.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
