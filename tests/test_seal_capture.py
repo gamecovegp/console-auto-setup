@@ -67,6 +67,16 @@ class TestCapture(unittest.TestCase):
         self.assertFalse(ok)
         adb.su.assert_not_called()
 
+    def test_non_fatal_on_store_write_error(self):
+        # A valid, non-Magisk image reaches the store write — but the write itself blows up
+        # (disk full / permission denied on the store). Capture must swallow it, log a skip,
+        # and return False — never propagate. root() succeeds regardless is the whole point.
+        adb = _fake_adb()
+        with mock.patch.object(PV._ibs, "put", side_effect=OSError("disk full")):
+            ok = PV.capture_factory_init_boot(adb, self.store, log=lambda *a: None)
+        self.assertFalse(ok)
+        self.assertFalse(IBS.has(self.store, FP))
+
 
 if __name__ == "__main__":
     unittest.main()

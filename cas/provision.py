@@ -840,24 +840,29 @@ def capture_factory_init_boot(adb, store_root, log=print):
         if not pulled:
             log("  factory init_boot capture skipped: could not pull the dumped image off the device.")
             return False
-        data = pathlib.Path(local).read_bytes()
-        if not _ibs.looks_like_boot_image(data):
-            log(f"  factory init_boot capture skipped: init_boot{inactive} is not a valid boot image "
-                "(empty/unpopulated inactive slot) — not storing.")
+        try:
+            data = pathlib.Path(local).read_bytes()
+            if not _ibs.looks_like_boot_image(data):
+                log(f"  factory init_boot capture skipped: init_boot{inactive} is not a valid boot image "
+                    "(empty/unpopulated inactive slot) — not storing.")
+                return False
+            if _ibs.contains_magisk(data):
+                log(f"  factory init_boot capture skipped: init_boot{inactive} carries Magisk markers "
+                    "(not a factory image) — not storing.")
+                return False
+            meta = {
+                "fingerprint": fp,
+                "incremental": adb.getprop("ro.build.version.incremental"),
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "size": len(data),
+                "source_serial": str(adb.serial),
+                "captured_utc": datetime.datetime.now(datetime.timezone.utc).isoformat().replace(
+                    "+00:00", "Z"),
+            }
+            _ibs.put(store_root, fp, local, meta)
+        except Exception as e:                       # capture is ADDITIVE & NON-FATAL — never raise
+            log(f"  factory init_boot capture skipped: unexpected error ({e}).")
             return False
-        if _ibs.contains_magisk(data):
-            log(f"  factory init_boot capture skipped: init_boot{inactive} carries Magisk markers "
-                "(not a factory image) — not storing.")
-            return False
-        meta = {
-            "fingerprint": fp,
-            "incremental": adb.getprop("ro.build.version.incremental"),
-            "sha256": hashlib.sha256(data).hexdigest(),
-            "size": len(data),
-            "source_serial": str(adb.serial),
-            "captured_utc": datetime.datetime.utcnow().isoformat() + "Z",
-        }
-        _ibs.put(store_root, fp, local, meta)
     log(f"  ✓ captured this unit's factory init_boot for build {fp} (seal will restore it → OTA stays "
         "healthy).")
     return True
