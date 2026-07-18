@@ -4,6 +4,7 @@ import os
 import sys
 import pathlib
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -142,6 +143,49 @@ class TestAtomicWrite(unittest.TestCase):
         self.assertFalse((d / "init_boot.img").exists())
         self.assertFalse((d / "meta.json").exists())
         self.assertFalse(IBS.has(self.root, FP))
+
+
+class TestConcurrentPut(unittest.TestCase):
+    """Fleet-batch regression: root_all/seal_all fan out across devices with a ThreadPoolExecutor in ONE
+    process. Several units of the SAME build share a fingerprint => same store slug => same dest path.
+    put()'s temp filename must be unique PER CALL (not just per-PID) so concurrent writers never share a
+    temp path and interleave their write_bytes() calls into a corrupted-but-same-length blob that the
+    size-only integrity gate in get() would otherwise wave through."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.root = pathlib.Path(self.tmp) / "_init_boot_factory"
+        self.img = pathlib.Path(self.tmp) / "src.img"
+        # Multi-KB, non-repeating body so any interleaved/truncated/zero-holed corruption is detectable
+        # byte-for-byte -- a same-length-but-wrong-bytes result would slip past a size-only check.
+        body = bytes((i * 37 + 11) % 256 for i in range(64 * 1024))
+        self.img.write_bytes(b"ANDROID!" + body)
+        self.expected = self.img.read_bytes()
+
+    def test_concurrent_put_same_fingerprint_never_corrupts(self):
+        n_threads = 8
+        barrier = threading.Barrier(n_threads)
+        errors = []
+        meta = {"fingerprint": FP, "size": len(self.expected)}
+
+        def worker():
+            try:
+                barrier.wait(timeout=10)  # release all threads together -> max interleave window
+                IBS.put(self.root, FP, self.img, meta)
+            except Exception as exc:  # surfaced via the errors list, not lost on a background thread
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        self.assertEqual(errors, [])
+        got = IBS.get(self.root, FP)
+        self.assertIsNotNone(got, "get() must see a valid capture after concurrent put()s")
+        self.assertEqual(got.stat().st_size, len(self.expected))
+        self.assertEqual(got.read_bytes(), self.expected)  # exact bytes: catches interleaved/holed writes
 
 
 if __name__ == "__main__":

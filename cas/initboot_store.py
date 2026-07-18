@@ -7,6 +7,7 @@ import json
 import os
 import pathlib
 import re
+import uuid
 
 _MAGISK_MARKERS = (b"MAGISKINIT", b"MAGISKPOLICY", b".magisk")
 
@@ -70,13 +71,21 @@ def put(store_root, fingerprint, img_path, meta):
     ATOMIC: the image is written to a temp file in the SAME directory, then moved into place with
     os.replace() (atomic on both POSIX and Windows) — so a crash/kill mid-write can never leave a
     partial init_boot.img sitting at the real path. meta.json is written only AFTER the image lands, so
-    a reader can never observe a meta.json whose image write hasn't finished."""
+    a reader can never observe a meta.json whose image write hasn't finished.
+
+    The temp filename includes a per-call uuid4 (not just the PID): root_all/seal_all fan out across
+    devices with a ThreadPoolExecutor in ONE process, so several threads rooting same-build units can
+    race into put() concurrently for the same fingerprint (same slug => same dir) at the same time —
+    a PID-only temp name would let their write_bytes() calls (GIL released during multi-MB I/O)
+    interleave into a SHARED temp file, corrupting it before either os.replace(). A unique-per-call temp
+    means every thread writes its own complete file; since same-build content is identical, whichever
+    os.replace() wins still leaves a complete, valid image at dest."""
     d = _dir(store_root, fingerprint)
     dest = d / "init_boot.img"
     if get(store_root, fingerprint) is not None:
         return dest
     d.mkdir(parents=True, exist_ok=True)
-    tmp = d / f".init_boot.img.{os.getpid()}.tmp"
+    tmp = d / f".init_boot.img.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     try:
         tmp.write_bytes(pathlib.Path(img_path).read_bytes())
         os.replace(tmp, dest)
