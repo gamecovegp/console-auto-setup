@@ -196,6 +196,15 @@ home_launcher(){
   cmd package resolve-activity -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null \
     | sed -n 's/.*packageName=\([^ }]*\).*/\1/p' | head -1
 }
+# Is <pkg> USER-INSTALLED (an APK under /data/app) rather than system firmware (/system, /product,
+# /vendor)? Decides whether a launcher is a real app that must be captured and installed on the target
+# unit, or firmware that only rides @homescreen. Non-zero for an absent package too.
+is_user_app(){
+  case "$(pm path "$1" 2>/dev/null | head -1)" in
+    package:/data/app/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 # The FULL home component (pkg/cls). home_launcher returns only the package -- enough to GATE on, but
 # `cmd package set-home-activity` needs the component, so capture records this alongside launcher_pkg.
 home_component(){

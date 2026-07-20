@@ -31,10 +31,17 @@ mk_tar(){ out="$1"; cdir="$2"; member="$3"; shift 3
   echo "golden_locale=$(getprop persist.sys.locale 2>/dev/null)"
 } > "$P/global.meta"
 # the app set we clone: the manifest's pkgs when a selection was passed (SELECTIVE capture), else ALL
-# 3rd-party minus host tools. The default launcher (a system app) rides @homescreen below, NOT this loop,
-# so it is filtered out of the per-app set even when the manifest lists it.
+# 3rd-party minus host tools. A SYSTEM default launcher (e.g. com.android.launcher3) rides @homescreen
+# below, NOT this loop, so it is filtered out of the per-app set even when the manifest lists it — its
+# APK is firmware and can't be installed anywhere anyway.
+# A USER-INSTALLED launcher is the opposite case and MUST stay in the loop: the AYN Thor ships
+# xyz.blacksheep.mjolnir as HOME, and filtering it meant a launcher the operator explicitly ticked in the
+# Save modal was silently dropped from the golden, leaving the target unit unable to install it (and
+# set_home_component then refusing, which skips the layout AND the wallpaper).
+_HL="$(home_launcher 2>/dev/null)"
+[ -n "$_HL" ] && is_user_app "$_HL" && _HL=""          # user-installed -> capture it like any other app
 if [ -n "${CAS_MANIFEST:-}" ] && [ -f "$CAS_MANIFEST" ]; then
-  manifest_pkgs "$CAS_MANIFEST" | grep -vxF "$(home_launcher 2>/dev/null || echo __no_launcher__)" > "$P/pkglist.txt" 2>/dev/null \
+  manifest_pkgs "$CAS_MANIFEST" | grep -vxF "${_HL:-__no_launcher__}" > "$P/pkglist.txt" 2>/dev/null \
     || manifest_pkgs "$CAS_MANIFEST" > "$P/pkglist.txt"
 else
   user_pkgs > "$P/pkglist.txt"

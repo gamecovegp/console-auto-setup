@@ -23,7 +23,16 @@ cmd(){
   esac
   return 0
 }
-pm(){ case "$1" in path) case " $INSTALLED " in *" $2 "*) return 0;; *) return 1;; esac;; *) return 0;; esac; }
+APK_DIR="/data/app"                             # where the stubbed `pm path` claims the APK lives
+pm(){
+  case "$1" in
+    path) case " $INSTALLED " in
+            *" $2 "*) echo "package:$APK_DIR/~~ab==/$2-cd==/base.apk"; return 0 ;;
+            *) return 1 ;;
+          esac ;;
+    *) return 0 ;;
+  esac
+}
 
 # === home_component: full pkg/cls, not just the package =========================================
 # set-home-activity needs a COMPONENT; launcher_pkg alone can't drive it.
@@ -61,6 +70,25 @@ if set_home_component ""; then echo "FAIL(4 empty accepted)"; fail=1; fi
 if set_home_component "xyz.blacksheep.mjolnir"; then echo "FAIL(4b bare pkg accepted)"; fail=1; fi
 grep -q "set-home-activity" "$CMD_LOG" \
   && { echo "FAIL(4c issued a call for a malformed component): $(cat "$CMD_LOG")"; fail=1; }
+
+# === is_user_app: /data/app => user-installed, anything else => system firmware =================
+INSTALLED="xyz.blacksheep.mjolnir"
+APK_DIR="/data/app"
+is_user_app "xyz.blacksheep.mjolnir" || { echo "FAIL(8): /data/app package must read as user-installed"; fail=1; }
+APK_DIR="/system/priv-app"
+if is_user_app "xyz.blacksheep.mjolnir"; then echo "FAIL(8b): /system package must NOT read as user-installed"; fail=1; fi
+APK_DIR="/product/app"
+if is_user_app "xyz.blacksheep.mjolnir"; then echo "FAIL(8c): /product package must NOT read as user-installed"; fail=1; fi
+APK_DIR="/data/app"
+if is_user_app "com.not.installed"; then echo "FAIL(8d): an absent package must NOT read as user-installed"; fail=1; fi
+
+# === capture.sh must NOT filter a USER-INSTALLED launcher out of pkglist.txt ====================
+# capture.sh built pkglist.txt as `manifest_pkgs | grep -vxF "$(home_launcher)"`, dropping the HOME
+# launcher "even when the manifest lists it". Right for com.android.launcher3 (firmware); wrong for the
+# AYN Thor's xyz.blacksheep.mjolnir -- it was ticked in the Save modal, written to the capture-manifest,
+# and then silently stripped, so golden_root_payload/xyz.blacksheep.mjolnir/ was never created.
+grep -q 'is_user_app' "$ROOT/provision/root/capture.sh" \
+  || { echo "FAIL(9): capture.sh still filters the HOME launcher unconditionally"; fail=1; }
 
 # === wiring: capture records the component, restore applies it BEFORE the gate ==================
 # Folded into @homescreen (no separate flag) -- it's the same concern: the launcher and the layout it
