@@ -1971,7 +1971,10 @@ class App:
         match = {"serial_prefix": prefixes} if prefixes else None
 
         def work():
-            fw = FW.ingest(folder, FW.firmware_root(), firmware_id=fid.strip(), match=match)
+            # log= so the operator SEES the slim step — it can pause on the one-time metadata capture
+            # (a multi-GB grep of the super images), which reads as a hang without output.
+            fw = FW.ingest(folder, FW.firmware_root(), firmware_id=fid.strip(), match=match,
+                           log=self.log)
             self.log(f"firmware ingested: {fw.id}  v{fw.current()}  match={fw.match_rules()}")
             self.win.after(0, self.refresh_devices)
             if on_done is not None:

@@ -747,6 +747,9 @@ def slim(firmware, version=None, dry_run=False, log=print):
     return res
 
 
+_slim = slim   # module-level alias: ingest()'s `slim=` parameter shadows the name inside its body
+
+
 def unslim(firmware, version=None, log=print):
     """Restore a slimmed build's full vendor package from masters_root(). The inverse of slim()."""
     version = version or firmware.current()
@@ -772,7 +775,7 @@ def unslim(firmware, version=None, log=print):
     return res
 
 
-def ingest(src, root, firmware_id=None, label=None, match=None, copy=True):
+def ingest(src, root, firmware_id=None, label=None, match=None, copy=True, slim=True, log=print):
     """Add a raw build folder to the library as a new version. Detects storage/flash_target/version/device,
     copies the tree to versions/<version>/payload, writes version.meta.json, sets current, appends history.
     Idempotent if the version already exists. Raises ValueError if the detected device contradicts an
@@ -847,7 +850,15 @@ def ingest(src, root, firmware_id=None, label=None, match=None, copy=True):
     })
     _write_json(fw_dir / "meta.json", meta)
     log_event("", fid, version, "update", False)
-    return Firmware(fw_dir)
+    fw = Firmware(fw_dir)
+    # Keep only what CAS flashes, parking the full package in _firmware_masters/. Default ON so the
+    # library never re-accumulates the ~98% of a vendor tree nothing reads; slim=False keeps the whole
+    # tree for a build under investigation. Same function the cleanup path uses, so the two can't drift.
+    # detect_build() has already run above, so slim's metadata gate is satisfied and costs nothing here.
+    if slim:
+        _slim(fw, version=version, log=log)         # _slim: the parameter shadows the function name
+        fw = Firmware(fw_dir)                       # re-read: slim rewrote version.meta.json
+    return fw
 
 
 # ---------------------------------------------------------------------------

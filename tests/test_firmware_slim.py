@@ -237,5 +237,65 @@ class TestUnslim(unittest.TestCase):
         self.assertFalse(vm.get("slim"))
 
 
+def build_vendor_package(tmp, name="RP6_20260115", *, target="init_boot", edl=False):
+    """An unpacked vendor package as it arrives from the manufacturer — the input to ingest()."""
+    src = pathlib.Path(tmp) / name
+    src.mkdir(parents=True)
+    (src / f"{target}.img").write_bytes(b"ANDROID!" + b"\x00" * 64)
+    (src / "boot.img").write_bytes(b"ANDROID!" + b"\x01" * 64)
+    (src / "rawprogram0.xml").write_text(
+        f'<data><program label="{target}_a" SECTOR_SIZE_IN_BYTES="4096" '
+        'num_partition_sectors="8192" start_sector="1000" physical_partition_number="0"/></data>')
+    (src / "super_1.img").write_bytes(
+        b"\xAA" * 2048 + (f"ro.build.fingerprint={FP}\n"
+                          "ro.board.platform=kalama\n"
+                          "ro.product.system.device=kona\n"
+                          "ro.build.version.release=13\n").encode())
+    (src / "userdata_1.img").write_bytes(b"\xAA" * 8192)
+    if edl:
+        for t in ("QSaharaServer", "QSaharaServer.exe", "fh_loader", "fh_loader.exe"):
+            (src / t).write_bytes(b"MZ")
+        (src / "prog_firehose_ddr.elf").write_bytes(b"\x7fELF")
+    return src
+
+
+class TestIngestSlims(unittest.TestCase):
+    """Adding firmware should keep only what is needed, by default and with no extra operator step —
+    sharing one code path with the cleanup of existing builds so the two cannot drift."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.root = pathlib.Path(self.tmp) / "lib" / "_firmware"
+        self.root.mkdir(parents=True)
+
+    def test_ingest_lands_slim_by_default(self):
+        src = build_vendor_package(self.tmp)
+        fw = FW.ingest(src, self.root, firmware_id="rp6")
+        self.assertEqual(payload_names(fw), ["init_boot.img"])
+        self.assertTrue((FW.masters_root(self.root) / "rp6" / fw.current() / "payload"
+                         / "super_1.img").is_file(), "the full package must be parked, not dropped")
+
+    def test_ingest_keeps_metadata_from_the_package(self):
+        src = build_vendor_package(self.tmp)
+        fw = FW.ingest(src, self.root, firmware_id="rp6")
+        vm = json.loads((fw.path / "versions" / fw.current() / "version.meta.json").read_text())
+        self.assertEqual(vm["fingerprint"], FP)
+        self.assertTrue(vm["slim"])
+
+    def test_ingest_keep_full_opts_out(self):
+        src = build_vendor_package(self.tmp)
+        fw = FW.ingest(src, self.root, firmware_id="rp6", slim=False)
+        self.assertIn("super_1.img", payload_names(fw))
+
+    def test_ingested_edl_build_still_flashes_as_edl(self):
+        src = build_vendor_package(self.tmp, "AIRX_1", edl=True)
+        fw = FW.ingest(src, self.root, firmware_id="air-x")
+        fresh = FW.Firmware(fw.path)
+        self.assertEqual(fresh.flash_method, "edl")
+        self.assertIsNotNone(fresh.edl_tools())
+        self.assertIsNotNone(fresh.stock_boot_image())
+        self.assertIsNotNone(fresh.init_boot_geometry("_a"))
+
+
 if __name__ == "__main__":
     unittest.main()
