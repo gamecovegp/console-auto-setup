@@ -1525,6 +1525,44 @@ class TestProvision(unittest.TestCase):
         else:
             os.environ["CAS_CONFIG"] = self._saved_cas_config
 
+    def _cores_lib(self, t, n=3):
+        """A populated cores library, as config.cores_dir() would resolve it."""
+        cores = pathlib.Path(t) / "retroarch-cores"
+        cores.mkdir(parents=True)
+        for i in range(n):
+            (cores / f"core{i}_libretro_android.so").write_bytes(b"MZ" * 16)
+        return cores
+
+    def _provision_with_cores(self, t, apps):
+        cores = self._cores_lib(t)
+        prof = make_profile(t, apps=apps)
+        r = FakeRunner()
+        logs = []
+        # REAL (non-dry) push path: the cores block lives under `if not dry_push`, so dry_push=True
+        # never reaches it and would pass this test vacuously.
+        with patch("cas.config.cores_dir", return_value=cores):
+            ok = PV.provision(Adb(runner=r), prof, log=logs.append)
+        return ok, "\n".join(logs), "\n".join(r.cmds())
+
+    def test_cores_not_pushed_when_retroarch_is_not_selected(self):
+        # The 2.28GB core set is installed INTO RetroArch's own app dir (restore.sh: app_uid
+        # com.retroarch.aarch64). With RetroArch absent from the deploy there is nowhere for it to go,
+        # so pushing it is ~9 minutes of pure waste over a slow library drive. Observed live on the AYN
+        # Thor: a Download of only Companion + Steam Link still shipped all 206 cores.
+        with tempfile.TemporaryDirectory() as t:
+            ok, logs, _ = self._provision_with_cores(
+                t, ["com.gamecove.gamecove_companion", "com.valvesoftware.steamlink"])
+            self.assertTrue(ok)
+            self.assertNotIn("RetroArch cores", logs)
+            self.assertNotIn("CAS_CORES", logs)
+
+    def test_cores_pushed_when_retroarch_is_selected(self):
+        with tempfile.TemporaryDirectory() as t:
+            ok, logs, _ = self._provision_with_cores(
+                t, ["com.retroarch.aarch64", "com.valvesoftware.steamlink"])
+            self.assertTrue(ok)
+            self.assertIn("RetroArch cores", logs)
+
     def test_provision_runs_restore_and_reboot(self):
         with tempfile.TemporaryDirectory() as t:
             prof = make_profile(t)
@@ -2134,6 +2172,63 @@ class TestProvision(unittest.TestCase):
         # r.calls records the FULL adb argv [adb, "pull", src, dst] (no serial in tests), so the verb
         # is c[1] and the pulled SOURCE image is c[2] — asserting c[2] pins cas-boot.img vs new-boot.img.
         self.assertTrue(any(c[1] == "pull" and c[2].endswith("cas-boot.img") for c in r.calls))
+
+    def _tiny_tar(self, t, n=5):
+        src = pathlib.Path(t) / "src"; src.mkdir()
+        tpath = pathlib.Path(t) / "a.tar"
+        import tarfile
+        with tarfile.open(str(tpath), "w") as tf:
+            for i in range(n):
+                f = src / f"f{i}.bin"; f.write_bytes(b"x" * 2048)
+                tf.add(str(f), arcname=f"f{i}.bin")
+        return tpath
+
+    def test_unpack_progress_aborts_when_cancelled(self):
+        # extractall() drives this generator LAZILY, so a cancel it never checks isn't noticed until the
+        # whole multi-GB unpack finishes (an 11-minute unpack was observed) -- the Cancel button reads as
+        # dead. It must RAISE rather than stop yielding: returning quietly lets extractall complete
+        # "successfully" and hand back a silently PARTIAL golden, which the caller would treat as good.
+        import tarfile, threading
+        with tempfile.TemporaryDirectory() as t:
+            tpath = self._tiny_tar(t)
+            ev = threading.Event(); ev.set()
+            with tarfile.open(str(tpath), "r") as tf:
+                gen = PV._unpack_progress(tf, tpath.stat().st_size, lambda *_: None, cancel=ev)
+                with self.assertRaises(PV.TransferCancelled):
+                    next(gen)
+
+    def test_unpack_progress_yields_everything_when_not_cancelled(self):
+        # The cancel check must not change what a normal unpack extracts.
+        import tarfile, threading
+        with tempfile.TemporaryDirectory() as t:
+            tpath = self._tiny_tar(t, n=4)
+            with tarfile.open(str(tpath), "r") as tf:
+                got = list(PV._unpack_progress(tf, tpath.stat().st_size, lambda *_: None,
+                                               cancel=threading.Event()))
+            self.assertEqual([m.name for m in got], [f"f{i}.bin" for i in range(4)])
+
+    def test_cancel_tar_filter_aborts_a_pack_and_is_optional(self):
+        # tar.add() is ONE recursive call over a multi-GB tree (the ES-DE box art is ~12 GB), so filter=
+        # is the only per-member hook available to interrupt it. cancel=None must return None so callers
+        # can pass it straight to tar.add() unchanged.
+        import threading
+        self.assertIsNone(PV._cancel_tar_filter(None))
+        ev = threading.Event()
+        f = PV._cancel_tar_filter(ev)
+        sentinel = object()
+        self.assertIs(f(sentinel), sentinel)          # not cancelled -> member passes through untouched
+        ev.set()
+        with self.assertRaises(PV.TransferCancelled):
+            f(sentinel)
+
+    def test_unpack_progress_cancel_is_optional(self):
+        # cancel=None must behave exactly as before (a non-cancelable caller / injected test runner).
+        import tarfile
+        with tempfile.TemporaryDirectory() as t:
+            tpath = self._tiny_tar(t, n=3)
+            with tarfile.open(str(tpath), "r") as tf:
+                got = list(PV._unpack_progress(tf, tpath.stat().st_size, lambda *_: None))
+            self.assertEqual(len(got), 3)
 
     def test_user_installed_home_launcher_keeps_its_apk_row(self):
         # device_apps comes from `pm list packages -3` -- THIRD-PARTY ONLY. So a home_launcher that shows
@@ -5138,7 +5233,12 @@ class TestApkStoreDeploy(unittest.TestCase):
             ok = PV.provision(Adb(runner=fr, cancel=ev), P.Profile(prof.path), log=lambda *a: None)
             self.assertFalse(ok)
             pushes = [c for c in fr.calls if "push" in c]
-            self.assertEqual(len(pushes), 1, f"cancel must abort the push without retrying; got {len(pushes)}")
+            # <=1, not ==1: the pack now carries a cancel filter (_cancel_tar_filter), so an
+            # already-cancelled run aborts during tar.add and never reaches the first push at all — 0.
+            # The invariant this test exists for is "never RETRY after Cancel"; stopping earlier honours
+            # it more strongly, and pinning the exact count would just pin the old timing.
+            self.assertLessEqual(len(pushes), 1,
+                                 f"cancel must abort the push without retrying; got {len(pushes)}")
 
 
 class TestAppLabels(unittest.TestCase):

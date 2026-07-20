@@ -247,7 +247,13 @@ def push_es_media(adb, log=print, media_src=None):
             "tens of thousands of tiny image files)...")
         try:
             with tarfile.open(tmp, "w") as tar:               # "w" == stored, NO compression
-                tar.add(str(src), arcname="downloaded_media")
+                # filter= is the only per-member hook in tar.add's single recursive call — without it a
+                # ~12 GB box-art pack ignores Cancel entirely until it finishes.
+                tar.add(str(src), arcname="downloaded_media",
+                        filter=_cancel_tar_filter(adb.cancel))
+        except TransferCancelled:
+            log("⏹ cancelled while packing the box art.")
+            return False
         except OSError as e:
             log(f"warning: could not pack box art ({e}) — skipping (config is fine; box art optional).")
             return False
@@ -286,7 +292,10 @@ def _push_dir(adb, push, src, dev_parent, log, arcname=None):
     try:
         try:
             with tarfile.open(tmp, "w") as tar:
-                tar.add(str(src), arcname=arc)
+                tar.add(str(src), arcname=arc, filter=_cancel_tar_filter(adb.cancel))
+        except TransferCancelled:
+            log(f"⏹ cancelled while packing {arc}.")
+            return False
         except OSError as e:
             log(f"could not pack {arc}: {e} — aborting.")
             return False
@@ -319,7 +328,35 @@ def _free_space_note(adb, path):
     return ""
 
 
-def _unpack_progress(tar, total_b, log, every=10.0):
+class TransferCancelled(Exception):
+    """The operator cancelled during a PC-side tar pack or unpack.
+
+    These are the phases _cancel_op's "stops within ~1 s" promise did NOT cover: packing a multi-GB tree
+    with tar.add(), or extracting one with extractall(), is a single library call with no subprocess,
+    stream or wait layer running underneath — the layers that actually poll the cancel event. So Cancel
+    sat dead until the phase finished on its own (an 11-minute unpack was observed; the ES-DE box-art
+    pack is ~12 GB).
+
+    Both are interrupted at a MEMBER boundary via the per-member hooks tarfile already offers —
+    `members=` for extractall, `filter=` for add. It has to RAISE rather than quietly stop: returning
+    normally would let the call finish "successfully" and hand back a silently PARTIAL archive or golden,
+    which is precisely the state _pull_dir refuses to accept."""
+
+
+def _cancel_tar_filter(cancel):
+    """A tarfile `filter=` hook that aborts the pack the moment `cancel` is set. Returns None when there
+    is nothing to cancel, so callers can pass it straight through to tar.add() unchanged."""
+    if cancel is None:
+        return None
+
+    def _f(ti):
+        if cancel.is_set():
+            raise TransferCancelled()
+        return ti
+    return _f
+
+
+def _unpack_progress(tar, total_b, log, every=10.0, cancel=None):
     """Yield `tar`'s members in archive order, emitting the '[ NN%]' line the GUI bar already parses.
 
     WHY THIS EXISTS: the pack stream ends at '[ 100%]' and extractall() of a multi-GB golden then runs for
@@ -346,6 +383,13 @@ def _unpack_progress(tar, total_b, log, every=10.0):
     """
     last_pct, last_emit, t0 = -1, 0.0, time.monotonic()
     for m in tar:
+        # CANCEL LANDS HERE. extractall() drives this generator lazily, and it is the ONLY code running
+        # during a multi-GB unpack — none of the subprocess/stream/wait layers that _cancel_op relies on
+        # are active, so without this check Cancel does nothing until the whole unpack ends (11 minutes
+        # observed). Granularity is the same per-member limit the progress lines have: we stop at the next
+        # member boundary, i.e. after at most one member's extraction.
+        if cancel is not None and cancel.is_set():
+            raise TransferCancelled()
         yield m                                            # extractall() resumes us AFTER extracting `m`
         done_b = m.offset_data + m.size
         now = time.monotonic()
@@ -396,7 +440,11 @@ def _pull_dir(adb, dev_dir, pc_dir, log):
         try:
             total_b = tmp.stat().st_size                   # the '[ NN%]' denominator: bytes of archive consumed
             with tarfile.open(str(tmp), "r") as tar:
-                tar.extractall(str(pc_dir), members=_unpack_progress(tar, total_b, log))
+                tar.extractall(str(pc_dir), members=_unpack_progress(tar, total_b, log,
+                                                                     cancel=adb.cancel))
+        except TransferCancelled:
+            log("⏹ cancelled during unpack — discarding the partial payload.")
+            return False                                   # never promote a half-extracted golden
         except (OSError, tarfile.TarError) as e:
             log(f"could not unpack the pulled payload ({e}) — aborting (a partial golden is unsafe).")
             return False
