@@ -2,11 +2,20 @@
 # after boot to pre-write the MagiskSU shell-allow policy (zero-touch adb root, no Grant dialog).
 # seclabel u:r:magisk:s0 puts the service in Magisk's unconfined domain so it can talk to magiskd.
 #
-# Path: magiskinit MOVES the overlay.d/ contents to the root (mv_path("overlay.d","/")), so the script
-# lands at /cas-grant.sh -- NOT /overlay.d/cas-grant.sh. Referencing the wrong path made the service a
-# no-op (it exec'd a file that didn't exist), so the marker never appeared and su was never granted.
-# Exec whichever path is actually present so it works whether or not this magiskinit relocates overlay.d.
-service cas_grant /system/bin/sh -c "for f in /cas-grant.sh /overlay.d/cas-grant.sh; do [ -f $f ] && exec /system/bin/sh $f; done"
+# TWO RULES this file exists to encode, both learned the hard way (Odin 3 2026-07-17, AYN Thor
+# 2026-07-20 -- each time the service started and then did nothing):
+#
+#  1. EXEC A PATH ON /data, NEVER A RAMDISK PATH. This service triggers on sys.boot_completed=1, which
+#     fires ~13s AFTER init switch_root's to /system and discards the initramfs. Neither /cas-grant.sh
+#     nor /overlay.d/cas-grant.sh exists by then (verified absent in the booted rootfs); only
+#     /debug_ramdisk, /dev and /data survive. root() stages the script at /data/local/tmp/cas-grant.sh
+#     before the flash -- shell-writable, so no root is needed to place it, and it survives the reboot.
+#
+#  2. NO `$` ANYWHERE IN THE COMMAND. Android init expands $vars at PARSE time, before sh ever sees
+#     them. The previous `for f in ...; do [ -f $f ] && exec /system/bin/sh $f; done` reached sh as
+#     `[ -f ]` -- a non-empty-string test, i.e. TRUE -- collapsing to a bare `exec /system/bin/sh`,
+#     which aborted (dmesg: "received signal 6" 0.077s after start). Keep this a fixed literal path.
+service cas_grant /system/bin/sh /data/local/tmp/cas-grant.sh
     user root
     group root
     seclabel u:r:magisk:s0

@@ -690,6 +690,12 @@ OVERLAY_DIR = BUNDLE / "provision" / "root" / "overlay"   # overlay.d boot-grant
 GRANT_PERSIST = BUNDLE / "provision" / "root" / "grant-persist.sh"   # permanent shell-grant writer (root)
 DEV_GRANT = "/data/local/tmp/cas_grant.sh"                           # where it lands on the device
 BOOT_GRANT_MARK = "/data/local/tmp/cas_boot_grant.done"             # cas-grant.sh's boot-grant result marker
+# Where the boot-grant script must LIVE for init to exec it. NOT the ramdisk copy: the service fires on
+# sys.boot_completed=1, long after init switch_root's away from the initramfs, so an overlay.d copy is
+# unreachable (proven absent in the booted rootfs on Odin 3 + AYN Thor). /data/local/tmp is shell-
+# writable (stageable before we have root) and survives the reboot. Kept in lockstep with the literal
+# path in provision/root/overlay/init.cas-grant.rc, which must stay `$`-free -- init eats $ at parse time.
+BOOT_GRANT_SCRIPT = "/data/local/tmp/cas-grant.sh"
 GRANT_PROMPT_BTN = r"grant"          # MagiskSU su-request "Grant" button (matched case-insensitively)
 # NOTE: MAGISK_PKG ("com.topjohnwu.magisk") is defined at the top of this module; grant_shell_root's
 # tap gate reuses it to fence taps to the Magisk prompt so we never mis-tap another app.
@@ -712,14 +718,23 @@ def _inject_boot_grant(adb, dev_patch, log=print):
         if not adb.push(str(f), f"{dev_patch}/{f.name}"):
             log("  ⚠ could not push overlay payload — skipping boot-grant inject.")
             return False
+    # Stage the script where init can actually reach it at sys.boot_completed=1. dev_patch is a scratch
+    # dir that gets cleaned up, and the ramdisk copy dies at switch_root, so neither survives to run
+    # time — this /data copy is the one the service execs. Push it before the flash: /data/local/tmp is
+    # shell-writable, so no root is needed to place it, and it persists across the reboot.
+    grant_src = OVERLAY_DIR / "cas-grant.sh"
+    if not adb.push(str(grant_src), BOOT_GRANT_SCRIPT):
+        log("  ⚠ could not stage cas-grant.sh on /data — skipping boot-grant inject.")
+        return False
     # Separate magiskboot pass so Magisk's own boot_patch.sh stays untouched. ./magiskboot: DEV_PATCH
     # isn't on PATH. Sentinel (not rc) confirms success — exit codes are unreliable on these units.
+    # Only the .rc goes into the ramdisk: magiskinit merges overlay.d/*.rc into init's config (that part
+    # provably works — init starts the service), while a baked .sh would just be dead weight.
     rc, out, err = adb.shell(
         f"cd {dev_patch} && ./magiskboot unpack new-boot.img && "
         f"./magiskboot cpio ramdisk.cpio "
         f"'mkdir 0750 overlay.d' "
-        f"'add 0644 overlay.d/init.cas-grant.rc init.cas-grant.rc' "
-        f"'add 0755 overlay.d/cas-grant.sh cas-grant.sh' && "
+        f"'add 0644 overlay.d/init.cas-grant.rc init.cas-grant.rc' && "
         f"./magiskboot repack new-boot.img cas-boot.img && echo CAS_INJECT_OK")
     if "CAS_INJECT_OK" in out:
         log("  ✓ boot-grant baked into the patched init_boot (overlay.d) — su will be pre-authorized.")
@@ -738,8 +753,11 @@ def _await_boot_grant(adb, log=print, timeout=25, step=2):
     back) when the marker reports it couldn't, or it never reports in within `timeout`.
 
     cas-grant.sh writes the marker: 'cas-grant ok …' once it writes the policy, 'cas-grant daemon-not-
-    ready' if magiskd never came up. Absent = its overlay.d service never ran (e.g. a magiskinit that
-    doesn't honor overlay.d) — we wait out `timeout` then fall back."""
+    ready' if magiskd never came up. ABSENT does NOT mean overlay.d was ignored — on both devices where
+    this was chased, magiskinit honored overlay.d and init really did start the service (`ro.boottime.
+    cas_grant` set, dmesg 'starting service cas_grant'); the script itself was unreachable or aborted.
+    Diagnose absent-marker with `dmesg | grep cas_grant` (did init start it?) plus `magiskboot cpio
+    "ls -r"` on the dd'd live partition (did the inject land?) — those two split inject vs run time."""
     def rooted():
         # short-bounded: a granted su replies instantly; an ungranted one may raise a MagiskSU prompt, so
         # cap it (8s) rather than block the grace loop on the 30s is_root() default.
@@ -761,7 +779,8 @@ def _await_boot_grant(adb, log=print, timeout=25, step=2):
             log("  boot-grant ran but magiskd wasn't ready in time — falling back to auto-grant.")
             return False
         log(f"  …waiting for the zero-touch boot-grant to authorize the shell ({s}s)")
-    log("  boot-grant never reported in (overlay.d service may not have run) — falling back to auto-grant.")
+    log("  boot-grant never reported in — falling back to auto-grant. "
+        "(Diagnose: `dmesg | grep cas_grant` for whether init started it.)")
     return rooted()
 
 

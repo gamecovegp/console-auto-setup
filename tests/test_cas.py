@@ -2126,12 +2126,50 @@ class TestProvision(unittest.TestCase):
                 del os.environ["CAS_CONFIG"]
         self.assertTrue(ok)
         cmds = "\n".join(r.cmds())
-        self.assertIn("overlay.d/cas-grant.sh", cmds)      # cpio added the script
-        self.assertIn("overlay.d/init.cas-grant.rc", cmds) # cpio added the rc
+        self.assertIn("overlay.d/init.cas-grant.rc", cmds) # cpio added the rc (init merges it -> works)
+        # The script is deliberately NOT baked into the ramdisk: it would be unreachable at
+        # sys.boot_completed=1 (switch_root already discarded the initramfs). It ships on /data instead.
+        self.assertNotIn("overlay.d/cas-grant.sh", cmds)
         self.assertIn("magiskboot repack new-boot.img cas-boot.img", cmds)
         # r.calls records the FULL adb argv [adb, "pull", src, dst] (no serial in tests), so the verb
         # is c[1] and the pulled SOURCE image is c[2] — asserting c[2] pins cas-boot.img vs new-boot.img.
         self.assertTrue(any(c[1] == "pull" and c[2].endswith("cas-boot.img") for c in r.calls))
+
+    def test_boot_grant_rc_is_dollar_free_and_execs_a_persistent_path(self):
+        # Two independently fatal bugs, both proven on-device (Odin 3 2026-07-17, AYN Thor 2026-07-20):
+        #  (1) Android init expands `$` in a .rc at PARSE time, so `[ -f $f ]` reaches sh as `[ -f ]` --
+        #      a non-empty-string test, i.e. TRUE -- collapsing the command to a bare `exec /system/bin/sh`
+        #      (dmesg: "received signal 6" 0.077s after start). NEVER use $ in an init .rc command.
+        #  (2) Nothing from the ramdisk survives switch_root, which happens ~13s BEFORE the service's
+        #      sys.boot_completed=1 trigger fires -- /cas-grant.sh and /overlay.d/cas-grant.sh are both
+        #      absent in the booted rootfs. The service must exec a path on /data, which persists.
+        rc_text = (PV.OVERLAY_DIR / "init.cas-grant.rc").read_text()
+        svc = [ln for ln in rc_text.splitlines() if ln.startswith("service cas_grant")]
+        self.assertEqual(len(svc), 1, f"expected exactly one service line, got {svc}")
+        self.assertNotIn("$", svc[0], "init eats $ at parse time -- the command must be $-free")
+        self.assertIn("/data/local/tmp/cas-grant.sh", svc[0],
+                      "the service must exec the /data copy, not a ramdisk path")
+        self.assertNotIn("/overlay.d/cas-grant.sh", svc[0])
+
+    def test_patch_pushes_grant_script_to_a_path_that_survives_switch_root(self):
+        # The ramdisk copy is unreachable by the time the service runs, so root() must stage the script
+        # on /data BEFORE the flash/reboot. /data/local/tmp is shell-writable (no root needed yet) and
+        # survives the reboot -- provably mounted at boot_completed, since the marker is written there.
+        r = FakeRunner()
+        with tempfile.TemporaryDirectory() as t:
+            stock = pathlib.Path(t) / "stock.img"; stock.write_bytes(b"x")
+            os.environ["CAS_CONFIG"] = os.path.join(t, "absent.json")  # default -> bake on
+            try:
+                ok = PV.patch_init_boot_on_device(Adb(runner=r), stock,
+                                                  pathlib.Path(t) / "patched.img", log=lambda *_: None)
+            finally:
+                del os.environ["CAS_CONFIG"]
+        self.assertTrue(ok)
+        # r.calls records the full adb argv [adb, "push", src, dst] (no serial in tests) -> dst is c[3].
+        self.assertTrue(
+            any(c[1] == "push" and c[3] == "/data/local/tmp/cas-grant.sh" for c in r.calls),
+            "cas-grant.sh was never pushed to /data/local/tmp/cas-grant.sh; "
+            f"pushes={[c for c in r.calls if c[1] == 'push']}")
 
     def test_patch_inject_failure_falls_back_to_plain_image(self):
         # If the inject chain never emits CAS_INJECT_OK, the patch still succeeds by pulling the plain

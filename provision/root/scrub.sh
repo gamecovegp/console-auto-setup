@@ -21,5 +21,9 @@ fi
 # boot-grant diagnostic marker (written by the overlay.d cas-grant.sh) — clear the trace so a sealed
 # unit ships clean. Additive: absent on units that never ran the boot-grant, harmless either way.
 rm -f /data/local/tmp/cas_boot_grant.done 2>/dev/null
+# ...and the staged boot-grant script itself. It lives on /data (the ramdisk copy is unreachable after
+# switch_root), so it outlives the seal — inert once seal() reflashes stock init_boot and no cas_grant
+# service exists to exec it, but no reason to ship a CAS artifact. Re-root re-pushes it.
+rm -f /data/local/tmp/cas-grant.sh 2>/dev/null
 ok "scrub.sh done"
 exit 0

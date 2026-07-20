@@ -17,7 +17,11 @@ make_stub() {  # $1 = path to create the magisk stub at
 echo "$@" >> "$MAGISK_LOG"
 case "$*" in
   *"SELECT 1"*) [ "${DAEMON_READY:-1}" = 1 ] && echo 1 || exit 1 ;;
-  *"SELECT policy FROM policies WHERE uid=2000"*) echo 2 ;;
+  # Real `magisk --sqlite` prints key=value, NOT a bare value -- verified on an AYN Thor 2026-07-20:
+  #   SELECT policy FROM policies WHERE uid=2000  ->  policy=2
+  #   SELECT * FROM policies                      ->  uid=2000|policy=2|until=0|...
+  # The stub used to echo a bare `2`, which hid a real double-prefix bug ("ok policy=policy=2").
+  *"SELECT policy FROM policies WHERE uid=2000"*) echo "policy=2" ;;
 esac
 STUB
   chmod +x "$1"
@@ -29,7 +33,8 @@ check_ok() {  # $1 = scenario label; asserts the granted state against $MAGISK_L
     || { echo "[X] $1: missing shell allow-policy write"; fail=1; }
   grep -q "REPLACE INTO settings (key,value) VALUES('root_access',3)" "$MAGISK_LOG" \
     || { echo "[X] $1: missing root_access=3 write"; fail=1; }
-  grep -q "cas-grant ok policy=2" "$MARK" \
+  # Exact match, not substring: a substring test still passed the malformed "ok policy=policy=2".
+  grep -qx "cas-grant ok policy=2" "$MARK" \
     || { echo "[X] $1: missing/incorrect success marker: $(cat "$MARK" 2>/dev/null)"; fail=1; }
   return $fail
 }
@@ -65,4 +70,20 @@ else
 fi
 rm -rf "$tmpC"
 
-[ "$rc" = 0 ] && echo "ok: cas-grant.sh (on-PATH + fallback + daemon-not-ready)" || exit 1
+# Scenario D: the applet is reachable ONLY via the built-in probe list -- not on PATH, no CAS_MAGISK.
+# This is the real on-device shape: at boot `magisk` is not on PATH and /data/adb/magisk/ is EMPTY
+# (Magisk v30.7 stashes the applet in the /debug_ramdisk tmpfs). Before the fix the probe list missed
+# it entirely, so every --sqlite call failed and the run ended "daemon-not-ready" instead of granting.
+tmpD="$(mktemp -d)"; make_stub "$tmpD/magisk"
+export MAGISK_LOG="$tmpD/log"; : > "$MAGISK_LOG"
+export MARK="$tmpD/marker"
+CAS_GRANT_MARK="$MARK" CAS_MAGISK_PATHS="$tmpD/magisk" sh "$script"
+check_ok "probe-list-path" || rc=1
+rm -rf "$tmpD"
+
+# Scenario E (static): the DEFAULT probe list must name the real on-device applet location. Guards the
+# regression directly -- scenario D passes with any overridable list, this pins the shipped default.
+grep -q '/debug_ramdisk/magisk' "$script" \
+  || { echo "[X] default-probe-list: cas-grant.sh must probe /debug_ramdisk/magisk (Magisk's tmpfs stash)"; rc=1; }
+
+[ "$rc" = 0 ] && echo "ok: cas-grant.sh (on-PATH + fallback + daemon-not-ready + probe-list + default-probe)" || exit 1

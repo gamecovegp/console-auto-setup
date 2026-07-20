@@ -20,4 +20,10 @@ scrub_members "$tmp" "com.absent.app/nothing" && true
 grep -q 'rm -f /data/local/tmp/cas_boot_grant.done' "$ROOT/provision/root/scrub.sh" \
   || { echo "FAIL: scrub.sh does not clear the cas_boot_grant marker"; fail=1; }
 
+# The boot-grant SCRIPT is staged on /data (the ramdisk copy can't survive switch_root), so unlike the
+# ramdisk it outlives the seal. seal() reflashes stock init_boot, so no cas_grant service remains to run
+# it -- but the file would still ship on a customer unit. Scrub it for the same reason as the marker.
+grep -q 'rm -f /data/local/tmp/cas-grant.sh' "$ROOT/provision/root/scrub.sh" \
+  || { echo "FAIL: scrub.sh does not clear the staged cas-grant.sh"; fail=1; }
+
 [ "$fail" -eq 0 ] && { echo "PASS: scrub_members"; exit 0; } || exit 1
