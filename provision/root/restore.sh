@@ -329,7 +329,22 @@ elif [ ! -f "$HS/launcher_data.tar" ]; then
   log "homescreen: no layout in payload (capture a golden with the homescreen arranged to enable)"
 else
   LP="$(sed -n 's/^launcher_pkg=//p' "$HS/meta" 2>/dev/null)"
+  LC="$(sed -n 's/^launcher_component=//p' "$HS/meta" 2>/dev/null)"
   CUR="$(home_launcher)"
+  # Apply the golden's launcher choice FIRST, so the gate below passes on its own terms. Without this,
+  # any unit whose stock launcher differs from the golden's (e.g. a fresh Thor boots com.android.
+  # launcher3, the golden runs xyz.blacksheep.mjolnir) hit "SKIP" and silently lost the layout AND the
+  # wallpaper — the wallpaper restore lives inside this same block. Guarded in set_home_component: it
+  # refuses a package that isn't installed, so this is safe to attempt unconditionally. Goldens captured
+  # before launcher_component existed leave LC empty and behave exactly as before.
+  if [ -n "$LC" ] && [ -n "$LP" ] && [ -n "$CUR" ] && [ "$CUR" != "$LP" ]; then
+    if set_home_component "$LC"; then
+      ok "homescreen: default home app $CUR -> $LP"
+      CUR="$(home_launcher)"
+    else
+      warn "homescreen: could not set default home app to $LC — layout/wallpaper will be skipped below"
+    fi
+  fi
   if [ -z "$LP" ]; then
     warn "homescreen: payload has no launcher_pkg — skip"
   elif [ -n "$CUR" ] && [ "$CUR" != "$LP" ]; then

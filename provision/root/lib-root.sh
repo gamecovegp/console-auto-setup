@@ -196,6 +196,23 @@ home_launcher(){
   cmd package resolve-activity -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null \
     | sed -n 's/.*packageName=\([^ }]*\).*/\1/p' | head -1
 }
+# The FULL home component (pkg/cls). home_launcher returns only the package -- enough to GATE on, but
+# `cmd package set-home-activity` needs the component, so capture records this alongside launcher_pkg.
+home_component(){
+  cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null \
+    | grep '/' | tail -1
+}
+# Make <component> the default HOME app, so a golden's launcher choice actually lands on the unit.
+# HARD GUARD: a unit with no valid home app is unusable, so refuse anything that isn't a real pkg/cls
+# whose package is installed, and issue NO call in that case. Non-zero return = not applied.
+# Callers rely on this being safe to attempt unconditionally.
+set_home_component(){
+  _c="$1"
+  case "$_c" in *"/"*) ;; *) return 1;; esac          # must be a component, not a bare package
+  [ -n "${_c%%/*}" ] && [ -n "${_c#*/}" ] || return 1 # both halves non-empty
+  pm path "${_c%%/*}" >/dev/null 2>&1 || return 1     # never point HOME at a package that isn't there
+  cmd package set-home-activity "$_c" >/dev/null 2>&1 || return 1
+}
 # The set of packages a homescreen layout REFERENCES — for self-containment, so every placed icon can
 # resolve on any unit model. Intent strings in the Launcher3-family favorites DB are stored as plaintext
 # (component=<pkg>/<cls> and package=<pkg>), so a launcher-agnostic token scan works without sqlite3 and

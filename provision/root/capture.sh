@@ -144,7 +144,10 @@ else
   HS="$P/homescreen"; mkdir -p "$HS"
   LP="$(home_launcher)"
   if [ -n "$LP" ] && [ -d "/data/data/$LP" ]; then
-    { echo "launcher_pkg=$LP"; echo "launcher_uid=$(app_uid "$LP")"; } > "$HS/meta"
+    # launcher_component (pkg/cls) as well as the package: restore needs the COMPONENT to actually make
+    # this the unit's home app via `cmd package set-home-activity`. launcher_pkg alone only gates.
+    { echo "launcher_pkg=$LP"; echo "launcher_uid=$(app_uid "$LP")"
+      echo "launcher_component=$(home_component)"; } > "$HS/meta"
     # the launcher's private data (favorites DB = folder/icon/dock layout + grid prefs); skip caches.
     tar -cf "$HS/launcher_data.tar" -C /data/data --exclude="$LP/cache" --exclude="$LP/code_cache" "$LP" 2>/dev/null \
       || tar -cf "$HS/launcher_data.tar" -C /data/data "$LP" 2>/dev/null

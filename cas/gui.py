@@ -122,7 +122,8 @@ _DL_FLAG_TIPS = {
     "grants": "Restore folder-access permissions so ES-DE and the emulators can read your "
               "ROM/BIOS folders without re-asking on first launch.",
     "homescreen": "Restore the homescreen layout — your app folders, icon/dock arrangement, "
-                  "wallpaper (and widgets, best-effort). Placed apps missing on the unit are "
+                  "wallpaper (and widgets, best-effort), and set the golden's launcher as the "
+                  "unit's default home app. Placed apps missing on the unit are "
                   "installed first so every icon resolves.",
     "gamelauncher": "Save the game frontend's per-system emulator choices (PSX→DuckStation, "
                     "PSP→PPSSPP) and auto-apply them on Download — no manual setup per unit.",
