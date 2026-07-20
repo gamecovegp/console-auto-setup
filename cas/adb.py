@@ -360,10 +360,11 @@ class Adb:
                 if total_kb > 0:
                     pct = 100 if finished else min(99, got_kb * 100 // total_kb)
                     if finished or pct != last_pct or now - last_emit >= 10:
-                        on_line(f"[ {pct}%] packed {got_kb // 1024} / {total_kb // 1024} MB ({rate:.1f} MB/s)")
+                        on_line(f"[ {pct}%] packed on device → PC  "
+                                f"{got_kb // 1024} / {total_kb // 1024} MB ({rate:.1f} MB/s)")
                         last_pct, last_emit = pct, now
                 elif finished or now - last_emit >= 5:                   # unknown total: MB + rate heartbeat
-                    on_line(f"packed {got_kb // 1024} MB ({rate:.1f} MB/s)")
+                    on_line(f"packed on device → PC  {got_kb // 1024} MB ({rate:.1f} MB/s)")
                     last_emit = now
                 if finished:
                     errf.seek(0)

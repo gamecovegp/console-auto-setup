@@ -398,7 +398,8 @@ def _unpack_progress(tar, total_b, log, every=10.0, cancel=None):
         pct = min(99, done_b * 100 // total_b) if total_b > 0 else 0
         if pct != last_pct or now - last_emit >= every:
             rate = (done_b / 1048576.0) / max(0.001, now - t0)
-            log(f"[ {pct}%] unpacked {done_b // 1048576} / {max(total_b, done_b) // 1048576} MB ({rate:.1f} MB/s)")
+            log(f"[ {pct}%] unpacked on PC  {done_b // 1048576} / "
+                f"{max(total_b, done_b) // 1048576} MB ({rate:.1f} MB/s)")
             last_pct, last_emit = pct, now
     log(f"[ 100%] unpacked {total_b // 1048576} MB")
 
@@ -421,6 +422,13 @@ def _pull_dir(adb, dev_dir, pc_dir, log):
             total_kb = int(out_du.split()[0])
         except (ValueError, IndexError):
             total_kb = 0
+    # Say WHY there are two bars — operators reasonably read "pack then unpack" as wasted work.
+    log("transfer runs in TWO passes, and both are needed: a folder-level `adb pull` silently drops "
+        "files on Windows, which would write an incomplete golden that still passes the meta checks.")
+    log("  1) 'packed on device → PC' — the tree is tarred on the device and streamed straight here "
+        "as ONE file (nothing is staged on the device; the phone never needs 2x the space).")
+    log("  2) 'unpacked on PC' — that archive is extracted into the profile. No progress lines here "
+        "would mean a silent multi-minute phase, so the second bar is the unpack, not a repeat.")
     pc_dir = pathlib.Path(pc_dir)
     pc_dir.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix="cas_pull_", suffix=".tar", dir=str(pc_dir.parent))
@@ -1439,7 +1447,9 @@ def capture_to_pc(adb, name, stamp, root="profiles", log=print, dry_pull=False):
         if cap_man.exists() and not adb.push(cap_man, "/data/local/tmp/cas_scripts/capture-manifest"):
             log("failed to push capture-manifest — aborting (existing profile untouched).")
             return False
-    log("capturing golden to device temp (per-app data, BIOS, homescreen)...")
+    log("SAVE step 1/3 — building the golden ON THE DEVICE: copying each ticked app's data, BIOS, "
+        "settings, SAF grants and the homescreen into a staging folder in the phone's temp space. "
+        "Nothing has reached the PC yet, so there is no transfer bar during this step.")
     man_env = "CAS_MANIFEST=/data/local/tmp/cas_scripts/capture-manifest " if cap_man.exists() else ""
     rc = adb.su_stream(f"{man_env}CAS_OUT={TMPCAP} sh /data/local/tmp/cas_scripts/capture.sh", log)
     if rc != 0:
@@ -1453,7 +1463,8 @@ def capture_to_pc(adb, name, stamp, root="profiles", log=print, dry_pull=False):
         # Pull as ONE archive, never `adb pull <dir>`: a directory pull can silently drop files on Windows
         # (mirror of the push bug) and quietly write an incomplete golden. _pull_dir packs on-device, pulls
         # a single file (with the '[ NN%]' progress bar), and unpacks on the PC — identical on every OS.
-        log("pulling the captured payload to the PC (one archive — a multi-GB golden can take several minutes)...")
+        log("SAVE step 2/3 — moving that staging folder to the PC. A multi-GB golden can take several "
+            "minutes; the two bars below are the two halves of this one transfer.")
         if not _pull_dir(adb, TMPCAP, incoming, log):
             log("pull failed — existing profile untouched.")
             shutil.rmtree(incoming, ignore_errors=True)
@@ -1463,6 +1474,8 @@ def capture_to_pc(adb, name, stamp, root="profiles", log=print, dry_pull=False):
             log("pulled payload incomplete (no global.meta/pkglist) — existing profile untouched.")
             shutil.rmtree(incoming, ignore_errors=True)
             return False
+        log("SAVE step 3/3 — payload verified. Promoting it to the live golden (the previous one is kept "
+            "as golden_root_payload.prev for rollback) and clearing the device's staging folder.")
         adb.su(f"rm -rf {TMPCAP}")
         # now safe to rotate: good -> .prev, incoming -> good
         if dest.exists() or dest.is_symlink():
