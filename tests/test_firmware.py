@@ -190,6 +190,29 @@ class TestFirmwareClass(unittest.TestCase):
     def test_find_missing(self):
         self.assertIsNone(FW.find("nope", self.root))
 
+    def test_payload_size_totals_the_whole_payload(self):
+        # The library window shows this per row. It must total the ENTIRE payload, not just the
+        # super_*/system_*.img files _payload_scan_size_bytes() measures (that one exists to ETA the
+        # detect_build grep, which reads only those images).
+        make_fw(self.root, "ayn-thor")
+        f = FW.find("ayn-thor", self.root)
+        pd = f.payload_dir()
+        (pd / "init_boot.img").write_bytes(b"x" * 4096)
+        (pd / "sub").mkdir(exist_ok=True)
+        (pd / "sub" / "abl.elf").write_bytes(b"y" * 2048)
+        before = f.payload_size()
+        self.assertGreaterEqual(before, 4096 + 2048)          # recurses into subdirs
+        (pd / "extra.bin").write_bytes(b"z" * 1024)
+        self.assertEqual(f.payload_size(), before + 1024)
+
+    def test_payload_size_is_zero_when_there_is_no_payload(self):
+        # Never raise into the UI thread: an unmounted/absent payload sizes as 0, not an exception.
+        make_fw(self.root, "ayn-thor")
+        f = FW.find("ayn-thor", self.root)
+        shutil_rmtree = __import__("shutil").rmtree
+        shutil_rmtree(f.payload_dir())
+        self.assertEqual(f.payload_size(), 0)
+
     def test_nondirectory_entry_not_listed_as_firmware(self):
         # index.json is skipped because it is a file (not a dir), not because of its name
         (self.root / "index.json").write_text("{}")

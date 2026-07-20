@@ -169,6 +169,26 @@ class Firmware:
             return None
         return self.path / "versions" / v / "payload"
 
+    def payload_size(self, version=None):
+        """Total bytes of the whole payload tree (0 if absent) — what the library window shows per row.
+        NOT _payload_scan_size_bytes(), which deliberately measures only the super_*/system_*.img files
+        detect_build() greps. Best-effort and exception-free: this is called from a UI worker thread, and
+        an unmounted or half-copied payload must render as a size, never raise."""
+        pd = self.payload_dir(version)
+        if not pd:
+            return 0
+        total = 0
+        try:
+            for f in pd.rglob("*"):
+                if f.is_file():
+                    try:
+                        total += f.stat().st_size
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        return total
+
     @property
     def flash_method(self):
         """How the patched ramdisk is written: 'fastboot' (bootloader fastboot — Retroid/AYN/Odin) or

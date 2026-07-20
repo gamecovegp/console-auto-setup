@@ -337,10 +337,12 @@ class ProfilesWindow:
         ttk.Label(win, textvariable=self.detail_var, style="Muted.TLabel",
                   wraplength=680, justify="left").pack(anchor="w", padx=12, pady=(6, 0), side="bottom")
 
-        self.tree = ttk.Treeview(win, columns=("model", "golden", "captured"),
+        self._sizes = {}                            # name -> bytes, memoised for this window's lifetime
+        self.tree = ttk.Treeview(win, columns=("model", "golden", "size", "captured"),
                                  show="tree headings", selectmode="browse")
         self.tree.heading("#0", text="profile"); self.tree.column("#0", width=200)
-        for c, t, w in (("model", "model", 150), ("golden", "golden", 130), ("captured", "captured", 110)):
+        for c, t, w in (("model", "model", 140), ("golden", "golden", 110),
+                        ("size", "size", 90), ("captured", "captured", 110)):
             self.tree.heading(c, text=t); self.tree.column(c, width=w)
         THEME.center_columns(self.tree)
         self.tree.pack(fill="both", expand=True, padx=12, pady=(8, 0))
@@ -353,13 +355,49 @@ class ProfilesWindow:
     def refresh(self, preselect=None):
         self.tree.delete(*self.tree.get_children())
         rows = profile_rows(self.app.profiles_root)
+        pending = []
         for r in rows:
+            if not r["has_golden"]:
+                size_txt = "—"                          # nothing captured yet, nothing to size
+            elif r["name"] in self._sizes:
+                size_txt = human_size(self._sizes[r["name"]])
+            else:
+                size_txt = "…"                          # filled in by the worker below
+                pending.append(r["name"])
             self.tree.insert("", "end", iid=r["name"], text=r["name"],
                              values=(r["model"] or "—",
                                      "saved" if r["has_golden"] else "— none",
+                                     size_txt,
                                      r["captured"] or "—"))
         if preselect and self.tree.exists(preselect):
             self.tree.selection_set(preselect)
+        if pending:
+            self._size_async(pending)
+
+    def _size_async(self, names):
+        """Size each golden on a worker thread, posting rows back as they land. profile_rows() leaves
+        sizes out on purpose — each one is a full multi-GB directory walk, possibly over a slow external
+        drive, and doing it inline would freeze the window (and contend with any Save packing to the same
+        drive). Rows fill in progressively rather than all at the end."""
+        root = self.app.profiles_root
+
+        def work():
+            for n in names:
+                try:
+                    b = P.Profile(pathlib.Path(root) / n).golden_size()
+                except Exception:
+                    b = None                            # unreadable/unmounted — show a dash, never raise
+                self.win.after(0, lambda n=n, b=b: self._apply_size(n, b))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_size(self, name, nbytes):
+        if nbytes is not None:
+            self._sizes[name] = nbytes
+        try:
+            if self.tree.exists(name):
+                self.tree.set(name, "size", human_size(nbytes) if nbytes is not None else "—")
+        except tk.TclError:
+            pass                                        # window closed mid-size — nothing to update
 
     def _selected(self):
         sel = self.tree.selection()
@@ -444,11 +482,12 @@ class FirmwareWindow:
                             "★ = the build “(default kit)” flashes.",
                   style="Muted.TLabel").pack(anchor="w", padx=12, pady=(6, 0), side="bottom")
 
-        self.tree = ttk.Treeview(win, columns=("version", "device", "target", "match"),
+        self._sizes = {}                            # firmware id -> bytes, memoised for this window
+        self.tree = ttk.Treeview(win, columns=("version", "size", "device", "target", "match"),
                                  show="tree headings", selectmode="browse")
-        self.tree.heading("#0", text="firmware id"); self.tree.column("#0", width=230)
-        for c, t, w in (("version", "current", 90), ("device", "device", 130),
-                        ("target", "flashes", 100), ("match", "serial prefix", 140)):
+        self.tree.heading("#0", text="firmware id"); self.tree.column("#0", width=210)
+        for c, t, w in (("version", "current", 90), ("size", "size", 85), ("device", "device", 120),
+                        ("target", "flashes", 95), ("match", "serial prefix", 130)):
             self.tree.heading(c, text=t); self.tree.column(c, width=w)
         THEME.center_columns(self.tree)
         self.tree.pack(fill="both", expand=True, padx=12, pady=(8, 0))
@@ -463,15 +502,46 @@ class FirmwareWindow:
         except Exception:
             return None
 
+    def _size_async(self, root, fids):
+        """Size each firmware payload off-thread. A full QFIL package is multi-GB (the Thor kit alone is
+        ~2.5 GB) and the library usually lives on an external drive, so this must never touch the UI
+        thread — the same reason profile goldens are sized this way."""
+        def work():
+            for fid in fids:
+                try:
+                    fw = FW.find(fid, root)
+                    b = fw.payload_size() if fw else None
+                except Exception:
+                    b = None                            # unreadable/unmounted — show a dash, never raise
+                self.win.after(0, lambda fid=fid, b=b: self._apply_size(fid, b))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_size(self, fid, nbytes):
+        if nbytes is not None:
+            self._sizes[fid] = nbytes
+        try:
+            if self.tree.exists(fid):
+                self.tree.set(fid, "size", human_size(nbytes) if nbytes is not None else "—")
+        except tk.TclError:
+            pass                                        # window closed mid-size — nothing to update
+
     def refresh(self):
         self.tree.delete(*self.tree.get_children())
         root = self._root()
         rows = firmware_rows(root) if root else []
         dk = config.default_kit_firmware()                     # the build “(default kit)” maps to, if any
+        pending = []
         for r in rows:
             star = "★  " if r["id"] == dk else ""              # mark the designated default-kit build
+            if r["id"] in self._sizes:
+                size_txt = human_size(self._sizes[r["id"]])
+            else:
+                size_txt = "…"                                 # filled in by the worker below
+                pending.append(r["id"])
             self.tree.insert("", "end", iid=r["id"], text=star + r["id"],
-                             values=(r["version"], r["device"], r["target"], r["match"]))
+                             values=(r["version"], size_txt, r["device"], r["target"], r["match"]))
+        if pending:
+            self._size_async(root, pending)
         # Explain an EMPTY list instead of leaving it a mystery: the configured (shared/external)
         # firmware dir may simply be unmounted, in which case firmware_root() silently falls back.
         configured = config.load_config().get("firmware_dir")
