@@ -2135,6 +2135,28 @@ class TestProvision(unittest.TestCase):
         # is c[1] and the pulled SOURCE image is c[2] — asserting c[2] pins cas-boot.img vs new-boot.img.
         self.assertTrue(any(c[1] == "pull" and c[2].endswith("cas-boot.img") for c in r.calls))
 
+    def test_user_installed_home_launcher_keeps_its_apk_row(self):
+        # device_apps comes from `pm list packages -3` -- THIRD-PARTY ONLY. So a home_launcher that shows
+        # up in it is by definition USER-INSTALLED (the AYN Thor ships xyz.blacksheep.mjolnir as HOME).
+        # It must still be captured and installed: without its APK the target unit never gets it, and
+        # set_home_component then refuses (package not installed), which skips the whole @homescreen block
+        # -- taking the wallpaper with it. A SYSTEM launcher (com.android.launcher3) never appears in the
+        # scan, so it stays behaviour-only via @homescreen; that case is asserted below.
+        hl = "xyz.blacksheep.mjolnir"
+        sel = P.initial_capture_selection(["com.foo", hl], {}, {}, home_launcher=hl)
+        self.assertIn(hl, sel)
+        self.assertTrue(sel[hl][0],
+                        "a user-installed HOME launcher must keep its APK bit on so it gets captured")
+
+    def test_system_home_launcher_keeps_its_apk_off(self):
+        # Both launchers are deliberately injected into the selection to carry their flag default, so the
+        # stock launcher IS present -- but it's firmware (absent from `pm list -3`), can't be installed,
+        # and must never have its APK bit set. This is the case the original config-only rule was for.
+        sel = P.initial_capture_selection(["com.foo"], {}, {}, home_launcher="com.android.launcher3")
+        self.assertIn("com.android.launcher3", sel)
+        self.assertFalse(sel["com.android.launcher3"][0],
+                         "a SYSTEM launcher is firmware -- capturing an APK for it is meaningless")
+
     def test_boot_grant_rc_is_dollar_free_and_execs_a_persistent_path(self):
         # Two independently fatal bugs, both proven on-device (Odin 3 2026-07-17, AYN Thor 2026-07-20):
         #  (1) Android init expands `$` in a .rc at PARSE time, so `[ -f $f ]` reaches sh as `[ -f ]` --

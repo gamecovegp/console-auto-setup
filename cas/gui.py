@@ -106,6 +106,8 @@ _APP_LABELS = {
     "org.es_de.frontend": "ES-DE  ·  front-end",
     "gamehub.lite": "GameHub  ·  PC games",
     "com.gamecove.gamecove_companion": "GameCove Companion  ·  app",
+    "com.esde.companion": "ES-DE Companion  ·  app",
+    "xyz.blacksheep.mjolnir": "Mjolnir  ·  launcher",
 }
 
 # Behavior @flags shown (as the behavior section) in BOTH app-pick modals — the game frontend's emulator
@@ -1288,7 +1290,14 @@ class App:
         # The launchers are NOT app rows — they're @gamelauncher / @homescreen behavior flags (below).
         # Pull their default Config bit out of the selection to seed those flags; leave only real apps.
         gl_on = sel.pop(gl, (False, True))[1] if gl else None
-        hl_on = sel.pop(hl, (False, True))[1] if hl else None
+        # The HOME launcher's LAYOUT is a behaviour (@homescreen), but when the launcher is user-installed
+        # it is ALSO a real app the target unit needs — the AYN Thor ships xyz.blacksheep.mjolnir as HOME.
+        # Popping it unconditionally hid it from the Save list, so its APK was never captured; on Download
+        # the unit never got it and set_home_component then refused, skipping layout AND wallpaper. Read
+        # the flag either way; only drop the row for a SYSTEM launcher (absent from the pm list -3 scan).
+        hl_on = sel.get(hl, (False, True))[1] if hl else None
+        if hl and hl not in device_apps:
+            sel.pop(hl, None)
         rows = sel
         cf = prof.capture_flags()
         # Full behaviour set so the operator SEES everything the golden carries. @homescreen is ALWAYS

@@ -594,7 +594,13 @@ def default_capture_selection(device_apps, game_launcher=None, home_launcher=Non
             sel[pkg] = (on, on)
     for lp in (game_launcher, home_launcher):
         if lp:
-            sel[lp] = (False, True)                  # config-on by default (@gamelauncher / @homescreen)
+            # config-on by default (@gamelauncher / @homescreen). The APK bit follows whether the launcher
+            # is actually INSTALLABLE: `device_apps` is `pm list -3`, so a launcher present there is
+            # user-installed (e.g. the AYN Thor ships xyz.blacksheep.mjolnir as HOME) and its APK must be
+            # captured — otherwise the target unit never gets it, set_home_component refuses, and the whole
+            # @homescreen block (wallpaper included) is skipped. A launcher absent from the scan is system
+            # firmware and stays APK-off, which is the case this rule originally existed for.
+            sel[lp] = (lp in device_apps, True)
     for pkg in device_apps:                          # always-install: force APK on, keep the Config default
         if pkg in ai and pkg in sel:
             sel[pkg] = (True, sel[pkg][1])
@@ -627,7 +633,9 @@ def initial_capture_selection(device_apps, saved_axes, saved_flags, game_launche
     if game_launcher and game_launcher in sel:
         sel[game_launcher] = (False, (saved_flags or {}).get("gamelauncher", "on") == "on")
     if home_launcher and home_launcher in sel:
-        sel[home_launcher] = (False, (saved_flags or {}).get("homescreen", "on") == "on")
+        # Preserve the APK bit decided above (on for a user-installed launcher, off for firmware) — only
+        # the config bit carries the saved @homescreen flag.
+        sel[home_launcher] = (sel[home_launcher][0], (saved_flags or {}).get("homescreen", "on") == "on")
     return sel
 
 
