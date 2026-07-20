@@ -196,6 +196,11 @@ home_launcher(){
   cmd package resolve-activity -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null \
     | sed -n 's/.*packageName=\([^ }]*\).*/\1/p' | head -1
 }
+# Wall-clock seconds, for attributing a run's time to phases. A Download reports one total, and at the
+# observed ~16 MB/s link speed the bytes account for only ~a fifth of it -- the rest is device-side work
+# nobody could attribute without splitting it. Always prints digits (0 if `date` is unavailable) so the
+# caller can do arithmetic on it unguarded.
+now_s(){ date +%s 2>/dev/null || echo 0; }
 # Is <pkg> USER-INSTALLED (an APK under /data/app) rather than system firmware (/system, /product,
 # /vendor)? Decides whether a launcher is a real app that must be captured and installed on the target
 # unit, or firmware that only rides @homescreen. Non-zero for an absent package too.

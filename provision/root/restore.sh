@@ -44,6 +44,7 @@ log "restore: this serial=$SERIAL  golden serial=$GSERIAL  apps=$(echo $RPKGS | 
 #    su/pm context, AND installing straight off the FUSE exfat SD makes system_server do a cross-context
 #    fuse read (avc denied — only "works" on this permissive build; would FAIL on an enforcing unit).
 #    Fix: stage the APK(s) to /data/local/tmp (clean read), then `pm install`. Splits -> install session.
+_T_INS0=$(now_s)                          # phase timer: APK installs (pm install -> verify + dexopt)
 for pkg in $RPKGS; do
   if [ -n "${CAS_MANIFEST:-}" ] && [ -f "$CAS_MANIFEST" ] && ! manifest_wants "$CAS_MANIFEST" "$pkg" apk; then
     log "deploy: $pkg APK-axis off — skipping install"; continue
@@ -67,8 +68,10 @@ for pkg in $RPKGS; do
   fi
   install_apks "$P/$pkg/apk" "$pkg" || FAIL=$((FAIL+1))
 done
+T_INSTALL=$(( $(now_s) - _T_INS0 ))
 
 # 2) per-app: restore data -> rewrite serial -> chown to THIS unit's uid -> restorecon
+_T_DAT0=$(now_s)                          # phase timer: data restore (untar + chown + restorecon)
 for pkg in $RPKGS; do
   if [ -n "${CAS_MANIFEST:-}" ] && [ -f "$CAS_MANIFEST" ] && ! manifest_wants "$CAS_MANIFEST" "$pkg" config; then
     log "deploy: $pkg Config-axis off — skipping data restore"; continue
@@ -146,6 +149,7 @@ for pkg in $RPKGS; do
   grant_special_appops "$pkg" || FAIL=$((FAIL+1))
   ok "restored $pkg (uid $TUID, $( [ -f "$P/$pkg/adata.tar" ] && echo 'incl Android/data keys/BIOS' || echo 'internal only'))"
 done
+T_DATA=$(( $(now_s) - _T_DAT0 ))
 # a binary non-cache serial config was found -> the different-serial clone is broken; count it once.
 [ -e /data/local/tmp/.cas_serial_fail ] && { FAIL=$((FAIL+1)); rm -f /data/local/tmp/.cas_serial_fail; }
 
@@ -422,6 +426,12 @@ else
 fi
 
 fi   # ---- end GLOBAL steps ----
+
+# WHERE THE TIME WENT. Reported BEFORE the failure exit below: a restore that failed is exactly the run
+# you most want to profile, and exiting first would print nothing. Installs = pm install (signature verify
+# + dexopt/AOT compile, CPU-bound on the handheld); data = untar + serial rewrite + chown + restorecon
+# (I/O-bound). The PC-side push is timed separately and logged by CAS itself.
+ok "phase totals: APK installs ${T_INSTALL:-0}s, app data ${T_DATA:-0}s (device-side; excludes the PC push)"
 
 if [ "$FAIL" -gt 0 ]; then
   warn "RESTORE finished with $FAIL failure(s) — this unit is NOT a clean clone. Do NOT seal/ship it."

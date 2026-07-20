@@ -8,6 +8,7 @@ truncated push or a failed restore can never silently ship a broken clone.
 import os
 import re
 import time
+import contextlib
 import shutil
 import hashlib
 import tarfile
@@ -330,6 +331,54 @@ def _free_space_note(adb, path):
     return ""
 
 
+class PhaseTimer:
+    """Accumulate named wall-clock spans so a run can report WHERE its time went.
+
+    A Download reports a single total. Measured: 1746 MB in 619s. At the link speed the pack bar actually
+    observes (~16 MB/s) the bytes account for only ~110s of that, so ~80% was device-side work nobody
+    could attribute — which made "is it the push?" unanswerable and any optimisation guesswork.
+
+    Same name accumulates rather than overwrites (the push happens in several chunks), and insertion order
+    is preserved so the breakdown reads in the order the run performed it. `clock` is injectable so tests
+    are deterministic without sleeping."""
+
+    def __init__(self, clock=time.monotonic):
+        self._clock = clock
+        self.spans = {}
+
+    @contextlib.contextmanager
+    def phase(self, name):
+        t0 = self._clock()
+        try:
+            yield
+        finally:
+            # finally, not else: a phase that raised still consumed real time, and a FAILED run is the
+            # one most worth profiling.
+            self.spans[name] = self.spans.get(name, 0.0) + (self._clock() - t0)
+
+    def record(self, name, secs):
+        """Accumulate a span measured by the caller. For phases spread across a long block where wrapping
+        everything in `with` would mean re-indenting (and risking) a lot of existing code."""
+        self.spans[name] = self.spans.get(name, 0.0) + max(0.0, secs)
+
+    def summary(self, total=None):
+        """One line: 'push 109s (18%) · restore 480s (78%) · other 30s (5%)'. `total` is the run's true
+        wall time; the leftover is reported as 'other' so the parts always add up to what the operator
+        actually waited, instead of silently omitting untimed work."""
+        if not self.spans:
+            return "no phases timed"
+        parts, accounted = [], 0.0
+        for name, secs in self.spans.items():
+            accounted += secs
+            parts.append((name, secs))
+        if total and total > accounted:
+            parts.append(("other", total - accounted))
+        denom = total if total else accounted
+        return " · ".join(
+            f"{n} {s:.0f}s ({s * 100 / denom:.0f}%)" if denom > 0 else f"{n} {s:.0f}s"
+            for n, s in parts)
+
+
 class TransferCancelled(Exception):
     """The operator cancelled during a PC-side tar pack or unpack.
 
@@ -621,6 +670,7 @@ def provision(adb, profile, log=print, dry_push=False, es_media_src=None):
 
     pay_bytes = P.Profile(profile.path).golden_size() if hasattr(profile, "path") else 0
     t_push = time.monotonic()                          # time push+restore -> records bytes/sec for ETAs
+    _t_push0 = None                                    # set when the push block actually runs (not dry_push)
     if not dry_push:
         adb.su(f"rm -rf {DEV}")
         adb.shell(f"mkdir -p {DEV}/payload")
@@ -656,6 +706,7 @@ def provision(adb, profile, log=print, dry_push=False, es_media_src=None):
 
         # DIRECTORIES go over as a tar (adb push <dir> lands 0 files on Windows — see _push_dir); single
         # FILES below push directly (single-file pushes are reliable everywhere).
+        _t_push0 = time.monotonic()                        # phase timer: everything sent PC -> device
         for i, pkg in enumerate(pay_pkgs, 1):              # only the payload (captured) app modules
             log(f"pushing module {i}/{len(pay_pkgs)}: {pkg}")
             if not _push_dir(adb, push, pay / pkg, f"{DEV}/payload", log):
@@ -705,9 +756,17 @@ def provision(adb, profile, log=print, dry_push=False, es_media_src=None):
     # 'sd' (default) => leave it on the SD and tell restore to point MediaDirectory at THIS unit's card.
     es_mode = "internal" if es_media_src else "sd"
     es_env = f"CAS_ES_MEDIA={es_mode} " if "org.es_de.frontend" in pkgs else ""
+    _phases = PhaseTimer()
+    if _t_push0 is not None:                                 # dry_push / no-payload paths never pushed
+        _phases.record("push PC→device", time.monotonic() - _t_push0)
     log("running restore (installs apps, restores data/keys/BIOS/cores/grants/settings)...")
+    _t_restore0 = time.monotonic()
     rc = adb.su_stream(                                      # stream each [ok]/[warn] line LIVE to the log
         f"{es_env}{cores_env}CAS_PAYLOAD={DEV}/payload CAS_MANIFEST={DEV}/manifest sh {DEV}/restore.sh", log)
+    _phases.record("restore on device", time.monotonic() - _t_restore0)
+    # WHERE THE TIME WENT, PC side. restore.sh prints its own 'phase totals' line splitting that block
+    # into APK installs vs data restore, so the two together attribute the whole run.
+    log(f"phase breakdown: {_phases.summary(total=time.monotonic() - t_push)}")
     if rc != 0:
         log(f"restore FAILED (rc={rc}) — NOT rebooting; the unit is NOT provisioned.")
         return False

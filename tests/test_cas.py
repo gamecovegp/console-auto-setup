@@ -2173,6 +2173,38 @@ class TestProvision(unittest.TestCase):
         # is c[1] and the pulled SOURCE image is c[2] — asserting c[2] pins cas-boot.img vs new-boot.img.
         self.assertTrue(any(c[1] == "pull" and c[2].endswith("cas-boot.img") for c in r.calls))
 
+    def test_phase_timer_accumulates_and_renders_a_breakdown(self):
+        # A run reports ONE total, so nobody can say whether the time went to the push or to device-side
+        # work. This attributes it. A fake clock keeps the test deterministic (no sleeps).
+        ticks = iter([0.0, 10.0, 10.0, 40.0, 40.0, 45.0])   # push=10s, restore=30s, push again=5s
+        pt = PV.PhaseTimer(clock=lambda: next(ticks))
+        with pt.phase("push"):
+            pass
+        with pt.phase("restore"):
+            pass
+        with pt.phase("push"):                               # same name accumulates, not overwrites
+            pass
+        self.assertEqual(pt.spans["push"], 15.0)
+        self.assertEqual(pt.spans["restore"], 30.0)
+        self.assertEqual(list(pt.spans), ["push", "restore"])   # first-seen order, stable for reading
+        s = pt.summary(total=60.0)
+        self.assertIn("push", s)
+        self.assertIn("restore", s)
+        self.assertIn("%", s)
+
+    def test_phase_timer_records_time_even_when_the_phase_raises(self):
+        # A failed run is the one you most want to profile, so the span must survive the exception.
+        ticks = iter([0.0, 7.0])
+        pt = PV.PhaseTimer(clock=lambda: next(ticks))
+        with self.assertRaises(ValueError):
+            with pt.phase("push"):
+                raise ValueError("boom")
+        self.assertEqual(pt.spans["push"], 7.0)
+
+    def test_phase_timer_summary_is_safe_with_no_phases(self):
+        pt = PV.PhaseTimer(clock=lambda: 0.0)
+        self.assertIsInstance(pt.summary(total=0.0), str)     # never divide-by-zero into the log
+
     def _tiny_tar(self, t, n=5):
         src = pathlib.Path(t) / "src"; src.mkdir()
         tpath = pathlib.Path(t) / "a.tar"
