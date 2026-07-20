@@ -7,9 +7,13 @@ import json
 import os
 import pathlib
 import re
+import time
 import uuid
 
 _MAGISK_MARKERS = (b"MAGISKINIT", b"MAGISKPOLICY", b".magisk")
+
+_REPLACE_ATTEMPTS = 8
+_REPLACE_BACKOFF = 0.02
 
 
 def looks_like_boot_image(data):
@@ -36,6 +40,49 @@ def store_root(firmware_root):
 
 def _dir(store_root, fingerprint):
     return pathlib.Path(store_root) / slug(fingerprint)
+
+
+def _unlink_quietly(p):
+    try:
+        p.unlink()
+    except OSError:
+        pass
+
+
+def _replace_retry(tmp, dest):
+    """os.replace() that tolerates Windows' transient PermissionError. Returns True iff `tmp` landed.
+
+    POSIX rename() always succeeds over an existing dest. Windows MoveFileEx(REPLACE_EXISTING) instead
+    fails with PermissionError('Access is denied') while ANOTHER handle to dest is open -- exactly what
+    root_all/seal_all's ThreadPoolExecutor produces when several same-build units reach put() together.
+    Retry briefly, then REPORT the outcome instead of raising, so the caller can decide whether a
+    competing (byte-identical) writer already satisfied the request."""
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            os.replace(tmp, dest)
+            return True
+        except PermissionError:
+            if attempt == _REPLACE_ATTEMPTS - 1:
+                return False
+            time.sleep(_REPLACE_BACKOFF * (attempt + 1))
+    return False
+
+
+def _write_meta(d, meta):
+    """Write meta.json via the same temp+replace dance as the image: concurrent same-build put()s would
+    otherwise interleave into a half-written meta.json that get()'s json.loads reads as corrupt."""
+    tmp = d / f".meta.json.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    dest = d / "meta.json"
+    try:
+        tmp.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        landed = _replace_retry(tmp, dest)
+    except Exception:
+        _unlink_quietly(tmp)
+        raise
+    if not landed:
+        _unlink_quietly(tmp)
+        if not dest.is_file():
+            raise OSError(f"could not write the capture's meta.json: {dest}")
 
 
 def has(store_root, fingerprint):
@@ -70,8 +117,9 @@ def put(store_root, fingerprint, img_path, meta):
 
     ATOMIC: the image is written to a temp file in the SAME directory, then moved into place with
     os.replace() (atomic on both POSIX and Windows) — so a crash/kill mid-write can never leave a
-    partial init_boot.img sitting at the real path. meta.json is written only AFTER the image lands, so
-    a reader can never observe a meta.json whose image write hasn't finished.
+    partial init_boot.img sitting at the real path. See _replace_retry() for the Windows-only case where
+    a concurrent writer holds dest open. meta.json is written only AFTER the image lands, so a reader
+    can never observe a meta.json whose image write hasn't finished.
 
     The temp filename includes a per-call uuid4 (not just the PID): root_all/seal_all fan out across
     devices with a ThreadPoolExecutor in ONE process, so several threads rooting same-build units can
@@ -88,12 +136,16 @@ def put(store_root, fingerprint, img_path, meta):
     tmp = d / f".init_boot.img.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     try:
         tmp.write_bytes(pathlib.Path(img_path).read_bytes())
-        os.replace(tmp, dest)
+        landed = _replace_retry(tmp, dest)
     except Exception:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
+        _unlink_quietly(tmp)
         raise
-    (d / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    if not landed:
+        # A concurrent same-build put() kept a handle on dest through every retry (Windows only). Same
+        # build => byte-identical image, so the winner's file IS the one we were about to write: a
+        # populated dest is success. Only a still-absent dest is a real failure.
+        _unlink_quietly(tmp)
+        if not dest.is_file():
+            raise OSError(f"could not move the captured init_boot into place: {dest}")
+    _write_meta(d, meta)
     return dest
