@@ -3,14 +3,167 @@
 Pure module: no adb/config/firmware imports. Callers pass `store_root` (a Path), so it stays trivially
 unit-testable and free of import cycles. Layout: <store_root>/<slug(fingerprint)>/init_boot.img + meta.json
 """
+import bz2
+import gzip
 import json
+import lzma
 import os
 import pathlib
 import re
+import struct
 import time
 import uuid
+import zlib
 
-_MAGISK_MARKERS = (b"MAGISKINIT", b"MAGISKPOLICY", b".magisk")
+# Markers of a Magisk-patched ramdisk. The binary ones (MAGISKINIT/MAGISKPOLICY) appear in magiskinit
+# itself; the path ones are the files Magisk ADDS to the ramdisk cpio and are what a real patched image
+# actually shows (see the Banners FW189 RP5 image: .backup/.magisk, .backup/init.xz,
+# overlay.d/sbin/magisk.xz). Path markers are the reliable ones — they survive across Magisk versions.
+_MAGISK_MARKERS = (b"MAGISKINIT", b"MAGISKPOLICY", b".magisk", b"magiskinit",
+                   b"overlay.d/sbin/magisk", b"magisk.xz")
+
+PATCHED, CLEAN, UNKNOWN = "patched", "clean", "unknown"
+
+_LZ4_LEGACY_MAGIC = b"\x02\x21\x4c\x18"      # 0x184C2102, little-endian
+
+# Ramdisk codecs, by leading magic. gzip is what Magisk uses on these units; lz4/zstd need third-party
+# modules, so they are attempted only when importable and otherwise report UNKNOWN (never CLEAN).
+_DECOMPRESSORS = (
+    (b"\x1f\x8b", lambda b: gzip.decompress(b)),
+    (b"\xfd7zXZ", lambda b: lzma.decompress(b)),
+    (b"\x5d\x00\x00", lambda b: lzma.decompress(b, format=lzma.FORMAT_ALONE)),
+    (b"BZh", lambda b: bz2.decompress(b)),
+    (b"\x78", lambda b: zlib.decompress(b)),
+    (b"070701", lambda b: b),          # uncompressed cpio — already plain
+    (b"070702", lambda b: b),
+    (_LZ4_LEGACY_MAGIC, lambda b: _lz4_legacy_decompress(b)),
+)
+
+
+def _ramdisk_bytes(data):
+    """The raw (still-compressed) ramdisk slice of an Android boot image, or None if `data` isn't one.
+
+    Handles BOTH header layouts, which put ramdisk_size in different places: v0-v2 has
+    kernel_size@8 / ramdisk_size@16 / page_size@36, while v3+ has kernel_size@8 / ramdisk_size@12 and a
+    fixed 4096 page. header_version sits at offset 40 in both, so we read that first to pick the layout.
+    Layout: [header page][kernel, page-aligned][ramdisk, page-aligned]."""
+    if len(data) < 64 or data[:8] != b"ANDROID!":
+        return None
+    try:
+        (hdr_version,) = struct.unpack_from("<I", data, 40)
+        if hdr_version >= 3:
+            kernel_size, ramdisk_size = struct.unpack_from("<II", data, 8)
+            page = 4096
+        else:
+            (kernel_size,) = struct.unpack_from("<I", data, 8)
+            (ramdisk_size,) = struct.unpack_from("<I", data, 16)
+            (page,) = struct.unpack_from("<I", data, 36)
+    except struct.error:
+        return None
+    if not page or page > len(data) or not ramdisk_size:
+        return None
+    off = page + -(-kernel_size // page) * page          # header page + page-aligned kernel
+    rd = data[off:off + ramdisk_size]
+    return rd if len(rd) == ramdisk_size else None
+
+
+def _lz4_block_decompress(src):
+    """Decode one LZ4 block (the raw compression format, no frame header).
+
+    Implemented here because Android's init_boot ramdisks are LZ4 (the whole kalama/RP6 fleet) and the
+    Python stdlib ships no LZ4 codec — without this the Magisk guard would report UNKNOWN on exactly
+    the images CAS flashes most often. A block is a series of sequences: [token][literal-length
+    extension][literals][2-byte match offset][match-length extension]. The high nibble of the token is
+    the literal count, the low nibble the match count (minus the 4-byte minimum); a nibble of 15 means
+    'add the following 255-terminated byte run'. Matches may OVERLAP the output written so far (that is
+    how LZ4 encodes runs), so those bytes are copied one at a time rather than sliced."""
+    out = bytearray()
+    pos, n = 0, len(src)
+    while pos < n:
+        token = src[pos]
+        pos += 1
+        lit_len = token >> 4
+        if lit_len == 15:
+            while pos < n:
+                b = src[pos]
+                pos += 1
+                lit_len += b
+                if b != 255:
+                    break
+        out += src[pos:pos + lit_len]
+        pos += lit_len
+        if pos + 2 > n:                       # final sequence is literals-only: no match follows
+            break
+        offset = src[pos] | (src[pos + 1] << 8)
+        pos += 2
+        if offset == 0 or offset > len(out):
+            raise ValueError("bad LZ4 match offset")
+        match_len = token & 0x0F
+        if match_len == 15:
+            while pos < n:
+                b = src[pos]
+                pos += 1
+                match_len += b
+                if b != 255:
+                    break
+        match_len += 4
+        start = len(out) - offset
+        for i in range(match_len):            # byte-at-a-time: matches legitimately overlap
+            out.append(out[start + i])
+    return bytes(out)
+
+
+def _lz4_legacy_decompress(data):
+    """Decode an LZ4 'legacy' frame: magic then [u32 block_size][block]... to EOF."""
+    out, pos = bytearray(), 4
+    while pos + 4 <= len(data):
+        (size,) = struct.unpack_from("<I", data, pos)
+        pos += 4
+        if size == 0 or size > len(data) - pos:
+            break
+        out += _lz4_block_decompress(data[pos:pos + size])
+        pos += size
+    return bytes(out)
+
+
+def _decompress_ramdisk(rd):
+    """The ramdisk's PLAIN bytes, or None when no available codec can read it. None means 'I could not
+    look', which callers must treat as UNKNOWN — never as clean."""
+    for magic, fn in _DECOMPRESSORS:
+        if rd.startswith(magic):
+            try:
+                return fn(rd)
+            except Exception:
+                return None
+    for mod, attr in (("lz4.frame", "decompress"), ("lz4.block", "decompress"), ("zstandard", None)):
+        try:                                             # optional third-party codecs, if installed
+            m = __import__(mod, fromlist=["x"])
+            return m.decompress(rd) if attr else m.ZstdDecompressor().decompressobj().decompress(rd)
+        except Exception:
+            continue
+    return None
+
+
+def magisk_scan(data):
+    """PATCHED / CLEAN / UNKNOWN for an Android boot image.
+
+    A shipping boot image COMPRESSES its ramdisk, so Magisk's markers are invisible to a raw byte scan —
+    scanning `data` alone reported the Magisk-patched Banners RP5 image as clean, and ③ Lock flashed it
+    to 'un-root' a unit that then booted still rooted. So: locate the ramdisk, decompress it, and scan
+    the PLAIN bytes. UNKNOWN (not CLEAN) whenever we cannot actually look — an unparseable header or a
+    codec we don't have. Callers decide how strict to be, but nothing may read UNKNOWN as proof of
+    cleanliness."""
+    # Ramdisk FIRST, raw scan only as a fallback. The ramdisk is a couple of MB while the image can be
+    # ~100MB, and the markers only ever live in the ramdisk — scanning the whole image first cost ~11s
+    # per call on a 96MB RP5 boot.img, which would land on every seal.
+    rd = _ramdisk_bytes(data)
+    if rd is not None:
+        plain = _decompress_ramdisk(rd)
+        if plain is not None:
+            return PATCHED if any(m in plain for m in _MAGISK_MARKERS) else CLEAN
+    if any(m in data for m in _MAGISK_MARKERS):    # not parseable as a boot image, or codec unavailable
+        return PATCHED
+    return UNKNOWN
 
 _REPLACE_ATTEMPTS = 8
 _REPLACE_BACKOFF = 0.02
@@ -23,8 +176,10 @@ def looks_like_boot_image(data):
 
 
 def contains_magisk(data):
-    """True iff the image carries Magisk markers (i.e. it's a patched/rooted image, not factory)."""
-    return any(m in data for m in _MAGISK_MARKERS)
+    """True iff the image is a patched/rooted image (not factory). Thin bool wrapper over magisk_scan()
+    for callers that only branch on 'definitely patched'; UNKNOWN reads as False here, so any caller
+    that must not treat 'could not look' as clean should use magisk_scan() directly."""
+    return magisk_scan(data) == PATCHED
 
 
 def slug(fingerprint):

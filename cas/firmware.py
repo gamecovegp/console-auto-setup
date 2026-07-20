@@ -149,6 +149,14 @@ class Firmware:
         return self.meta.get("flash_target", "")
 
     @property
+    def ships_rooted(self):
+        """True when this build is DELIBERATELY rooted and its units ship that way — its stock image is
+        Magisk-patched by design (e.g. the RP5's 905MHz overclock kernel, distributed only as a
+        root+OC image). ③ Lock then skips the un-root flash, which could only re-root the unit, and does
+        the retail lockdown alone. Opt-in per build: absent/False means a patched image is REFUSED."""
+        return bool(self.meta.get("ships_rooted", False))
+
+    @property
     def storage(self):
         return self.meta.get("storage", "")
 

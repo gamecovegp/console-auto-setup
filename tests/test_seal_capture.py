@@ -1,5 +1,6 @@
 # tests/test_seal_capture.py
 import os
+import struct
 import sys
 import pathlib
 import tempfile
@@ -196,6 +197,174 @@ class TestRootCaptureWiring(unittest.TestCase):
                          flasher=lambda *a, **k: True, capture_store="/store")
         self.assertTrue(ok)
         self.assertEqual(calls, ["/store"])
+
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from test_initboot_store import make_boot_img, PATCHED_RAMDISK, CLEAN_RAMDISK   # noqa: E402
+
+
+def _seal_adb(rooted=True, fp=FP, target="boot_a"):
+    adb = mock.Mock()
+    adb.is_root.return_value = rooted
+    adb.is_golden.return_value = False
+    adb.boot_flash_target.return_value = target
+    adb.slot_suffix.return_value = "_a"
+    adb.getprop.return_value = fp
+    adb.push.return_value = True
+    adb.su.return_value = (0, "", "")
+    adb.su_stream.return_value = 0
+    adb.shell.return_value = (0, "", "")
+    return adb
+
+
+class TestSealRefusesRootedUnrootImage(unittest.TestCase):
+    """③ Lock un-roots by flashing a 'stock' image. On 2026-07-20 the RP5's library image was itself
+    Magisk-patched (the Banners FW189 OC mod), so every Lock re-rooted the unit and failed with
+    'still ROOTED after stock flash'. seal() must inspect the image BEFORE flashing it — an image
+    carrying Magisk is by definition not stock and can never un-root anything."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.flashed = []
+
+    def _img(self, ramdisk, name="stock.img"):
+        p = pathlib.Path(self.tmp) / name
+        p.write_bytes(make_boot_img(ramdisk, "gzip"))
+        return str(p)
+
+    def _flasher(self, adb, target, image, log):
+        self.flashed.append((target, image))
+        return True
+
+    def _seal(self, stock, **kw):
+        msgs = []
+        ok = PV.seal(_seal_adb(), mock.Mock(), stock, log=msgs.append, wait=False,
+                     flasher=self._flasher, **kw)
+        return ok, "\n".join(msgs)
+
+    def test_refuses_to_flash_a_magisk_patched_image(self):
+        ok, log = self._seal(self._img(PATCHED_RAMDISK))
+        self.assertFalse(ok)
+        self.assertEqual(self.flashed, [], "must not flash a rooted image at all")
+        self.assertIn("magisk", log.lower())
+
+    def test_force_does_not_bypass_the_rooted_image_refusal(self):
+        # force= exists to override a MODEL mismatch. A rooted un-root image is a physical impossibility,
+        # not an operator judgement call, so force must not get past it.
+        ok, _ = self._seal(self._img(PATCHED_RAMDISK), force=True)
+        self.assertFalse(ok)
+        self.assertEqual(self.flashed, [])
+
+    def test_clean_image_still_seals(self):
+        ok, _ = self._seal(self._img(CLEAN_RAMDISK))
+        self.assertTrue(ok)
+        self.assertEqual(len(self.flashed), 1)
+
+    def test_unreadable_image_warns_but_proceeds(self):
+        # UNKNOWN must not block the fleet: the post-flash is_root() check still backstops it, and
+        # refusing here would strand every unit whose ramdisk codec we cannot read.
+        p = pathlib.Path(self.tmp) / "opaque.img"
+        p.write_bytes(b"\x00" * 4096)
+        ok, log = self._seal(str(p))
+        self.assertTrue(ok)
+        self.assertEqual(len(self.flashed), 1)
+        self.assertIn("could not verify", log.lower())
+
+
+class TestShipsRootedOptIn(unittest.TestCase):
+    """Some builds are DELIBERATELY rooted — the RP5's 905MHz overclock kernel only ships as the
+    'Banners root+overclock' image, and Donald chose to keep the OC and ship those units rooted. For
+    those, ③ Lock must still do the retail lockdown (hide dev options, kill adb) but SKIP the un-root
+    flash, which could only ever re-root the unit. This is opt-in per firmware build: without the
+    declaration a Magisk-patched image is still refused, so it can never happen by accident."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.flashed = []
+        self.p = pathlib.Path(self.tmp) / "oc.img"
+        self.p.write_bytes(make_boot_img(PATCHED_RAMDISK, "gzip"))
+
+    def _flasher(self, adb, target, image, log):
+        self.flashed.append(target)
+        return True
+
+    def _seal(self, **kw):
+        msgs = []
+        adb = _seal_adb()
+        ok = PV.seal(adb, mock.Mock(), str(self.p), log=msgs.append, wait=False,
+                     flasher=self._flasher, **kw)
+        return ok, "\n".join(msgs), adb
+
+    def test_without_optin_a_rooted_image_is_still_refused(self):
+        ok, _, _ = self._seal()
+        self.assertFalse(ok)
+
+    def test_with_optin_seals_without_flashing(self):
+        ok, log, adb = self._seal(allow_rooted_image=True)
+        self.assertTrue(ok)
+        self.assertEqual(self.flashed, [], "must not flash a rooted image even when opted in")
+        self.assertIn("rooted", log.lower())
+
+    def test_with_optin_still_runs_the_retail_lockdown(self):
+        ok, _, adb = self._seal(allow_rooted_image=True)
+        self.assertTrue(ok)
+        shell = "\n".join(str(c) for c in adb.shell.call_args_list)
+        self.assertIn("development_settings_enabled 0", shell)
+        self.assertIn("adb_enabled 0", shell)          # USB debugging off — the unit really is sealed
+
+    def test_optin_does_not_apply_to_a_clean_image(self):
+        # A clean image must still be flashed normally — the opt-in is a narrow exemption for a
+        # deliberately-rooted build, not a blanket 'skip the un-root flash' switch.
+        clean = pathlib.Path(self.tmp) / "clean.img"
+        clean.write_bytes(make_boot_img(CLEAN_RAMDISK, "gzip"))
+        msgs = []
+        ok = PV.seal(_seal_adb(), mock.Mock(), str(clean), log=msgs.append, wait=False,
+                     flasher=self._flasher, allow_rooted_image=True)
+        self.assertTrue(ok)
+        self.assertEqual(self.flashed, ["boot_a"])
+
+
+class TestSealPartitionTypeGuard(unittest.TestCase):
+    """root() refuses a kernel-less init_boot aimed at a `boot` partition (it strips the kernel and
+    bootloops the unit — the RP5 brick). seal() flashes the same class of image and had no such guard."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.flashed = []
+
+    def _write(self, kernel_size):
+        p = pathlib.Path(self.tmp) / "img.img"
+        hdr = bytearray(4096)
+        hdr[0:8] = b"ANDROID!"
+        struct.pack_into("<I", hdr, 8, kernel_size)
+        p.write_bytes(bytes(hdr))
+        return str(p)
+
+    def _flasher(self, adb, target, image, log):
+        self.flashed.append(target)
+        return True
+
+    def _seal(self, stock, target, force=False):
+        msgs = []
+        ok = PV.seal(_seal_adb(target=target), mock.Mock(), stock, log=msgs.append, wait=False,
+                     flasher=self._flasher, force=force)
+        return ok, "\n".join(msgs)
+
+    def test_refuses_ramdisk_only_image_on_a_boot_partition(self):
+        ok, log = self._seal(self._write(kernel_size=0), target="boot_a")
+        self.assertFalse(ok)
+        self.assertEqual(self.flashed, [])
+        self.assertIn("kernel", log.lower())
+
+    def test_refuses_full_boot_image_on_an_init_boot_partition(self):
+        ok, _ = self._seal(self._write(kernel_size=39606288), target="init_boot_a")
+        self.assertFalse(ok)
+        self.assertEqual(self.flashed, [])
+
+    def test_allows_matching_image_and_partition(self):
+        ok, _ = self._seal(self._write(kernel_size=39606288), target="boot_a")
+        self.assertTrue(ok)
+        self.assertEqual(self.flashed, ["boot_a"])
 
 
 if __name__ == "__main__":

@@ -1585,6 +1585,71 @@ def _img_kernel_size(path):
     return int.from_bytes(hdr[8:12], "little")
 
 
+def check_image_partition_type(stock, target, log=print, why=""):
+    """False iff `stock`'s image TYPE contradicts the partition it would be flashed to.
+
+    An init_boot image is RAMDISK-ONLY (kernel_size 0); a full boot.img has a kernel. Flashing a
+    ramdisk-only image to a plain `boot` partition — the target on pre-init_boot units like the
+    Retroid Pocket 5 / Odin (kona) — strips the kernel and bootloops the unit to fastboot. The inverse
+    is wrong too. Model-independent, so it fires even when a profile sets no model_match, and NOT
+    bypassable by `force`: this is a physical image mismatch, not a judgement call about which model
+    sibling is in hand. Shared by root() and seal() so the two can never drift apart — seal() lacked
+    this guard entirely and flashed the same class of image."""
+    part = target[:-2] if target.endswith(("_a", "_b")) else target
+    ksz = _img_kernel_size(stock)
+    name = pathlib.Path(stock).name
+    if ksz is None:
+        # Not a recognizable Android boot image — can't type-check it here. Not fatal.
+        log(f"warning: '{name}' has no 'ANDROID!' boot header — skipping the image/partition-type check.")
+        return True
+    if part == "boot" and ksz == 0:
+        log(f"REFUSING: '{name}' is an init_boot (ramdisk-only, no kernel) but this unit flashes to "
+            f"'{target}', which needs a FULL boot image. Flashing it would remove the kernel and "
+            f"bootloop the unit to fastboot.{why}")
+        return False
+    if part == "init_boot" and ksz != 0:
+        log(f"REFUSING: '{name}' is a full boot image (has a kernel) but this unit flashes to "
+            f"'{target}' (init_boot is ramdisk-only). Wrong image would brick boot.{why}")
+        return False
+    return True
+
+
+def unroot_image_verdict(stock, log=print):
+    """PATCHED / CLEAN / UNKNOWN for the image seal() would flash to un-root, with the logging."""
+    try:
+        return _ibs.magisk_scan(pathlib.Path(stock).read_bytes())
+    except OSError as e:
+        log(f"warning: could not read the un-root image ({e}).")
+        return _ibs.UNKNOWN
+
+
+def check_unroot_image_is_stock(stock, log=print):
+    """False iff the image seal() is about to flash to UN-ROOT the unit is itself Magisk-patched.
+
+    A 'stock' image carrying Magisk cannot un-root anything — flashing it re-roots the unit, which is
+    exactly what happened on 2026-07-20: the RP5's library image was the Banners FW189 *root*+overclock
+    mod, so every ③ Lock came back 'still ROOTED after stock flash'. The old check scanned raw bytes and
+    could never see it, because a boot image COMPRESSES its ramdisk. UNKNOWN only warns: refusing there
+    would strand any unit whose ramdisk codec we can't read, and the post-flash is_root() check still
+    backstops it."""
+    try:
+        verdict = _ibs.magisk_scan(pathlib.Path(stock).read_bytes())
+    except OSError as e:
+        log(f"warning: could not verify the un-root image ({e}) — proceeding; the post-flash root check "
+            "still guards the seal.")
+        return True
+    if verdict == _ibs.PATCHED:
+        log(f"REFUSING: '{pathlib.Path(stock).name}' is a MAGISK-PATCHED image, not a stock one — "
+            "flashing it would re-root the unit instead of un-rooting it (the unit would come back "
+            "'still ROOTED after stock flash'). Point this device's firmware at a genuine STOCK image "
+            "for its build, or root it from a clean state so CAS can capture its own factory image.")
+        return False
+    if verdict == _ibs.UNKNOWN:
+        log(f"warning: could not verify that '{pathlib.Path(stock).name}' is Magisk-free (unreadable "
+            "ramdisk) — proceeding; the post-flash root check still guards the seal.")
+    return True
+
+
 def root(adb, fastboot, stock_init_boot, magisk_apk=None, log=print, wait=True, model_match=None,
          force=False, flasher=None, capture_store=None):
     """Root a FRESH unit — Magisk-FIRST, everything sourced from the PC (run BEFORE provision). Inverse of
@@ -1635,29 +1700,12 @@ def root(adb, fastboot, stock_init_boot, magisk_apk=None, log=print, wait=True, 
     # the unit is in fastboot. Detected, not hardcoded, so a slot-B / pre-init_boot unit isn't mis-flashed.
     target = adb.boot_flash_target()
 
-    # IMAGE/PARTITION-TYPE GUARD (model-independent, so it fires even when a profile sets no model_match):
-    # an init_boot image is RAMDISK-ONLY (kernel_size 0). Flashing it to a plain `boot` partition — the
-    # target on pre-init_boot units like the Retroid Pocket 5 / Odin (kona) — removes the kernel and the
-    # unit bootloops straight to fastboot ("keeps returning to fastboot on Start"). The inverse (a full
-    # boot.img with a kernel flashed to init_boot) is wrong too. Refuse BEFORE touching the unit — NOT
-    # bypassed by `force` (this is a physical image mismatch, unrelated to which model sibling it is).
-    part = target[:-2] if target.endswith(("_a", "_b")) else target
-    ksz = _img_kernel_size(stock)
-    if ksz is None:
-        # Not a recognizable Android boot image — can't type-check it here. Not fatal: the on-device
-        # boot_patch.sh needs a real boot image and fails loudly on anything else, so this never flashes.
-        log(f"warning: '{pathlib.Path(stock).name}' has no 'ANDROID!' boot header — skipping the "
-            "image/partition-type check (the on-device Magisk patch will reject a non-boot image).")
-    elif part == "boot" and ksz == 0:
-        log(f"REFUSING: '{pathlib.Path(stock).name}' is an init_boot (ramdisk-only, no kernel) but this "
-            f"unit flashes to '{target}', which needs a FULL boot image. Flashing it would remove the "
-            "kernel and bootloop the unit to fastboot. Use THIS unit's own stock boot.img (wrong-device "
-            "image — e.g. an Odin2 init_boot on a Retroid Pocket 5).")
-        return False
-    elif part == "init_boot" and ksz != 0:
-        log(f"REFUSING: '{pathlib.Path(stock).name}' is a full boot image (has a kernel) but this unit "
-            f"flashes to '{target}' (init_boot is ramdisk-only). Wrong image would brick boot. Use the "
-            "unit's stock init_boot.")
+    # IMAGE/PARTITION-TYPE GUARD — refuse BEFORE touching the unit. Shared with seal(); see
+    # check_image_partition_type() for why this is not bypassable by `force`.
+    if not check_image_partition_type(stock, target, log,
+                                      why=" Use THIS unit's own stock image for its flash target "
+                                          "(wrong-device image — e.g. an Odin2 init_boot on a "
+                                          "Retroid Pocket 5)."):
         return False
 
     # (1) install the Magisk APP FIRST (from the PC). Needs no root; it's the manager that owns root after
@@ -1785,14 +1833,20 @@ def resolve_seal_stock(library_stock, capture_path, fingerprint, log=print):
     return library_stock
 
 
-def seal(adb, fastboot, stock_init_boot, log=print, wait=True, model_match=None, force=False, flasher=None):
+def seal(adb, fastboot, stock_init_boot, log=print, wait=True, model_match=None, force=False,
+         flasher=None, allow_rooted_image=False):
     """Make a provisioned unit RETAIL-READY (run AFTER provision + verify):
       1) check the stock init_boot matches THIS device model (wrong-model flash bricks boot)
       2) uninstall the Magisk app (needs root)
       3) un-root by flashing STOCK init_boot, then CONFIRM root is actually gone
       4) hide Developer Options + disable USB debugging LAST (drops adb) — after confirmed boot + un-root
     Never strands the unit in fastboot, and never disables adb on an unverified/failed seal.
-    force=True proceeds on a model MISMATCH with a loud warning instead of refusing."""
+    force=True proceeds on a model MISMATCH with a loud warning instead of refusing.
+    allow_rooted_image=True (from the firmware's `ships_rooted` declaration) permits a build whose image
+    is Magisk-patched BY DESIGN — e.g. the RP5's 905MHz overclock kernel, which only exists as a
+    root+OC image. Those units ship ROOTED: step (3) is skipped entirely (flashing a rooted image could
+    only re-root them) and the retail lockdown still runs. Without it, a patched image is REFUSED, so a
+    rooted unit can never ship by accident."""
     log("SEAL: locking the unit down for retail.")
     # Upfront heads-up (option b): if the unit reports not-rooted, say so IMMEDIATELY — it may already be
     # sealed, or ⓪ Root / ② Download were skipped. Seal still flashes stock to GUARANTEE un-root (the
@@ -1831,6 +1885,27 @@ def seal(adb, fastboot, stock_init_boot, log=print, wait=True, model_match=None,
     # that, but targeting the live slot is what actually un-roots it).
     target = adb.boot_flash_target()
 
+    # PRE-FLIGHT the image we are about to flash, BEFORE the scrub/uninstall — a refusal here must leave
+    # the unit exactly as it was found (still rooted, Magisk app intact), not half-stripped.
+    #   (a) type vs partition: a kernel-less image on a `boot` partition bootloops the unit (RP5 brick).
+    #   (b) is it actually STOCK: a Magisk-patched "stock" image re-roots instead of un-rooting, which
+    #       is the RP5 'still ROOTED after stock flash' failure. Neither is bypassable by `force`.
+    if not check_image_partition_type(stock, target, log,
+                                      why=" Point this device's firmware at its own stock image."):
+        return False
+    # A build may DECLARE itself intentionally rooted (firmware meta `ships_rooted`) — e.g. the RP5's
+    # 905MHz overclock kernel, which is only distributed as a root+OC image. Those units ship rooted by
+    # choice, so skip the un-root flash (flashing a rooted image could only re-root them) and go straight
+    # to the retail lockdown. Without the declaration a patched image is still REFUSED, so a rooted unit
+    # can never ship by accident — only by a deliberate entry in the library.
+    ships_rooted = allow_rooted_image and unroot_image_verdict(stock, log) == _ibs.PATCHED
+    if ships_rooted:
+        log("NOTE: this build is declared SHIPS-ROOTED (its image is Magisk-patched by design, e.g. an "
+            "overclock kernel). Skipping the un-root flash — the unit will ship ROOTED. Retail lockdown "
+            "(Magisk app removal, hidden Developer options, USB debugging off) still runs.")
+    elif not check_unroot_image_is_stock(stock, log):
+        return False
+
     if adb.is_root():
         # ship-clean scrub FIRST, while still rooted — clears usage traces + saved game states before
         # un-root so the unit ships factory-fresh. Additive: scrub.sh always exits 0, never blocks the seal.
@@ -1849,20 +1924,23 @@ def seal(adb, fastboot, stock_init_boot, log=print, wait=True, model_match=None,
 
     # (3) un-root by flashing STOCK init_boot via the device's flash backend (bootloader fastboot, or
     #     EDL/Firehose for units whose bootloader can't write — caller passes an edl_flasher).
-    log(f"un-rooting: flashing STOCK {target}...")
-    if not flasher(adb, target, stock, log):
-        log("ERROR: stock init_boot flash failed — unit is back in the OS, still rooted, NOT sealed.")
-        return False
-    log("flashed stock init_boot; waiting for the device to finish booting (1-3 min)...")
-    if wait:
-        if not adb.wait_boot(on_tick=lambda s, st: log(boot_tick_msg(s, st))):
-            log("ERROR: unit did not boot after un-root flash — NOT disabling USB debugging. Investigate.")
+    if not ships_rooted:
+        log(f"un-rooting: flashing STOCK {target}...")
+        if not flasher(adb, target, stock, log):
+            log("ERROR: stock init_boot flash failed — unit is back in the OS, still rooted, NOT sealed.")
             return False
-        if adb.is_root():
-            log("ERROR: still ROOTED after stock flash (wrong slot / no-op flash?) — NOT sealing. "
-                "adb left enabled so you can retry.")
-            return False
-        log("confirmed un-rooted.")
+        log("flashed stock init_boot; waiting for the device to finish booting (1-3 min)...")
+        if wait:
+            if not adb.wait_boot(on_tick=lambda s, st: log(boot_tick_msg(s, st))):
+                log("ERROR: unit did not boot after un-root flash — NOT disabling USB debugging. "
+                    "Investigate.")
+                return False
+            if adb.is_root():
+                log("ERROR: still ROOTED after stock flash (wrong slot / no-op flash?) — NOT sealing. "
+                    "adb left enabled so you can retry. If this build is rooted BY DESIGN (e.g. an "
+                    "overclock kernel), set \"ships_rooted\": true on its firmware entry.")
+                return False
+            log("confirmed un-rooted.")
     # (4) LAST retail lockdown — the inverse of what Root/the operator opened: HIDE Developer Options, turn
     # the OEM-unlocking toggle back OFF, THEN disable USB debugging (which drops adb). These run as the shell
     # uid (has WRITE_SECURE_SETTINGS) so they work WITHOUT root and even post-un-root — a flaky su grant can
@@ -2037,6 +2115,7 @@ def seal_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
             # and — for EDL units whose bootloader fastboot can't write (e.g. MANGMI) — the Firehose flasher.
             # Fail-safe: any firmware-lookup error → fall back to the fastboot path + profile/default stock.
             flasher = None
+            ships_rooted = False              # set from the resolved build's `ships_rooted` declaration
             phase = "fastboot_flash"          # coarse recovery hint; the EDL branch below flips it
             try:
                 from . import firmware as FW
@@ -2054,6 +2133,7 @@ def seal_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
                     sb = fw.stock_boot_image(fwres.get("version"))
                     if sb:
                         stock_path = str(sb)
+                    ships_rooted = fw.ships_rooted
                     if fw.flash_method == "edl":
                         phase = "edl_flash"
                         flasher, reason = flasher_for_firmware(fw, fb, adb.slot_suffix(),
@@ -2078,14 +2158,21 @@ def seal_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
             # slot suffix) can NEVER have a capture, so running this lookup there would just emit a
             # permanent false "OTA may fail (code 20)" warning on every seal. Skip it for those units —
             # use the library-resolved stock_path with no warning.
-            if adb.slot_suffix() in ("_a", "_b"):
+            # A SHIPS-ROOTED build is authoritative: its (deliberately patched) image is the point, so a
+            # captured factory image must NOT be substituted here. Doing so would flash the unit's stock
+            # kernel, silently un-rooting it and throwing away the very thing the build exists for — the
+            # RP5's 905MHz overclock. Capture substitution stays on for every normal build.
+            if ships_rooted:
+                _wlog("SHIPS-ROOTED build: keeping its declared image (not substituting a captured "
+                      "factory image, which would un-root the unit and drop the overclock).")
+            elif adb.slot_suffix() in ("_a", "_b"):
                 store_root = _ibs.store_root(FW.firmware_root())
                 _fp = adb.getprop("ro.build.fingerprint")
                 stock_path = resolve_seal_stock(stock_path, _ibs.get(store_root, _fp), _fp, log=_wlog)
             ok = seal(adb, fb, stock_path,
                       log=_wlog,
                       model_match=prof.meta.get("model_match"), force=(serial in force_serials),
-                      flasher=flasher)
+                      flasher=flasher, allow_rooted_image=ships_rooted)
             if adb.cancel is not None and adb.cancel.is_set():
                 return ("cancelled", prof.name)
             if ok:
