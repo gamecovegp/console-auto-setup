@@ -28,6 +28,8 @@ MEDIA_SRC = DATA / "ES-DE" / "downloaded_media"   # shared ES-DE box-art pool (b
 #   pushed per-device but kept OUT of the per-profile golden (it's ~12 GB; bundling it would balloon every
 #   profile). Override the PC source with CAS_MEDIA. The golden carries only the small ES-DE config.
 MAGISK_PKG = "com.topjohnwu.magisk"                          # store key for the Magisk app (kit APK)
+RETROARCH_PKG = "com.retroarch.aarch64"     # cores are installed INTO this app's dir (restore.sh) —
+#                                             no RetroArch in the deploy => the core set has nowhere to go
 COMPANION_PKG = "com.gamecove.gamecove_companion"   # the GameCove Companion app's package id. It's now a
 #   normal golden app (ticked in the app list); when it's in the manifest its captured module installs
 #   on-device via restore.sh, and the PC-side install below refreshes it to the current PC build.
@@ -601,8 +603,13 @@ def provision(adb, profile, log=print, dry_push=False, es_media_src=None):
 
     # RetroArch cores come from the PC CAS LIBRARY (cores_dir() = library_root()/retroarch-cores), NOT the
     # SD. Sourced from the library so the ~2.4GB set lives with the profiles, not beside the exe.
+    # ONLY when RetroArch is actually part of this deploy. restore.sh installs the cores into RetroArch's
+    # own app dir (app_uid com.retroarch.aarch64), so without it the ~2.3GB set has nowhere to land — it
+    # was pushed anyway on EVERY Download, costing ~9 min over a slow library drive to ship files the
+    # unit then discards (observed: a Companion + Steam Link deploy shipping all 206 cores).
     cores_src = _cfg.cores_dir()
-    push_cores = cores_src.exists() and any(cores_src.glob("*.so"))
+    push_cores = (RETROARCH_PKG in pkgs
+                  and cores_src.exists() and any(cores_src.glob("*.so")))
 
     pay_bytes = P.Profile(profile.path).golden_size() if hasattr(profile, "path") else 0
     t_push = time.monotonic()                          # time push+restore -> records bytes/sec for ETAs
