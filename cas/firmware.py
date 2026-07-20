@@ -8,6 +8,7 @@ A firmware is a directory under `_firmware/<id>/` with:
 DEVICE ROOT firmware only (handheld OS/boot images) — never emulator/app BIOS. CAS stores + advises;
 it never flashes.
 """
+import datetime
 import json
 import os
 import pathlib
@@ -556,6 +557,219 @@ def detect_build(src):
         "soc": _grep_value(imgs, "ro.soc.model="),
         "android_release": _grep_value(imgs, "ro.build.version.release="),
     }
+
+
+# EDL-only extras. The host tools and programmer are found via edl_tools(); these globs cover the
+# files no accessor returns directly but the flash still needs — the rawprogram XML init_boot_geometry()
+# parses, plus two reserved patterns that cost kilobytes: patch*.xml, and the *devprg*.melf programmer a
+# kalama EDL build would use (no build in the library uses one today, but slimming it away would be
+# silent and unrecoverable).
+_EDL_EXTRA_GLOBS = ("**/rawprogram*.xml", "**/patch*.xml", "**/*devprg*.melf", "**/prog_firehose*.elf")
+
+
+def essential_files(firmware, version=None):
+    """The set of payload files CAS actually reads for this build — everything else is archivable.
+
+    Derived by CALLING the accessors the flash path uses (stock_boot_image, edl_tools) rather than
+    re-deriving their globs. That is the load-bearing property: if the slim set were an independent
+    copy of those patterns, a later change to an accessor would start silently deleting files CAS had
+    begun to need, and the failure would only surface at a flash.
+
+    EDL builds additionally keep the whole Firehose toolchain. That is not an optimisation:
+    flash_method() DERIVES 'edl' from those tools being present, so dropping them flips the build to
+    'fastboot' and sends a unit whose bootloader cannot write to a doomed bootloader flash."""
+    pd = firmware.payload_dir(version)
+    if pd is None or not pd.is_dir():
+        return set()
+    keep = set()
+    stock = firmware.stock_boot_image(version)
+    if stock:
+        keep.add(stock)
+    if firmware.flash_method == "edl":
+        tools = firmware.edl_tools(version)
+        if tools:
+            keep.update(t for t in tools if t)
+        # Both host variants, not just the one edl_tools() picked for THIS machine: it prefers the
+        # host build and falls back to the other so a wrong-OS package still reports cleanly.
+        for stem in ("QSaharaServer", "fh_loader"):
+            keep.update(pd.glob(f"**/{stem}"))
+            keep.update(pd.glob(f"**/{stem}.exe"))
+        for pattern in _EDL_EXTRA_GLOBS:
+            keep.update(pd.glob(pattern))
+    return {p for p in keep if p.is_file()}
+
+
+def masters_root(root):
+    """Where full vendor packages are parked once a build is slimmed: <root's parent>/_firmware_masters.
+
+    Sited BESIDE _firmware/ rather than inside it, so list_firmware() and every rglob in this module
+    never walk it. Same volume as the library on purpose — the master move is then a filesystem
+    rename: atomic and instant, with no half-copied-multi-GB failure mode. Mirrors
+    initboot_store.store_root()'s layout so the two can't drift."""
+    return pathlib.Path(root).parent / "_firmware_masters"
+
+
+def _version_meta_path(firmware, version):
+    return firmware.path / "versions" / version / "version.meta.json"
+
+
+def _ensure_build_metadata(firmware, version, log):
+    """True once this build's fingerprint/chip are recorded. Captures them FIRST if missing.
+
+    Order matters and is the whole reason this exists: super_*/system_*.img are the ONLY place that
+    data lives, and slim is about to move them away. Capture before the move or lose it permanently —
+    and it is exactly the data that breaks auto-match ties (two builds claiming one chip tie to
+    'no match')."""
+    p = _version_meta_path(firmware, version)
+    meta = _read_json(p)
+    if str(meta.get("fingerprint") or "").strip() or str(meta.get("board_platform") or "").strip():
+        return True
+    pd = firmware.payload_dir(version)
+    # Reuse detect_build()'s own detectability test rather than re-globbing: a bare boot.img payload
+    # (odin2-default, odin3, retroid-pocket-5) can NEVER yield metadata no matter how long it scans.
+    if pd is None or not _payload_has_build_images(firmware, version):
+        return False
+    log("  capturing build metadata before the bulk moves (greps the super images — slow, one time)…")
+    try:
+        info = detect_build(pd)
+    except Exception as e:                                  # a malformed package must refuse, not raise
+        log(f"  metadata capture failed: {e}")
+        return False
+    for k in ("fingerprint", "board_platform", "soc", "android_release", "device", "dev_code",
+              "os_version", "storage"):
+        if str(info.get(k) or "").strip() and not str(meta.get(k) or "").strip():
+            meta[k] = info[k]
+    if not (str(meta.get("fingerprint") or "").strip() or str(meta.get("board_platform") or "").strip()):
+        return False
+    _write_json(p, meta)
+    log("  ✓ metadata captured.")
+    return True
+
+
+def _tree_stats(d):
+    files = [p for p in pathlib.Path(d).rglob("*") if p.is_file()]
+    return len(files), sum(p.stat().st_size for p in files)
+
+
+def slim(firmware, version=None, dry_run=False, log=print):
+    """Reduce a build's payload to only the files CAS flashes, parking the full package in
+    masters_root(). Returns a result dict; never raises for an expected refusal.
+
+    Nothing is ever deleted — the payload is MOVED and can be restored with unslim(). The operation
+    verifies itself: after rebuilding the payload it re-resolves stock_boot_image / edl_tools /
+    init_boot_geometry and rolls the master back if any of them regress, so a slim can never leave a
+    build that CAS can no longer flash."""
+    version = version or firmware.current()
+    res = {"slimmed": False, "moved_files": 0, "moved_bytes": 0, "kept": [], "reason": ""}
+    if not version:
+        res["reason"] = "no version"
+        return res
+    vmeta = _read_json(_version_meta_path(firmware, version))
+    if vmeta.get("slim"):
+        res["reason"] = "already slim"
+        return res
+    pd = firmware.payload_dir(version)
+    if pd is None or not pd.is_dir():
+        res["reason"] = "no payload"
+        return res
+
+    keep = essential_files(firmware, version)
+    if not keep or firmware.stock_boot_image(version) is None:
+        res["reason"] = "no stock boot image resolved — refusing to slim an unflashable build"
+        log(f"REFUSING: {res['reason']}")
+        return res
+
+    rel = sorted(p.relative_to(pd) for p in keep)
+    res["kept"] = [str(r) for r in rel]
+    n_files, n_bytes = _tree_stats(pd)
+    kept_bytes = sum(p.stat().st_size for p in keep)
+    res["moved_files"], res["moved_bytes"] = n_files - len(keep), n_bytes - kept_bytes
+
+    # "Nothing to move" is decided BEFORE the metadata gate. A bare boot.img payload (odin2-default,
+    # odin3, retroid-pocket-5) is already in the end state and has no super image to derive metadata
+    # from — demanding it there would report an alarming refusal for a build that needs no work.
+    if res["moved_files"] <= 0:
+        res["reason"] = "already minimal — nothing to move"
+        return res
+
+    # Dry run reports and stops BEFORE the metadata gate: that gate greps multi-GB super images and
+    # writes version.meta.json, and a preview of the whole library must touch nothing.
+    if dry_run:
+        log(f"  dry-run: would keep {len(keep)} file(s), move {res['moved_files']} "
+            f"({res['moved_bytes'] / 2**30:.2f} GB) to {masters_root(firmware.path.parent)}")
+        return res
+
+    if not _ensure_build_metadata(firmware, version, log):
+        res["reason"] = ("build metadata (fingerprint/chip) is missing and could not be derived from "
+                         "this payload — refusing to slim, because the images it would be derived "
+                         "from are what slim moves away")
+        log(f"REFUSING: {res['reason']}")
+        return res
+    # RE-READ: the gate above may have just written the captured fingerprint/chip into this same
+    # file. The copy loaded at the top of slim() is now stale, and stamping it back would silently
+    # erase the very metadata we captured.
+    vmeta = _read_json(_version_meta_path(firmware, version))
+
+    dest = masters_root(firmware.path.parent) / firmware.id / version / "payload"
+    if dest.exists():
+        res["reason"] = f"a master already exists at {dest} — refusing to overwrite it"
+        log(f"REFUSING: {res['reason']}")
+        return res
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(pd, dest)                       # same volume -> atomic rename, no copy
+    try:
+        pd.mkdir(parents=True)
+        for r in rel:
+            (pd / r).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(dest / r, pd / r)
+        fresh = Firmware(firmware.path)        # re-resolve through a clean read of the meta
+        if (fresh.stock_boot_image(version) is None
+                or (vmeta.get("flash_method") == "edl" and fresh.edl_tools(version) is None)):
+            raise RuntimeError("post-slim verification failed: CAS can no longer resolve what it flashes")
+    except Exception as e:
+        shutil.rmtree(pd, ignore_errors=True)  # roll the master back; leave the build exactly as found
+        os.replace(dest, pd)
+        res["reason"] = str(e)
+        log(f"ERROR: {e} — master restored, build unchanged.")
+        return res
+
+    vmeta.update({
+        "slim": True,
+        "master_at": str(pathlib.Path(dest).relative_to(masters_root(firmware.path.parent).parent)),
+        "removed_files": res["moved_files"],
+        "removed_bytes": res["moved_bytes"],
+        "slimmed_utc": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+    })
+    _write_json(_version_meta_path(firmware, version), vmeta)
+    res["slimmed"] = True
+    log(f"  ✓ slimmed {firmware.id}@{version}: kept {len(keep)} file(s), "
+        f"moved {res['moved_bytes'] / 2**30:.2f} GB to the master store.")
+    return res
+
+
+def unslim(firmware, version=None, log=print):
+    """Restore a slimmed build's full vendor package from masters_root(). The inverse of slim()."""
+    version = version or firmware.current()
+    res = {"restored": False, "reason": ""}
+    if not version:
+        res["reason"] = "no version"
+        return res
+    src = masters_root(firmware.path.parent) / firmware.id / version / "payload"
+    if not src.is_dir():
+        res["reason"] = f"no master package at {src}"
+        log(f"cannot restore: {res['reason']}")
+        return res
+    pd = firmware.payload_dir(version)
+    shutil.rmtree(pd, ignore_errors=True)      # the slim payload is a strict subset of the master
+    os.replace(src, pd)
+    vmeta = _read_json(_version_meta_path(firmware, version))
+    for k in ("slim", "master_at", "removed_files", "removed_bytes", "slimmed_utc"):
+        vmeta.pop(k, None)
+    vmeta["slim"] = False
+    _write_json(_version_meta_path(firmware, version), vmeta)
+    res["restored"] = True
+    log(f"  ✓ restored the full package for {firmware.id}@{version}.")
+    return res
 
 
 def ingest(src, root, firmware_id=None, label=None, match=None, copy=True):
