@@ -31,10 +31,10 @@ for d in $INTERNAL_DIRS; do
 done
 
 # 3) ES-DE must NOT be captured wholesale: its multi-GB tree rides the SD card; only es_settings.xml
-#    travels (targeted copy in capture.sh/restore.sh). Guard against a re-add that would double-capture.
+#    travels (targeted copy in capture.sh/restore.sh, located via esde_home()/esde_home_for() — see
+#    test_esde_settings.sh). Guard against a re-add that would double-capture.
 [ -z "$(internal_for org.es_de.frontend)" ] || { echo "FAIL: org.es_de.frontend must have NO internal_for() mapping (es_settings.xml is handled targeted)"; fail=1; }
 in_list "ES-DE" && { echo "FAIL: 'ES-DE' must NOT be in INTERNAL_DIRS (only es_settings.xml travels)"; fail=1; }
-[ "$ES_SETTINGS_PATH" = "/storage/emulated/0/ES-DE/settings/es_settings.xml" ] || { echo "FAIL: ES_SETTINGS_PATH wrong: '$ES_SETTINGS_PATH'"; fail=1; }
 
 [ "$fail" -eq 0 ] && echo "test_internal_dirs: ALL PASS" || echo "test_internal_dirs: FAILURES"
 exit "$fail"

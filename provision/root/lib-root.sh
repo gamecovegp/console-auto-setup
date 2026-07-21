@@ -34,14 +34,47 @@ payload_pkgs(){
 # the SD card by default; the ONLY per-unit ES-DE state that must travel is es_settings.xml (the per-system
 # alternative-emulator picks: 3DS→Citra, DS→melonDS, PS2→NetherSX2…), captured/restored as a single file.
 INTERNAL_DIRS="citra-emu RetroArch PSP"
-# The one internal ES-DE file the golden carries (the rest of ES-DE rides the SD card).
-ES_SETTINGS_PATH="/storage/emulated/0/ES-DE/settings/es_settings.xml"
+# WHERE ES-DE LIVES. ES-DE Android's home directory is a USER PICK, not a fixed path: the AYN Thor keeps
+# its whole tree (settings/scripts/downloaded_media) on the SD card, while the RP6 keeps it on internal
+# storage. This used to be a hardcoded /storage/emulated/0 constant, so on an SD-home unit capture's
+# `[ -f ]` test silently failed and the golden shipped with NO es_settings.xml — the ES-DE Companion's
+# event-script toggles were lost and every provisioned unit needed hand setup.
+# CAS_STORAGE_ROOT overrides /storage for off-device tests (same idiom as CAS_INST_DIR in install_apks).
+# esde_home [storage_root] — print this device's ES-DE dir; empty + rc 1 when there is none. External
+# volumes are probed FIRST (a handheld normally holds ES-DE on its card), internal last.
+esde_home(){
+  _eh_root="${1:-${CAS_STORAGE_ROOT:-/storage}}"
+  for _eh_d in "$_eh_root"/*/; do
+    _eh_d="${_eh_d%/}"; _eh_n="${_eh_d##*/}"
+    case "$_eh_n" in emulated|self|'*') continue;; esac
+    [ -d "$_eh_d/ES-DE/settings" ] && { echo "$_eh_d/ES-DE"; return 0; }
+  done
+  [ -d "$_eh_root/emulated/0/ES-DE/settings" ] && { echo "$_eh_root/emulated/0/ES-DE"; return 0; }
+  return 1
+}
+# esde_home_kind <dir> — which KIND of home that path is. Recorded in the golden's global.meta so restore
+# can resolve the same kind of location on a unit whose card has a DIFFERENT volume id.
+esde_home_kind(){ case "$1" in */emulated/0|*/emulated/0/*) echo internal;; *) echo sd;; esac; }
+# esde_home_for <kind> <sd_serial> [storage_root] — the ES-DE dir on THIS unit for a golden captured with
+# <kind>. RESTORE NEVER PROBES: it obeys the kind the golden recorded ("follow the golden"). Empty + rc 1
+# when the golden was SD-home and this unit has no card — the caller must warn and skip, never guess.
+esde_home_for(){
+  _ef_root="${3:-${CAS_STORAGE_ROOT:-/storage}}"
+  case "$1" in
+    internal) echo "$_ef_root/emulated/0/ES-DE"; return 0;;
+    sd) if [ -n "$2" ]; then echo "$_ef_root/$2/ES-DE"; return 0; fi; return 1;;
+  esac
+  return 1
+}
+# es_setting_value <key> <es_settings.xml> — the value="…" of one setting line (empty if absent OR empty).
+# es_settings.xml is a FLAT list of <type name=".." value=".." /> lines with no root wrapper.
+es_setting_value(){ sed -n "s/.*name=\"$1\"[[:space:]]*value=\"\([^\"]*\)\".*/\1/p" "$2" 2>/dev/null | head -1; }
 # Which shared internal-storage dir (if any) a package owns — restored only if the app is in the manifest.
 internal_for(){ case "$1" in
   org.citra.emu) echo "citra-emu";;
   com.retroarch.aarch64) echo "RetroArch";;
   org.ppsspp.ppsspp) echo "PSP";;      # PPSSPP memstick (config + saves) in shared storage
-  # ES-DE is handled separately (es_settings.xml only) — see ES_SETTINGS_PATH, capture.sh, restore.sh.
+  # ES-DE is handled separately (es_settings.xml only) — see esde_home()/esde_home_for(), capture.sh, restore.sh.
 esac; }
 # Manifest = app names (one per line) + "@flag value" lines + "#" comments. Both parsers are pure.
 manifest_pkgs(){ sed -e 's/#.*//' "$1" 2>/dev/null | grep -vE '^[[:space:]]*@' | awk '{sub(/\r$/,"")} NF{print $1}'; }
