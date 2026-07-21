@@ -1363,10 +1363,11 @@ class App:
         pending = []                                       # (manifest_path, pkgs, flags, axes, name)
         for name in names:
             prof = P.Profile(P.pathlib.Path(self.profiles_root) / name)
-            launcher_pkg = prof.launcher_pkg()
-            # the launcher isn't an app row — it's a device SYSTEM app (e.g. com.android.launcher3, never
-            # captured), and its homescreen rides the @homescreen behavior flag below.
-            own_pkgs = [p for p in prof.all_pkgs() if p != launcher_pkg]
+            # A SYSTEM launcher isn't an app row — it's a device app (e.g. com.android.launcher3, never
+            # captured), and its homescreen rides the @homescreen behavior flag below. But a launcher the
+            # golden CAPTURED (the Thor's xyz.blacksheep.mjolnir) is a real app: download_pkgs() keeps it,
+            # so its APK/Config stay tickable instead of collapsing into a "from store" row.
+            own_pkgs = prof.download_pkgs()
             store_pkgs = [a["pkg"] for a in P.list_store_apks(config.apk_store_dir())]
             # Golden-driven defaults: a captured app is pre-ticked (APK only if the golden bundled one —
             # config-only/sideloaded apps stay APK-off; Config only if it was captured); a store-only app

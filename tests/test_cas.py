@@ -4441,8 +4441,41 @@ class TestProfileLauncherAndAxes(unittest.TestCase):
         prof = P.Profile(d)
         self.assertEqual(prof.launcher_pkg(), "com.android.launcher3")
         self.assertIn("com.android.launcher3", prof.all_pkgs())     # appended for completeness
-        own = [p for p in prof.all_pkgs() if p != prof.launcher_pkg()]
-        self.assertNotIn("com.android.launcher3", own)              # …but excluded from the Download rows
+        self.assertNotIn("com.android.launcher3", prof.download_pkgs())   # …excluded from the Download rows
+
+    def test_download_pkgs_keeps_a_captured_home_app(self):
+        # The AYN Thor's HOME app is xyz.blacksheep.mjolnir — a USER-INSTALLED app the golden captured
+        # (apk/ + data.tar). Dropping every launcher_pkg from the Download rows made it fall through to
+        # the store-only branch: listed "· from store" with its Config checkbox DISABLED, so the captured
+        # config could never be restored. A launcher the golden captured is a real app row.
+        d = pathlib.Path(tempfile.mkdtemp())
+        pay = d / "golden_root_payload"
+        (pay / "homescreen").mkdir(parents=True)
+        (pay / "xyz.blacksheep.mjolnir" / "apk").mkdir(parents=True)
+        (pay / "xyz.blacksheep.mjolnir" / "apk" / "base.apk").write_text("x")
+        (pay / "xyz.blacksheep.mjolnir" / "data.tar").write_text("x")
+        (pay / "pkglist.txt").write_text("com.foo\nxyz.blacksheep.mjolnir\n")
+        (pay / "homescreen" / "meta").write_text("launcher_pkg=xyz.blacksheep.mjolnir\n")
+        prof = P.Profile(d)
+        self.assertIn("xyz.blacksheep.mjolnir", prof.download_pkgs())
+        # …and the modal rows must offer BOTH axes on (nothing disabled) for it.
+        own = prof.download_pkgs()
+        rows, cfg_disabled = P.download_rows(
+            own, ["xyz.blacksheep.mjolnir"],                        # also in the APK store
+            {p: prof.has_captured_apk(p) for p in own}, {p: prof.has_captured_config(p) for p in own})
+        self.assertEqual(rows["xyz.blacksheep.mjolnir"], (True, True))
+        self.assertNotIn("xyz.blacksheep.mjolnir", cfg_disabled)
+
+    def test_download_pkgs_drops_an_uncaptured_system_launcher(self):
+        # The other side of the same rule: a SYSTEM launcher (com.android.launcher3) has no payload of its
+        # own — it isn't installable and its layout rides @homescreen — so it stays out of the app rows.
+        d = pathlib.Path(tempfile.mkdtemp())
+        pay = d / "golden_root_payload"
+        (pay / "homescreen").mkdir(parents=True)
+        (pay / "pkglist.txt").write_text("com.foo\n")
+        (pay / "homescreen" / "meta").write_text("launcher_pkg=com.android.launcher3\n")
+        prof = P.Profile(d)
+        self.assertEqual(prof.download_pkgs(), ["com.foo"])
 
     def test_axes_reads_manifest_tokens(self):
         d = pathlib.Path(tempfile.mkdtemp())

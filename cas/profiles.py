@@ -442,6 +442,20 @@ class Profile:
             pkgs.append(lp)
         return pkgs
 
+    def download_pkgs(self):
+        """The app rows the Download modal offers: all_pkgs() minus the HOME launcher ONLY when the golden
+        captured nothing for it — i.e. a SYSTEM launcher (com.android.launcher3 & co), which isn't
+        installable and whose layout rides @homescreen instead.
+        A USER-INSTALLED home app is a different animal: the AYN Thor ships xyz.blacksheep.mjolnir as HOME,
+        Save captures it like any other app (apk/base.apk + data.tar), yet dropping every launcher_pkg here
+        pushed it into the store-only branch — listed "· from store" with Config DISABLED, so its captured
+        config was unreachable. The payload is the ground truth, mirroring Save's rule (which drops only a
+        launcher absent from the device's user-app scan)."""
+        lp = self.launcher_pkg()
+        if lp and not (self.has_captured_apk(lp) or self.has_captured_config(lp)):
+            return [p for p in self.all_pkgs() if p != lp]
+        return self.all_pkgs()
+
     def has_captured_apk(self, pkg):
         """True if the golden bundled an installable APK for pkg (golden_root_payload/<pkg>/apk/*.apk).
         False for store-only (managed) apps and config-only captures (APK sideloaded externally)."""
