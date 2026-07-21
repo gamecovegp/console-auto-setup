@@ -90,5 +90,39 @@ eq "esv empty"  "$(es_setting_value MediaDirectory "$esv")"     ""
 eq "esv path"   "$(es_setting_value ROMDirectory "$esv")"       "/storage/GOLD-1234/ROMs"
 eq "esv absent" "$(es_setting_value NoSuchKey "$esv")"          ""
 
+# esde_home with NO ARGUMENT — the shape capture.sh actually calls in production (every positional-arg
+# assertion above passes storage_root explicitly, which never exercises the CAS_STORAGE_ROOT/default path).
+noargroot="$tmp/noargunit"; mkdir -p "$noargroot/9C33-6BBD/ES-DE/settings" "$noargroot/emulated/0"
+CAS_STORAGE_ROOT="$noargroot"; export CAS_STORAGE_ROOT
+eq "esde_home no-arg" "$(esde_home)" "$noargroot/9C33-6BBD/ES-DE"
+unset CAS_STORAGE_ROOT
+
+# --- capture side: record the kind, tar the scripts tree ----------------------------------------------
+# The golden carries the ES-DE/scripts/ tree (the 7 esdecompanion-*.sh hooks) so a unit provisions even
+# when its SD image predates the Companion setup. Replicates capture.sh's snippet against a temp tree.
+gsd="$tmp/golden"; mkdir -p "$gsd/9C33-6BBD/ES-DE/settings" "$gsd/emulated/0"
+GH="$gsd/9C33-6BBD/ES-DE"
+printf '%s\n' '<bool name="CustomEventScripts" value="true" />' > "$GH/settings/es_settings.xml"
+for ev in game-start game-end game-select system-select \
+          screensaver-start screensaver-end screensaver-game-select; do
+  mkdir -p "$GH/scripts/$ev"; printf '#!/bin/sh\n' > "$GH/scripts/$ev/esdecompanion-$ev.sh"
+done
+PAY="$tmp/pay"; mkdir -p "$PAY"; printf 'golden_serial=9C33-6BBD\n' > "$PAY/global.meta"
+
+ESDE_HOME="$(esde_home "$gsd")"
+[ -n "$ESDE_HOME" ] && echo "esde_home=$(esde_home_kind "$ESDE_HOME")" >> "$PAY/global.meta"
+[ -n "$ESDE_HOME" ] && [ -f "$ESDE_HOME/settings/es_settings.xml" ] && cp "$ESDE_HOME/settings/es_settings.xml" "$PAY/es_settings.xml"
+if [ -n "$ESDE_HOME" ] && [ -d "$ESDE_HOME/scripts" ] && [ -n "$(ls -A "$ESDE_HOME/scripts" 2>/dev/null)" ]; then
+  tar -cf "$PAY/es_scripts.tar" -C "$ESDE_HOME" scripts 2>/dev/null
+fi
+
+eq "capture kind" "$(sed -n 's/^esde_home=//p' "$PAY/global.meta")" "sd"
+[ -f "$PAY/es_settings.xml" ] || { echo "FAIL: es_settings.xml not captured from the SD home"; fail=1; }
+[ -f "$PAY/es_scripts.tar" ] || { echo "FAIL: es_scripts.tar not captured"; fail=1; }
+n="$(tar -tf "$PAY/es_scripts.tar" 2>/dev/null | grep -c 'esdecompanion-.*\.sh$')"
+eq "captured hooks" "$n" "7"
+# the golden_serial line the existing pipeline depends on must survive the append
+grep -q '^golden_serial=9C33-6BBD$' "$PAY/global.meta" || { echo "FAIL: global.meta clobbered"; fail=1; }
+
 [ "$fail" -eq 0 ] && echo "test_esde_settings: ALL PASS" || echo "test_esde_settings: FAILURES"
 exit "$fail"

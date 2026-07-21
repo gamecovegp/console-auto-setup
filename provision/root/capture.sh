@@ -30,6 +30,11 @@ mk_tar(){ out="$1"; cdir="$2"; member="$3"; shift 3
   echo "golden_tz=$(getprop persist.sys.timezone 2>/dev/null)"
   echo "golden_locale=$(getprop persist.sys.locale 2>/dev/null)"
 } > "$P/global.meta"
+# WHERE THIS GOLDEN KEEPS ES-DE (sd | internal). Restore resolves the same KIND of location on the unit
+# rather than probing it — "follow the golden". Omitted when the golden has no ES-DE tree at all, and
+# restore reads an absent key as "internal", which is exactly how every pre-2026-07-21 golden behaved.
+ESDE_HOME="$(esde_home)"
+[ -n "$ESDE_HOME" ] && echo "esde_home=$(esde_home_kind "$ESDE_HOME")" >> "$P/global.meta"
 # the app set we clone: the manifest's pkgs when a selection was passed (SELECTIVE capture), else ALL
 # 3rd-party minus host tools. A SYSTEM default launcher (e.g. com.android.launcher3) rides @homescreen
 # below, NOT this loop, so it is filtered out of the per-app set even when the manifest lists it — its
@@ -108,13 +113,31 @@ for d in $INTERNAL_DIRS; do
         -C /storage/emulated/0 "$d" 2>/dev/null \
     && ok "captured internal:$d config ($(du -sh "$P/internal_$d.tar" 2>/dev/null | cut -f1))"
 done
-# ES-DE: capture ONLY es_settings.xml (the per-system alternative-emulator picks + frontend settings). The
-# rest of the ES-DE tree (gamelists/themes/box art) rides the SD card, so we do NOT tar the multi-GB tree —
-# just this one internal file, which internal storage would otherwise lose on a factory reset / fresh unit.
-if [ -f "$ES_SETTINGS_PATH" ]; then
-  cp "$ES_SETTINGS_PATH" "$P/es_settings.xml" \
-    && ok "captured ES-DE es_settings.xml (emulator-per-system picks; $(du -h "$P/es_settings.xml" 2>/dev/null | cut -f1))" \
-    || warn "could not capture ES-DE es_settings.xml"
+# ES-DE: capture es_settings.xml (the per-system alternative-emulator picks + frontend settings, incl. the
+# CustomEventScripts / CustomEventScriptsBrowsing toggles the ES-DE Companion needs) and the scripts/ tree
+# (the Companion's 7 event hooks). NOT the multi-GB gamelists/themes/box-art tree — that rides the SD.
+# Read from wherever ES-DE actually lives; the old hardcoded internal path captured NOTHING on the Thor.
+if [ -z "$ESDE_HOME" ]; then
+  log "ES-DE: no ES-DE home found on this golden — nothing to capture"
+else
+  if [ -f "$ESDE_HOME/settings/es_settings.xml" ]; then
+    cp "$ESDE_HOME/settings/es_settings.xml" "$P/es_settings.xml" \
+      && ok "captured ES-DE es_settings.xml from $ESDE_HOME ($(du -h "$P/es_settings.xml" 2>/dev/null | cut -f1))" \
+      || warn "could not capture ES-DE es_settings.xml"
+  else
+    warn "ES-DE: $ESDE_HOME/settings/es_settings.xml missing — frontend settings NOT captured"
+  fi
+  # custom event scripts — tiny, and they make the golden self-contained: a unit whose SD image predates
+  # the Companion setup still comes up with the hooks in place. Skipped when the dir is absent or EMPTY
+  # (same rule as the INTERNAL_DIRS loop, so we never ship an empty dir that restore would recreate).
+  if [ -d "$ESDE_HOME/scripts" ] && [ -n "$(ls -A "$ESDE_HOME/scripts" 2>/dev/null)" ]; then
+    tar -cf "$P/es_scripts.tar" -C "$ESDE_HOME" scripts 2>/dev/null
+    if tar -tf "$P/es_scripts.tar" >/dev/null 2>&1; then
+      ok "captured ES-DE custom event scripts ($(tar -tf "$P/es_scripts.tar" 2>/dev/null | grep -c '\.sh$') script(s))"
+    else
+      warn "ES-DE es_scripts.tar looks corrupt — custom event scripts NOT captured"; rm -f "$P/es_scripts.tar"
+    fi
+  fi
 fi
 # device-experience settings: full dumps for reference; restore applies the safe allowlist (lib-root.sh).
 # Gated by @settings in the capture-manifest (default on; off = this golden carries no display settings).
