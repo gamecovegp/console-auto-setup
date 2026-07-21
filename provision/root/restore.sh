@@ -255,6 +255,18 @@ if echo "$RPKGS" | grep -q org.es_de.frontend && [ -f "$ES_SET" ]; then
   else
     warn "ES-DE ROMs: no SD serial — ROMDirectory left at default (ES-DE may re-prompt for the ROM folder)."
   fi
+
+  # The ES-DE Companion works ONLY through ES-DE's custom event scripts. If we are installing it but the
+  # golden's es_settings.xml does not enable them, the unit ships with a Companion that never fires —
+  # which is exactly how this shipped once. Surface it during the run, don't fail the unit (the operator
+  # may be provisioning a golden that legitimately has ES-DE without the Companion configured yet).
+  if echo "$RPKGS" | grep -q com.esde.companion; then
+    if [ "$(es_setting_value CustomEventScripts "$ES_SET")" = true ]; then
+      ok "ES-DE custom event scripts enabled (ES-DE Companion will fire)"
+    else
+      warn "ES-DE Companion is being installed but the golden's es_settings.xml does NOT enable CustomEventScripts — its event scripts will never fire. Re-Save the golden with the Companion set up."
+    fi
+  fi
 fi
 
 # 3) RetroArch cores: bulk-copy the arm64 .so set into the internal (exec-able) cores dir.

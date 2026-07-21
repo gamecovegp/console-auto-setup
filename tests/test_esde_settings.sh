@@ -187,5 +187,19 @@ f="$tmp/r_sd_rom.xml"; printf '%s\n' '<string name="ROMDirectory" value="" />' >
 rewrite "$f" sd "$U" ROMDirectory "/storage/$U/ROMs"
 eq "sd+empty ROMDirectory stays empty" "$(es_setting_value ROMDirectory "$f")" ""
 
+# --- guard: Companion restored, but the golden never enabled its event scripts ------------------------
+companion_guard(){ # $1 = es_settings.xml, $2 = RPKGS -> echoes the warning text, or nothing
+  echo "$2" | grep -q com.esde.companion || return 0
+  [ "$(es_setting_value CustomEventScripts "$1")" = true ] && return 0
+  echo "WARN"
+}
+f="$tmp/g_off.xml"; printf '%s\n' '<bool name="CustomEventScripts" value="false" />' > "$f"
+eq "guard fires when off"  "$(companion_guard "$f" 'org.es_de.frontend com.esde.companion')" "WARN"
+f="$tmp/g_on.xml";  printf '%s\n' '<bool name="CustomEventScripts" value="true" />'  > "$f"
+eq "guard silent when on"  "$(companion_guard "$f" 'org.es_de.frontend com.esde.companion')" ""
+eq "guard silent w/o companion" "$(companion_guard "$f" 'org.es_de.frontend')" ""
+f="$tmp/g_absent.xml"; : > "$f"
+eq "guard fires when key absent" "$(companion_guard "$f" 'com.esde.companion')" "WARN"
+
 [ "$fail" -eq 0 ] && echo "test_esde_settings: ALL PASS" || echo "test_esde_settings: FAILURES"
 exit "$fail"
