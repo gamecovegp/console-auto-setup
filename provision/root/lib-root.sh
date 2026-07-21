@@ -42,14 +42,18 @@ INTERNAL_DIRS="citra-emu RetroArch PSP"
 # CAS_STORAGE_ROOT overrides /storage for off-device tests (same idiom as CAS_INST_DIR in install_apks).
 # esde_home [storage_root] — print this device's ES-DE dir; empty + rc 1 when there is none. External
 # volumes are probed FIRST (a handheld normally holds ES-DE on its card), internal last.
+# Probes for the SETTINGS FILE, not just the settings/ directory: these handhelds ship "android-setup" SD
+# cards preloaded with an empty ES-DE/settings/ tree, so an internal-home unit (e.g. the RP6) whose card
+# carries that stale dir but no es_settings.xml must still resolve internal — a directory with nothing in
+# it is not a home worth following (see the "esde_home tests for a directory" regression).
 esde_home(){
   _eh_root="${1:-${CAS_STORAGE_ROOT:-/storage}}"
   for _eh_d in "$_eh_root"/*/; do
     _eh_d="${_eh_d%/}"; _eh_n="${_eh_d##*/}"
     case "$_eh_n" in emulated|self|'*') continue;; esac
-    [ -d "$_eh_d/ES-DE/settings" ] && { echo "$_eh_d/ES-DE"; return 0; }
+    [ -f "$_eh_d/ES-DE/settings/es_settings.xml" ] && { echo "$_eh_d/ES-DE"; return 0; }
   done
-  [ -d "$_eh_root/emulated/0/ES-DE/settings" ] && { echo "$_eh_root/emulated/0/ES-DE"; return 0; }
+  [ -f "$_eh_root/emulated/0/ES-DE/settings/es_settings.xml" ] && { echo "$_eh_root/emulated/0/ES-DE"; return 0; }
   return 1
 }
 # esde_home_kind <dir> — which KIND of home that path is. Recorded in the golden's global.meta so restore

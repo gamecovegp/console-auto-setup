@@ -30,11 +30,6 @@ mk_tar(){ out="$1"; cdir="$2"; member="$3"; shift 3
   echo "golden_tz=$(getprop persist.sys.timezone 2>/dev/null)"
   echo "golden_locale=$(getprop persist.sys.locale 2>/dev/null)"
 } > "$P/global.meta"
-# WHERE THIS GOLDEN KEEPS ES-DE (sd | internal). Restore resolves the same KIND of location on the unit
-# rather than probing it — "follow the golden". Omitted when the golden has no ES-DE tree at all, and
-# restore reads an absent key as "internal", which is exactly how every pre-2026-07-21 golden behaved.
-ESDE_HOME="$(esde_home)"
-[ -n "$ESDE_HOME" ] && echo "esde_home=$(esde_home_kind "$ESDE_HOME")" >> "$P/global.meta"
 # the app set we clone: the manifest's pkgs when a selection was passed (SELECTIVE capture), else ALL
 # 3rd-party minus host tools. A SYSTEM default launcher (e.g. com.android.launcher3) rides @homescreen
 # below, NOT this loop, so it is filtered out of the per-app set even when the manifest lists it — its
@@ -117,13 +112,23 @@ done
 # CustomEventScripts / CustomEventScriptsBrowsing toggles the ES-DE Companion needs) and the scripts/ tree
 # (the Companion's 7 event hooks). NOT the multi-GB gamelists/themes/box-art tree — that rides the SD.
 # Read from wherever ES-DE actually lives; the old hardcoded internal path captured NOTHING on the Thor.
+ESDE_HOME="$(esde_home)"
 if [ -z "$ESDE_HOME" ]; then
   log "ES-DE: no ES-DE home found on this golden — nothing to capture"
 else
   if [ -f "$ESDE_HOME/settings/es_settings.xml" ]; then
-    cp "$ESDE_HOME/settings/es_settings.xml" "$P/es_settings.xml" \
-      && ok "captured ES-DE es_settings.xml from $ESDE_HOME ($(du -h "$P/es_settings.xml" 2>/dev/null | cut -f1))" \
-      || warn "could not capture ES-DE es_settings.xml"
+    # WHERE THIS GOLDEN KEEPS ES-DE (sd | internal), recorded ONLY once the settings file actually lands in
+    # the payload — never record a kind for a home that yielded nothing (a cp failure here, e.g. a full/
+    # read-only SD, must not leave restore trusting a kind with no es_settings.xml behind it). Restore
+    # resolves the same KIND of location on the unit rather than probing it — "follow the golden". Omitted
+    # when the golden has no ES-DE tree at all; restore reads an absent key as "internal", which is exactly
+    # how every pre-2026-07-21 golden behaved.
+    if cp "$ESDE_HOME/settings/es_settings.xml" "$P/es_settings.xml"; then
+      echo "esde_home=$(esde_home_kind "$ESDE_HOME")" >> "$P/global.meta"
+      ok "captured ES-DE es_settings.xml from $ESDE_HOME ($(du -h "$P/es_settings.xml" 2>/dev/null | cut -f1))"
+    else
+      warn "could not capture ES-DE es_settings.xml"
+    fi
   else
     warn "ES-DE: $ESDE_HOME/settings/es_settings.xml missing — frontend settings NOT captured"
   fi

@@ -6,7 +6,11 @@
 - **Scope:** Make CAS capture and restore ES-DE's frontend config from wherever ES-DE actually lives on a
   given unit — the SD card on the AYN Thor, internal storage on the RP6 — and carry the `ES-DE/scripts/`
   tree so the ES-DE Companion works on a provisioned unit without hand setup.
-- **Shell-only.** No GUI, no Python, no new capture-manifest flag.
+- **Device-side shell, plus one PC-side wire-up.** The capture/restore logic itself is shell-only; the two
+  new top-level payload files (`es_settings.xml`, `es_scripts.tar`) still have to cross from PC to device
+  like every other captured artefact, which needed a one-line addition to the file-push tuple in
+  `cas/provision.py` (see the code review that caught this omission before it shipped). No GUI, no new
+  capture-manifest flag.
 
 ---
 
@@ -31,7 +35,7 @@ that internal path does not exist there. Evidence gathered 2026-07-21:
 | Thor's ES-DE home is the SD: `/storage/9C33-6BBD/ES-DE/{settings,scripts,downloaded_media,…}` | live unit `8ea3d1aa` |
 | `/storage/emulated/0/ES-DE/` does not exist on that unit | `ls` → "No such file or directory" |
 | Capture's `if [ -f "$ES_SETTINGS_PATH" ]` therefore silently skipped — the golden has **no `es_settings.xml`** | `ayn-thor-512/golden_root_payload/` listing: `global.meta`, `homescreen`, `internal_*.tar`, `settings`, `urigrants.xml`, `wifi`, per-app dirs — no `es_settings.xml` |
-| Restore wrote `MediaDirectory`/`ROMDirectory` into an internal file ES-DE never reads | live SD copy still shows `MediaDirectory value=""`, untouched by restore |
+| Restore's `[ -f "$ES_SET" ]` guard was false (that internal path never existed), so restore wrote **nothing** — not, as first read, that it wrote `MediaDirectory`/`ROMDirectory` into an internal file ES-DE never reads | `ls /storage/emulated/0/ES-DE` → "No such file or directory"; the golden's own SD copy still shows `MediaDirectory value=""`, confirming restore never touched it |
 | The Companion's integration is 7 hooks: `ES-DE/scripts/<event>/esdecompanion-<event>.sh` | live SD (`game-start`, `game-end`, `game-select`, `system-select`, 3 × `screensaver-*`) |
 | Both toggles are plain lines in `es_settings.xml` | live file: `<bool name="CustomEventScripts" value="true" />`, `<bool name="CustomEventScriptsBrowsing" value="true" />` |
 
@@ -40,7 +44,11 @@ The Companion's file access is **not** part of the gap: it declares `MANAGE_EXTE
 live unit.
 
 **Root cause in one line:** CAS assumes ES-DE's home is internal storage; on an SD-home unit the golden
-captures nothing and the restore writes to a file nobody reads.
+captures nothing, and restore's own `[ -f "$ES_SET" ]` guard is therefore false, so it writes nothing at
+all — the conclusion (this unit's ES-DE config never lands) held, but the mechanism was misread as restore
+writing into a file ES-DE ignores. That misreading is what hid the actual push gap Critical 1 later found:
+once this design made `es_settings.xml`/`es_scripts.tar` real payload files, nobody had checked whether the
+PC side actually delivered them to the device.
 
 ---
 

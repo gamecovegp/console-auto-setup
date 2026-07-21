@@ -189,8 +189,12 @@ ES_SET="$ES_HOME/settings/es_settings.xml"
 if [ -z "$ES_HOME" ]; then
   # SD-home golden, card-less unit. Cannot guess a location: writing to internal would produce a file
   # ES-DE never reads (the exact bug this whole change fixes). Warn loudly and skip — not a FAIL, a
-  # card-less unit legitimately cannot host an SD-home ES-DE.
-  warn "ES-DE: golden is SD-home but this unit has no SD card — frontend settings and custom event scripts NOT restored"
+  # card-less unit legitimately cannot host an SD-home ES-DE. Gated on org.es_de.frontend actually being
+  # restored (same test the sibling branch below uses) — a Companion-only deploy onto a card-less unit has
+  # no ES-DE in play at all, so this would otherwise print a confusing warning about a frontend that was
+  # never part of the deploy.
+  echo "$RPKGS" | grep -q org.es_de.frontend && \
+    warn "ES-DE: golden is SD-home but this unit has no SD card — frontend settings and custom event scripts NOT restored"
 elif echo "$RPKGS" | grep -q org.es_de.frontend; then
   # 2c-pre) the golden's es_settings.xml: per-system alternative-emulator picks (3DS→Citra, DS→melonDS,
   # PS2→NetherSX2…) AND the CustomEventScripts/CustomEventScriptsBrowsing toggles the Companion needs.
@@ -205,25 +209,37 @@ elif echo "$RPKGS" | grep -q org.es_de.frontend; then
     else warn "ES-DE es_settings.xml restore failed"; FAIL=$((FAIL+1)); fi
   fi
   # the Companion's custom event scripts — self-contained golden: the unit gets the hooks even if its SD
-  # image predates the Companion setup.
+  # image predates the Companion setup. Pre-validate like every other tar in this file (a truncated tar
+  # must be DETECTED, not silently extracted as a partial hook set).
   if [ -f "$P/es_scripts.tar" ]; then
-    mkdir -p "$ES_HOME"
-    if tar -xf "$P/es_scripts.tar" -C "$ES_HOME" 2>/dev/null; then
-      [ "$EHK" = internal ] && relabel -R "$ES_HOME/scripts"
-      ok "restored ES-DE custom event scripts -> $ES_HOME/scripts"
-    else warn "ES-DE custom event scripts extract failed — the Companion's hooks will be missing"; fi
+    if ! tar -tf "$P/es_scripts.tar" >/dev/null 2>&1; then
+      warn "ES-DE es_scripts.tar corrupt/truncated — custom event scripts NOT restored"
+    else
+      mkdir -p "$ES_HOME"
+      if tar -xf "$P/es_scripts.tar" -C "$ES_HOME" 2>/dev/null; then
+        [ "$EHK" = internal ] && relabel -R "$ES_HOME/scripts"
+        ok "restored ES-DE custom event scripts -> $ES_HOME/scripts"
+      else warn "ES-DE custom event scripts extract failed — the Companion's hooks will be missing"; fi
+    fi
   fi
 fi
-if echo "$RPKGS" | grep -q org.es_de.frontend && [ -f "$ES_SET" ]; then
+# ES_HOME can be empty (SD-home golden, card-less unit — warned above); make that explicit rather than
+# relying on the accident that an empty ES_HOME degenerates ES_SET to the absolute path
+# "/settings/es_settings.xml", which just happens not to exist on Android.
+if [ -n "$ES_HOME" ] && echo "$RPKGS" | grep -q org.es_de.frontend && [ -f "$ES_SET" ]; then
   case "${CAS_ES_MEDIA:-sd}" in
     internal) MEDIA_DIR="/storage/emulated/0/ES-DE/downloaded_media";;
     *)        [ -n "$SERIAL" ] && MEDIA_DIR="/storage/$SERIAL/ES-DE/downloaded_media" || MEDIA_DIR="";;
   esac
   if [ -n "$MEDIA_DIR" ]; then
-    # An SD-home golden that left this EMPTY is already correct: ES-DE resolves an empty MediaDirectory
-    # inside its own home, which IS this unit's card. Forcing an absolute path there would bake one
-    # unit's volume id into every clone. Only re-point a value that actually carries the GOLDEN's id.
-    if [ "$EHK" = internal ] || [ -n "$(es_setting_value MediaDirectory "$ES_SET")" ]; then
+    # An SD-home golden that left this EMPTY is already correct ONLY when the target IS this card
+    # (CAS_ES_MEDIA=sd, the default): ES-DE then resolves an empty MediaDirectory inside its own home,
+    # which IS this unit's card. Forcing an absolute path there would bake one unit's volume id into every
+    # clone. But CAS_ES_MEDIA=internal pushes box art to internal storage regardless of where ES-DE's home
+    # is — leaving MediaDirectory empty in that mode makes ES-DE resolve it inside the SD home instead and
+    # it never finds the art the PC just pushed, so an empty value must NOT be preserved there. Also
+    # re-point a value that actually carries the GOLDEN's id.
+    if [ "$EHK" = internal ] || [ "${CAS_ES_MEDIA:-sd}" != sd ] || [ -n "$(es_setting_value MediaDirectory "$ES_SET")" ]; then
       sed '/name="MediaDirectory"/d' "$ES_SET" > "$ES_SET.cas" 2>/dev/null && mv "$ES_SET.cas" "$ES_SET"  # portable in-place (BSD `sed -i` reads the script as a suffix)
       [ -s "$ES_SET" ] && [ -n "$(tail -c1 "$ES_SET" 2>/dev/null)" ] && printf '\n' >> "$ES_SET"  # ensure EOL
       printf '<string name="MediaDirectory" value="%s" />\n' "$MEDIA_DIR" >> "$ES_SET"

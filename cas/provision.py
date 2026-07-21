@@ -711,7 +711,14 @@ def provision(adb, profile, log=print, dry_push=False, es_media_src=None):
             log(f"pushing module {i}/{len(pay_pkgs)}: {pkg}")
             if not _push_dir(adb, push, pay / pkg, f"{DEV}/payload", log):
                 return False
-        for f in ("global.meta", "pkglist.txt", "urigrants.xml"):
+        # es_settings.xml (ES-DE's per-system alternative-emulator picks + the Companion's CustomEventScripts
+        # toggle) and es_scripts.tar (the Companion's 7 event hooks) are top-level payload FILES captured by
+        # capture.sh alongside global.meta/pkglist.txt/urigrants.xml — they must ride the same single-file
+        # push loop or restore.sh's `[ -f "$P/es_settings.xml" ]` / `[ -f "$P/es_scripts.tar" ]` checks are
+        # always false and the golden's ES-DE settings + Companion hooks are silently dropped on every
+        # Download (see tests/test_cas.py::test_provision_pushes_every_top_level_capture_artifact for the
+        # structural guard against this ever happening again for a FUTURE top-level artefact).
+        for f in ("global.meta", "pkglist.txt", "urigrants.xml", "es_settings.xml", "es_scripts.tar"):
             if (pay / f).exists() and not push(pay / f, f"{DEV}/payload/"):
                 return False
         if (pay / "settings").is_dir() and not _push_dir(adb, push, pay / "settings", f"{DEV}/payload", log):

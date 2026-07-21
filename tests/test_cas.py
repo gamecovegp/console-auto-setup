@@ -1730,6 +1730,69 @@ class TestProvision(unittest.TestCase):
                     self.assertFalse(os.path.isdir(src),
                                      f"pushed a DIRECTORY (0-byte on Windows): {src}")
 
+    def test_provision_pushes_the_captured_esde_settings_and_scripts(self):
+        # ROOT-CAUSE REGRESSION (final review, Critical 1) — capture.sh writes es_settings.xml (ES-DE's
+        # per-system alternative-emulator picks + the Companion's CustomEventScripts toggle) and
+        # es_scripts.tar (the Companion's 7 event hooks) as top-level files in golden_root_payload/, but the
+        # Download push loop's file tuple never named them — so restore.sh's `[ -f "$P/es_settings.xml" ]` /
+        # `[ -f "$P/es_scripts.tar" ]` checks were ALWAYS false on a real Download and the golden's ES-DE
+        # settings + Companion hooks were silently dropped on EVERY unit. es_settings.xml has read this way
+        # since the very first commit (8aa3aca) — exactly modelled on
+        # test_provision_pushes_the_captured_wifi_store, the wifi/ dir's own instance of this bug class.
+        with tempfile.TemporaryDirectory() as t:
+            prof = make_profile(t)
+            (prof.payload / "es_settings.xml").write_text(
+                '<bool name="CustomEventScripts" value="true" />\n')
+            (prof.payload / "es_scripts.tar").write_bytes(b"not a real tar, just needs to exist for this test")
+            r = FakeRunner()
+            ok = PV.provision(Adb(runner=r), prof, log=lambda m: None)   # real (non-dry) push path
+            self.assertTrue(ok)
+            pushed_names = set()
+            for c in r.calls:
+                if "push" in c:
+                    pushed_names.add(pathlib.Path(c[c.index("push") + 1]).name)
+            self.assertIn("es_settings.xml", pushed_names, "captured es_settings.xml was NOT pushed")
+            self.assertIn("es_scripts.tar", pushed_names, "captured es_scripts.tar was NOT pushed")
+
+    def test_provision_pushes_every_top_level_capture_artifact(self):
+        # STRUCTURAL GUARD for the Critical-1 bug class: any FILE capture.sh writes as a direct child of the
+        # payload root ($P/<name>, e.g. "$P/es_settings.xml") must be named in provision.py's single-file
+        # push tuple, or restore.sh will never see it. Parses capture.sh's OWN source for `"$P/<literal>"`
+        # writes (a name containing a shell variable — e.g. "$P/internal_$d.tar" — is a PATTERN family
+        # delivered by a SEPARATE per-package mechanism keyed on profiles.internal_for(), not this tuple, and
+        # is naturally excluded because the regex requires a literal run of chars up to the closing quote).
+        # A top-level DIRECTORY (settings/, homescreen/, gamelauncher/, wifi/) is delivered by _push_dir
+        # instead — excluded via the same names provision.py itself gates its directory pushes on. This way
+        # a FUTURE new top-level payload artefact added to capture.sh without being wired into provision.py's
+        # push logic fails THIS test immediately, instead of silently vanishing on every Download like
+        # es_settings.xml/es_scripts.tar did.
+        root = pathlib.Path(__file__).resolve().parent.parent
+        capture_src = (root / "provision" / "root" / "capture.sh").read_text()
+        provision_src = (root / "cas" / "provision.py").read_text()
+
+        # every literal "$P/<name>" the script writes, where <name> has no further "/" and no "$" (a "$"
+        # mid-name means the value is built from a shell variable, e.g. $pkg or $d -- not one fixed file).
+        literal_children = set(re.findall(r'\$P/([A-Za-z0-9_.]+)"', capture_src))
+        # top-level DIRECTORIES capture.sh creates under $P: cross-checked directly from provision.py's own
+        # `(pay / "NAME").is_dir()` directory-push gates, so this exclusion list self-updates with the code
+        # it is guarding rather than being a second hand-maintained list.
+        known_dirs = set(re.findall(r'pay / "([A-Za-z0-9_.]+)"\)\.is_dir\(\)', provision_src))
+        top_level_files = literal_children - known_dirs
+        self.assertTrue(
+            {"es_settings.xml", "es_scripts.tar", "global.meta", "pkglist.txt", "urigrants.xml"}
+            <= top_level_files,
+            f"regex extraction drifted from capture.sh's real top-level files: {sorted(top_level_files)}")
+
+        # the single-file push tuple: `for f in ("global.meta", "pkglist.txt", ...):`
+        m = re.search(r'for f in \(([^)]*)\):\s*\n\s*if \(pay / f\)\.exists\(\)', provision_src)
+        self.assertIsNotNone(m, "could not find provision.py's single-file payload push tuple")
+        pushed_files = set(re.findall(r'"([^"]+)"', m.group(1)))
+
+        missing = top_level_files - pushed_files
+        self.assertFalse(missing,
+                          f"capture.sh writes these top-level payload files, but provision.py's push tuple "
+                          f"never sends them to the device: {sorted(missing)}")
+
     def test_provision_all_failure_carries_recovery_guidance(self):
         # A failed Download must return a 3-tuple whose 3rd element is a Recovery, and log the DO-NEXT
         # block live. Deterministic failure: no SD -> provision() refuses early.
