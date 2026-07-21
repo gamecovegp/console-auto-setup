@@ -220,11 +220,18 @@ if echo "$RPKGS" | grep -q org.es_de.frontend && [ -f "$ES_SET" ]; then
     *)        [ -n "$SERIAL" ] && MEDIA_DIR="/storage/$SERIAL/ES-DE/downloaded_media" || MEDIA_DIR="";;
   esac
   if [ -n "$MEDIA_DIR" ]; then
-    sed '/name="MediaDirectory"/d' "$ES_SET" > "$ES_SET.cas" 2>/dev/null && mv "$ES_SET.cas" "$ES_SET"  # drop existing line (portable in-place; BSD `sed -i` reads the script as a suffix)
-    [ -s "$ES_SET" ] && [ -n "$(tail -c1 "$ES_SET" 2>/dev/null)" ] && printf '\n' >> "$ES_SET"  # ensure EOL
-    printf '<string name="MediaDirectory" value="%s" />\n' "$MEDIA_DIR" >> "$ES_SET"
-    relabel "$ES_SET" 2>/dev/null
-    ok "ES-DE MediaDirectory -> $MEDIA_DIR (${CAS_ES_MEDIA:-sd})"
+    # An SD-home golden that left this EMPTY is already correct: ES-DE resolves an empty MediaDirectory
+    # inside its own home, which IS this unit's card. Forcing an absolute path there would bake one
+    # unit's volume id into every clone. Only re-point a value that actually carries the GOLDEN's id.
+    if [ "$EHK" = internal ] || [ -n "$(es_setting_value MediaDirectory "$ES_SET")" ]; then
+      sed '/name="MediaDirectory"/d' "$ES_SET" > "$ES_SET.cas" 2>/dev/null && mv "$ES_SET.cas" "$ES_SET"  # portable in-place (BSD `sed -i` reads the script as a suffix)
+      [ -s "$ES_SET" ] && [ -n "$(tail -c1 "$ES_SET" 2>/dev/null)" ] && printf '\n' >> "$ES_SET"  # ensure EOL
+      printf '<string name="MediaDirectory" value="%s" />\n' "$MEDIA_DIR" >> "$ES_SET"
+      [ "$EHK" = internal ] && relabel "$ES_SET"
+      ok "ES-DE MediaDirectory -> $MEDIA_DIR (${CAS_ES_MEDIA:-sd})"
+    else
+      log "ES-DE MediaDirectory left empty (SD-home golden — ES-DE resolves it inside its own home on this card)"
+    fi
   else
     warn "ES-DE box art: SD mode but no SD serial — MediaDirectory left at default (box art may be absent)."
   fi
@@ -235,11 +242,16 @@ if echo "$RPKGS" | grep -q org.es_de.frontend && [ -f "$ES_SET" ]; then
   #     above) lets ES-DE read the path without re-picking. Skip with no SD (ROMs unavailable anyway).
   if [ -n "$SERIAL" ]; then
     ROM_DIR="/storage/$SERIAL/ROMs"
-    sed '/name="ROMDirectory"/d' "$ES_SET" > "$ES_SET.cas" 2>/dev/null && mv "$ES_SET.cas" "$ES_SET"  # drop existing line (portable in-place; BSD `sed -i` reads the script as a suffix)
-    [ -s "$ES_SET" ] && [ -n "$(tail -c1 "$ES_SET" 2>/dev/null)" ] && printf '\n' >> "$ES_SET"  # ensure EOL
-    printf '<string name="ROMDirectory" value="%s" />\n' "$ROM_DIR" >> "$ES_SET"
-    relabel "$ES_SET" 2>/dev/null
-    ok "ES-DE ROMDirectory -> $ROM_DIR"
+    # Same rule as MediaDirectory above: an SD-home golden's empty value is portable, keep it.
+    if [ "$EHK" = internal ] || [ -n "$(es_setting_value ROMDirectory "$ES_SET")" ]; then
+      sed '/name="ROMDirectory"/d' "$ES_SET" > "$ES_SET.cas" 2>/dev/null && mv "$ES_SET.cas" "$ES_SET"  # portable in-place (BSD `sed -i` reads the script as a suffix)
+      [ -s "$ES_SET" ] && [ -n "$(tail -c1 "$ES_SET" 2>/dev/null)" ] && printf '\n' >> "$ES_SET"  # ensure EOL
+      printf '<string name="ROMDirectory" value="%s" />\n' "$ROM_DIR" >> "$ES_SET"
+      [ "$EHK" = internal ] && relabel "$ES_SET"
+      ok "ES-DE ROMDirectory -> $ROM_DIR"
+    else
+      log "ES-DE ROMDirectory left empty (SD-home golden — ROMs resolve inside ES-DE's own home on this card)"
+    fi
   else
     warn "ES-DE ROMs: no SD serial — ROMDirectory left at default (ES-DE may re-prompt for the ROM folder)."
   fi

@@ -155,5 +155,37 @@ tar -xf "$PAY/es_scripts.tar" -C "$ES_HOME" 2>/dev/null
 m="$(find "$ES_HOME/scripts" -name 'esdecompanion-*.sh' 2>/dev/null | wc -l | tr -d ' ')"
 eq "restored hooks" "$m" "7"
 
+# --- MediaDirectory / ROMDirectory: rewrite rule by home kind -----------------------------------------
+# internal-home  -> always force to THIS unit's card (unchanged behaviour; the RP6 path must not move).
+# sd-home, empty -> LEAVE EMPTY. ES-DE resolves it inside its own home, which IS this card, so an empty
+#                   value is portable across cards; an absolute one would carry a foreign volume id.
+# sd-home, set   -> re-point, because the value carries the GOLDEN's volume id.
+rewrite(){ # $1 = file, $2 = kind, $3 = this unit's serial, $4 = key, $5 = replacement value
+  if [ "$2" = internal ] || [ -n "$(es_setting_value "$4" "$1")" ]; then
+    sed "/name=\"$4\"/d" "$1" > "$1.cas" && mv "$1.cas" "$1"
+    [ -s "$1" ] && [ -n "$(tail -c1 "$1" 2>/dev/null)" ] && printf '\n' >> "$1"
+    printf '<string name="%s" value="%s" />\n' "$4" "$5" >> "$1"
+  fi
+}
+U=6ED25E36D25E032F
+
+f="$tmp/r_sd_empty.xml"; printf '%s\n' '<string name="MediaDirectory" value="" />' > "$f"
+rewrite "$f" sd "$U" MediaDirectory "/storage/$U/ES-DE/downloaded_media"
+eq "sd+empty stays empty" "$(es_setting_value MediaDirectory "$f")" ""
+
+f="$tmp/r_sd_set.xml"; printf '%s\n' '<string name="MediaDirectory" value="/storage/GOLD-1234/ES-DE/downloaded_media" />' > "$f"
+rewrite "$f" sd "$U" MediaDirectory "/storage/$U/ES-DE/downloaded_media"
+eq "sd+set re-pointed" "$(es_setting_value MediaDirectory "$f")" "/storage/$U/ES-DE/downloaded_media"
+grep -qF GOLD-1234 "$f" && { echo "FAIL: golden volume id survived an sd-home rewrite"; fail=1; }
+
+f="$tmp/r_int_empty.xml"; printf '%s\n' '<string name="MediaDirectory" value="" />' > "$f"
+rewrite "$f" internal "$U" MediaDirectory "/storage/$U/ES-DE/downloaded_media"
+eq "internal+empty forced" "$(es_setting_value MediaDirectory "$f")" "/storage/$U/ES-DE/downloaded_media"
+eq "internal no dupes" "$(grep -c 'name="MediaDirectory"' "$f")" "1"
+
+f="$tmp/r_sd_rom.xml"; printf '%s\n' '<string name="ROMDirectory" value="" />' > "$f"
+rewrite "$f" sd "$U" ROMDirectory "/storage/$U/ROMs"
+eq "sd+empty ROMDirectory stays empty" "$(es_setting_value ROMDirectory "$f")" ""
+
 [ "$fail" -eq 0 ] && echo "test_esde_settings: ALL PASS" || echo "test_esde_settings: FAILURES"
 exit "$fail"
