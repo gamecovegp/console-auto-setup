@@ -124,5 +124,36 @@ eq "captured hooks" "$n" "7"
 # the golden_serial line the existing pipeline depends on must survive the append
 grep -q '^golden_serial=9C33-6BBD$' "$PAY/global.meta" || { echo "FAIL: global.meta clobbered"; fail=1; }
 
+# --- restore side: resolve THIS unit's home from the golden's kind ------------------------------------
+# "Follow the golden": restore never probes the unit. An SD-home golden lands on the unit's OWN card
+# (different volume id), an internal-home golden lands on internal, and a golden with NO esde_home key
+# reads as internal — that back-compat default is what keeps every pre-existing RP6 golden working.
+uroot="$tmp/unit"; mkdir -p "$uroot/AAAA-BBBB" "$uroot/emulated/0"
+resolve(){ # $1 = payload dir, $2 = this unit's card serial -> echoes ES_HOME ("" if unresolvable)
+  _k="$(sed -n 's/^esde_home=//p' "$1/global.meta" 2>/dev/null)"; [ -n "$_k" ] || _k=internal
+  esde_home_for "$_k" "$2" "$uroot"
+}
+mkdir -p "$tmp/p_sd" "$tmp/p_int" "$tmp/p_old"
+printf 'esde_home=sd\n'       > "$tmp/p_sd/global.meta"
+printf 'esde_home=internal\n' > "$tmp/p_int/global.meta"
+printf 'golden_serial=X\n'    > "$tmp/p_old/global.meta"        # pre-2026-07-21 golden: NO esde_home key
+eq "resolve sd"       "$(resolve "$tmp/p_sd"  AAAA-BBBB)" "$uroot/AAAA-BBBB/ES-DE"
+eq "resolve internal" "$(resolve "$tmp/p_int" AAAA-BBBB)" "$uroot/emulated/0/ES-DE"
+eq "resolve legacy"   "$(resolve "$tmp/p_old" AAAA-BBBB)" "$uroot/emulated/0/ES-DE"
+eq "resolve sd nocard" "$(resolve "$tmp/p_sd" '')"        ""
+
+# restoring both artefacts into the resolved home
+ES_HOME="$(resolve "$tmp/p_sd" AAAA-BBBB)"
+cp "$PAY/es_settings.xml" "$tmp/es_src.xml"                      # reuse Task 2's captured payload
+mkdir -p "$ES_HOME/settings"
+cp "$tmp/es_src.xml" "$ES_HOME/settings/es_settings.xml"
+tar -xf "$PAY/es_scripts.tar" -C "$ES_HOME" 2>/dev/null
+[ -f "$ES_HOME/settings/es_settings.xml" ] || { echo "FAIL: settings not restored into the SD home"; fail=1; }
+[ -x "$ES_HOME/scripts/game-start/esdecompanion-game-start.sh" ] \
+  || [ -f "$ES_HOME/scripts/game-start/esdecompanion-game-start.sh" ] \
+  || { echo "FAIL: game-start hook not restored"; fail=1; }
+m="$(find "$ES_HOME/scripts" -name 'esdecompanion-*.sh' 2>/dev/null | wc -l | tr -d ' ')"
+eq "restored hooks" "$m" "7"
+
 [ "$fail" -eq 0 ] && echo "test_esde_settings: ALL PASS" || echo "test_esde_settings: FAILURES"
 exit "$fail"

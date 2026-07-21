@@ -175,16 +175,44 @@ done
 # es_settings.xml is ES-DE's own flat list of <type name=".." value=".." /> lines (no root wrapper), so we
 # DELETE any existing MediaDirectory line (robust to spacing) and append a clean one. [VERIFY the element
 # format against the live ES-DE build on first run.]
-ES_SET="/storage/emulated/0/ES-DE/settings/es_settings.xml"
+# WHERE THIS UNIT'S ES-DE GOES. "Follow the golden": capture recorded the KIND of home the golden used
+# (sd | internal) in global.meta; we resolve the same kind here against THIS unit's card serial. Restore
+# deliberately does NOT probe the unit — a fresh unit has no ES-DE tree yet, so there would be nothing to
+# find. An absent key means a pre-2026-07-21 golden: read it as internal, i.e. exactly today's behaviour.
+EHK="$(sed -n 's/^esde_home=//p' "$P/global.meta" 2>/dev/null)"; [ -n "$EHK" ] || EHK=internal
+ES_HOME="$(esde_home_for "$EHK" "$SERIAL")"
+ES_SET="$ES_HOME/settings/es_settings.xml"
 # 2c-pre) Restore the golden's es_settings.xml (the per-system alternative-emulator picks — 3DS→Citra,
-# DS→melonDS, PS2→NetherSX2… — plus frontend settings). This is the ONLY internal ES-DE file the payload
-# carries; the rest of the ES-DE tree rides the SD card. Done BEFORE the ROM/Media rewrite below so those
-# per-unit dirs are re-pointed on top of the golden's settings.
-if echo "$RPKGS" | grep -q org.es_de.frontend && [ -f "$P/es_settings.xml" ]; then
-  mkdir -p "${ES_SET%/*}"
-  if cp "$P/es_settings.xml" "$ES_SET"; then
-    relabel "$ES_SET" 2>/dev/null; ok "restored ES-DE es_settings.xml (emulator-per-system picks)"
-  else warn "ES-DE es_settings.xml restore failed"; FAIL=$((FAIL+1)); fi
+# DS→melonDS, PS2→NetherSX2… — plus frontend settings) AND the Companion's custom event scripts. These are
+# the ONLY ES-DE artefacts the payload carries; the rest of the ES-DE tree rides the SD card. Done BEFORE
+# the ROM/Media rewrite below so those per-unit dirs are re-pointed on top of the golden's settings.
+if [ -z "$ES_HOME" ]; then
+  # SD-home golden, card-less unit. Cannot guess a location: writing to internal would produce a file
+  # ES-DE never reads (the exact bug this whole change fixes). Warn loudly and skip — not a FAIL, a
+  # card-less unit legitimately cannot host an SD-home ES-DE.
+  warn "ES-DE: golden is SD-home but this unit has no SD card — frontend settings and custom event scripts NOT restored"
+elif echo "$RPKGS" | grep -q org.es_de.frontend; then
+  # 2c-pre) the golden's es_settings.xml: per-system alternative-emulator picks (3DS→Citra, DS→melonDS,
+  # PS2→NetherSX2…) AND the CustomEventScripts/CustomEventScriptsBrowsing toggles the Companion needs.
+  # Restored BEFORE the per-unit path rewrites below, so those land on top of the golden's settings.
+  if [ -f "$P/es_settings.xml" ]; then
+    mkdir -p "${ES_SET%/*}"
+    if cp "$P/es_settings.xml" "$ES_SET"; then
+      # SELinux labels exist on internal storage only; the SD is FUSE/exFAT and carries none, so a
+      # restorecon there would just log a failure for a file that is already correct.
+      [ "$EHK" = internal ] && relabel "$ES_SET"
+      ok "restored ES-DE es_settings.xml -> $ES_SET ($EHK)"
+    else warn "ES-DE es_settings.xml restore failed"; FAIL=$((FAIL+1)); fi
+  fi
+  # the Companion's custom event scripts — self-contained golden: the unit gets the hooks even if its SD
+  # image predates the Companion setup.
+  if [ -f "$P/es_scripts.tar" ]; then
+    mkdir -p "$ES_HOME"
+    if tar -xf "$P/es_scripts.tar" -C "$ES_HOME" 2>/dev/null; then
+      [ "$EHK" = internal ] && relabel -R "$ES_HOME/scripts"
+      ok "restored ES-DE custom event scripts -> $ES_HOME/scripts"
+    else warn "ES-DE custom event scripts extract failed — the Companion's hooks will be missing"; fi
+  fi
 fi
 if echo "$RPKGS" | grep -q org.es_de.frontend && [ -f "$ES_SET" ]; then
   case "${CAS_ES_MEDIA:-sd}" in
