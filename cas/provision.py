@@ -1954,17 +1954,54 @@ def grant_shell_root(adb, log=print, attempts=3, ui_timeout=15):
     return False
 
 
-def resolve_seal_stock(library_stock, capture_path, fingerprint, log=print):
-    """Pick the init_boot seal() will flash to un-root: prefer this unit's OWN captured factory image
-    (exact-build → its device OTA source-verifies), else fall back to the model-matched library image
-    with a LOUD warning that the unit's OTA may break until it's re-captured."""
+def resolve_factory_init_boot(library_stock, capture_path, proven_kit_image, fingerprint,
+                              log=print, store_root=None):
+    """Pick the init_boot seal() flashes to un-root, and say WHERE it came from.
+
+    Returns (path, provenance) with provenance one of:
+      'proven-kit' — a kit whose RECORDED build fingerprint equals this unit's. Authoritative: it is
+                     the vendor's factory image for this exact build.
+      'captured'   — this unit's own captured factory image. The default, and the ONLY correct source
+                     when no kit is proven for the build (RP6/Thor: their kits are a DIFFERENT build,
+                     so preferring a kit there would flash a wrong-build image and break their OTA).
+      'unverified' — neither available; falls back to the model-matched library image and warns.
+
+    When a proven kit and a capture DISAGREE the capture is demonstrably not this build's factory
+    image, so it is quarantined: that is the AIR X failure, where a valid, Magisk-free, wrong image
+    passed both capture guards and Seal flashed it on every unit of that build."""
+    if proven_kit_image:
+        if capture_path:
+            try:
+                same = (pathlib.Path(proven_kit_image).read_bytes()
+                        == pathlib.Path(capture_path).read_bytes())
+            except OSError:
+                same = True                       # unreadable => don't destroy evidence on a guess
+            if not same:
+                log(f"  ⚠ the captured factory init_boot for build {fingerprint} CONTRADICTS the proven "
+                    "kit image — quarantining the capture and sealing with the kit.")
+                if store_root is not None:
+                    try:
+                        _ibs.quarantine(store_root, fingerprint, "contradicted by proven kit image")
+                    except OSError as e:
+                        log(f"  (could not quarantine the capture: {e})")
+        log(f"  un-root: restoring the PROVEN factory init_boot for build {fingerprint} "
+            "(keeps its device OTA healthy).")
+        return str(proven_kit_image), "proven-kit"
     if capture_path:
         log(f"  un-root: restoring this unit's own captured factory init_boot for build {fingerprint} "
             "(keeps its device OTA healthy).")
-        return str(capture_path)
+        return str(capture_path), "captured"
     log(f"  ⚠ no factory init_boot captured for build {fingerprint} — sealing with the library image; "
         "this unit's device OTA may fail (code 20) until it's rooted from a clean state to capture it.")
-    return library_stock
+    return library_stock, "unverified"
+
+
+def resolve_seal_stock(library_stock, capture_path, fingerprint, log=print):
+    """Back-compat wrapper: the pre-provenance two-source resolution, returning just the path.
+    Kept so existing callers and tests are untouched; new code should call
+    resolve_factory_init_boot() and use the provenance it reports."""
+    path, _prov = resolve_factory_init_boot(library_stock, capture_path, None, fingerprint, log=log)
+    return path
 
 
 def seal(adb, fastboot, stock_init_boot, log=print, wait=True, model_match=None, force=False,
