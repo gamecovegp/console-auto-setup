@@ -1767,8 +1767,13 @@ class TestProvision(unittest.TestCase):
         # push logic fails THIS test immediately, instead of silently vanishing on every Download like
         # es_settings.xml/es_scripts.tar did.
         root = pathlib.Path(__file__).resolve().parent.parent
-        capture_src = (root / "provision" / "root" / "capture.sh").read_text()
-        provision_src = (root / "cas" / "provision.py").read_text()
+        # encoding="utf-8" is REQUIRED, not decoration: read_text() with no encoding uses the LOCALE
+        # default codec, which on the Windows CI runner is cp1252 — and both sources are UTF-8 full of
+        # typographic dashes/ellipses, so the bare call died with UnicodeDecodeError on byte 0x8f while
+        # passing on Linux/macOS. Same PC-side class as the CRLF manifest bug: never let a repo file's
+        # decoding depend on the host locale.
+        capture_src = (root / "provision" / "root" / "capture.sh").read_text(encoding="utf-8")
+        provision_src = (root / "cas" / "provision.py").read_text(encoding="utf-8")
 
         # every literal "$P/<name>" the script writes, where <name> has no further "/" and no "$" (a "$"
         # mid-name means the value is built from a shell variable, e.g. $pkg or $d -- not one fixed file).
