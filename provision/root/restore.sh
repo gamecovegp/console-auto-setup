@@ -419,7 +419,7 @@ else
       ok "homescreen: default home app $CUR -> $LHOME"
       CUR="$(home_launcher)"
     else
-      warn "homescreen: could not set default home app to $LC — layout/wallpaper will be skipped below"
+      warn "homescreen: could not set default home app to $LC — HOME stays $CUR; the layout below still targets $LP"
     fi
   fi
   # The layout is restored into its OWNER whether or not that owner is the active HOME (Mjolnir stays
