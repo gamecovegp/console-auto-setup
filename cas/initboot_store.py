@@ -4,6 +4,7 @@ Pure module: no adb/config/firmware imports. Callers pass `store_root` (a Path),
 unit-testable and free of import cycles. Layout: <store_root>/<slug(fingerprint)>/init_boot.img + meta.json
 """
 import bz2
+import datetime
 import gzip
 import json
 import lzma
@@ -303,4 +304,36 @@ def put(store_root, fingerprint, img_path, meta):
         if not dest.is_file():
             raise OSError(f"could not move the captured init_boot into place: {dest}")
     _write_meta(d, meta)
+    return dest
+
+
+def quarantine(store_root, fingerprint, reason):
+    """Move a capture aside so it can never be served again, recording WHY. Returns the quarantine dir,
+    or None when there was nothing stored for this build.
+
+    Used when a PROVEN kit contradicts the capture: the capture is then demonstrably not this build's
+    factory image — the AIR X case, where a valid, Magisk-free, WRONG image passed both capture guards
+    and Seal flashed it on every unit of that build, breaking their OTA at init_boot with code 20.
+
+    MOVED rather than deleted so the bad image stays available for diagnosis, and the directory gets a
+    counter suffix so a repeat quarantine can't collide with an earlier one."""
+    d = _dir(store_root, fingerprint)
+    if not d.is_dir():
+        return None
+    base = pathlib.Path(store_root) / f"{slug(fingerprint)}.quarantined"
+    dest = base
+    n = 1
+    while dest.exists():
+        dest = pathlib.Path(f"{base}.{n}")
+        n += 1
+    os.replace(d, dest)
+    try:
+        (dest / "quarantine.json").write_text(json.dumps({
+            "fingerprint": fingerprint,
+            "reason": str(reason),
+            "quarantined_utc": datetime.datetime.now(datetime.timezone.utc).isoformat().replace(
+                "+00:00", "Z"),
+        }, indent=2), encoding="utf-8")
+    except OSError:
+        pass                      # the MOVE is what matters; the note is best-effort
     return dest
