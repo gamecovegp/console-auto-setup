@@ -275,6 +275,32 @@ homescreen_apps(){
     grep -rahoE 'package=[A-Za-z0-9._]+'     "$_ha_dir" 2>/dev/null | sed 's/^package=//'
   } | sort -u
 }
+# Fallback launchers to consult when the HOME app owns no layout of its own. Every working golden on the
+# library drive (RP6 512/256, MANGMI AIR X, Odin 3) independently recorded com.android.launcher3, and the
+# AYN Thor's factory dumps name it too (pm default_home + the HOME role holder) — this is the fleet's real
+# launcher, not a guess.
+HOME_LAUNCHERS="com.android.launcher3"
+# has_layout <data_dir> — does this app's data actually hold a homescreen ARRANGEMENT? Reuses the
+# homescreen_apps token scan: a favorites DB names the apps placed on the grid, so a dir yielding no
+# placed-app references holds no layout. Cheap, launcher-family-agnostic, no sqlite3.
+has_layout(){ [ -d "$1" ] && [ -n "$(homescreen_apps "$1")" ]; }
+# layout_launcher <home_pkg> [override] — the package whose data holds the icon/folder LAYOUT, which is
+# NOT always the HOME app. The AYN Thor's HOME is xyz.blacksheep.mjolnir, a HOME-key shim whose data dir
+# is empty; capture followed resolve-activity to it and archived 4608 bytes of nothing while the real grid
+# sat in com.android.launcher3. Resolution: override (if installed) -> the HOME app (if its data really
+# holds a layout — the path every working golden takes) -> the first installed HOME_LAUNCHERS entry that
+# does. Prints nothing and returns 1 when none qualifies, so the caller warns instead of capturing an
+# empty layout. DATA_ROOT overrides /data/data for off-device tests, as in game_launcher.
+layout_launcher(){
+  _ll_home="$1"; _ll_ov="$2"; _ll_dr="${DATA_ROOT:-/data/data}"
+  if [ -n "$_ll_ov" ] && pm path "$_ll_ov" >/dev/null 2>&1; then echo "$_ll_ov"; return 0; fi
+  if [ -n "$_ll_home" ] && has_layout "$_ll_dr/$_ll_home"; then echo "$_ll_home"; return 0; fi
+  for _ll_p in $HOME_LAUNCHERS; do
+    [ "$_ll_p" = "$_ll_home" ] && continue
+    if pm path "$_ll_p" >/dev/null 2>&1 && has_layout "$_ll_dr/$_ll_p"; then echo "$_ll_p"; return 0; fi
+  done
+  return 1
+}
 # The GAME FRONTEND (holds per-system emulator picks) — DISTINCT from the Android HOME app (home_launcher).
 # Curated fallback list; the probe below handles OEM rebrands that keep the ES-DE-fork data shape.
 GAME_LAUNCHERS="com.handheld.launcher"

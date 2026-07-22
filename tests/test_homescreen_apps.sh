@@ -75,4 +75,58 @@ mkdir -p "$tmp/payload3"
 outNM="$(homescreen_install_missing "$tmp/payload3" 2>&1)"; rcNM=$?
 [ -z "$outNM" ] && [ "$rcNM" -eq 0 ] || { echo "FAIL(install_missing: no-apps dir): [$outNM] rc=$rcNM"; fail=1; }
 
+# === has_layout / layout_launcher ===============================================================
+# THE BUG: capture.sh used home_launcher() to pick whose /data/data becomes launcher_data.tar. The AYN
+# Thor's HOME is xyz.blacksheep.mjolnir — a HOME-key shim with an EMPTY data dir — so the golden archived
+# 4608 bytes of nothing while the real folder grid sat in com.android.launcher3. Four sibling goldens
+# (RP6 512/256, AIR X, Odin 3) all recorded com.android.launcher3 with ~1 MB; the Thor alone differed.
+INSTALLED=""                                   # space-separated pkgs pm should report as installed
+pm(){ case "$1" in path) case " $INSTALLED " in *" $2 "*) return 0;; *) return 1;; esac;; *) return 0;; esac; }
+
+lay="$tmp/lay"
+# a REAL launcher data dir: a favorites DB carrying placed-app references
+mkdir -p "$lay/com.android.launcher3/databases"
+printf 'component=org.ppsspp.ppsspp/.Main package=com.retroarch.aarch64\n' \
+  > "$lay/com.android.launcher3/databases/launcher.db"
+# a SHIM's data dir: present, but no placed-app references anywhere (the Thor's Mjolnir)
+mkdir -p "$lay/xyz.blacksheep.mjolnir/shared_prefs" "$lay/xyz.blacksheep.mjolnir/files"
+printf 'x' > "$lay/xyz.blacksheep.mjolnir/files/profileInstalled"
+
+has_layout "$lay/com.android.launcher3" || { echo "FAIL: real launcher dir not detected as a layout"; fail=1; }
+has_layout "$lay/xyz.blacksheep.mjolnir" && { echo "FAIL: empty shim dir counted as a layout"; fail=1; }
+has_layout "$lay/does.not.exist"         && { echo "FAIL: missing dir counted as a layout"; fail=1; }
+
+INSTALLED="com.android.launcher3 xyz.blacksheep.mjolnir com.oem.pinned"
+# (1) the HOME app owns the layout -> it wins. This is the path all four WORKING goldens take, so this
+#     assertion is the back-compat guard: it must keep passing unchanged.
+got="$(DATA_ROOT="$lay" layout_launcher com.android.launcher3)"
+[ "$got" = "com.android.launcher3" ] || { echo "FAIL(1 home owns layout): [$got]"; fail=1; }
+
+# (2) THE THOR CASE: HOME is a shim with no layout -> fall back to the real launcher
+got="$(DATA_ROOT="$lay" layout_launcher xyz.blacksheep.mjolnir)"
+[ "$got" = "com.android.launcher3" ] || { echo "FAIL(2 shim HOME falls back): [$got]"; fail=1; }
+
+# (3) override pins an installed package, even when the fallback would have hit
+mkdir -p "$lay/com.oem.pinned/databases"
+printf 'component=com.foo.bar/.Main\n' > "$lay/com.oem.pinned/databases/launcher.db"
+got="$(DATA_ROOT="$lay" layout_launcher xyz.blacksheep.mjolnir com.oem.pinned)"
+[ "$got" = "com.oem.pinned" ] || { echo "FAIL(3 override): [$got]"; fail=1; }
+
+# (4) an override that is NOT installed is ignored, not blindly trusted
+got="$(DATA_ROOT="$lay" layout_launcher xyz.blacksheep.mjolnir com.not.installed)"
+[ "$got" = "com.android.launcher3" ] || { echo "FAIL(4 uninstalled override ignored): [$got]"; fail=1; }
+
+# (5) nothing qualifies -> empty output AND non-zero rc (caller must warn, never capture an empty layout)
+empty="$tmp/empty"; mkdir -p "$empty/xyz.blacksheep.mjolnir"
+got="$(DATA_ROOT="$empty" layout_launcher xyz.blacksheep.mjolnir)"
+[ -z "$got" ] || { echo "FAIL(5 none qualifies): [$got]"; fail=1; }
+DATA_ROOT="$empty" layout_launcher xyz.blacksheep.mjolnir >/dev/null 2>&1 \
+  && { echo "FAIL(5 rc): layout_launcher returned 0 with no layout anywhere"; fail=1; }
+
+# (6) the fallback must be INSTALLED, not merely present in the data root
+INSTALLED="xyz.blacksheep.mjolnir"
+got="$(DATA_ROOT="$lay" layout_launcher xyz.blacksheep.mjolnir)"
+[ -z "$got" ] || { echo "FAIL(6 uninstalled fallback): [$got]"; fail=1; }
+INSTALLED="com.android.launcher3 xyz.blacksheep.mjolnir com.oem.pinned"
+
 [ "$fail" -eq 0 ] && { echo "PASS: homescreen_apps"; exit 0; } || exit 1
