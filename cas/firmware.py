@@ -884,6 +884,40 @@ def set_gate_fields(firmware_id, root, chip=None, soc=None, android=None, storag
     return Firmware(fw.path)
 
 
+def build_fingerprint(firmware, version=None):
+    """The build fingerprint RECORDED for this kit version, or None when unset/blank.
+
+    Provenance gate: a kit is only authoritative as "this unit's factory image" when it carries a
+    fingerprint EQUAL to the unit's. Every kit currently records "" (unset), so callers treating
+    None as "unproven" leave today's behaviour untouched — which is the point: the RP6/Thor kits are
+    a DIFFERENT build than their units (eng.RP6.20260119 vs kit RP6_20260115), so preferring a kit
+    there would flash a wrong-build init_boot and break the very OTA this is meant to protect."""
+    if firmware is None:
+        return None
+    v = version or firmware.current
+    if not v:
+        return None
+    fp = str(_read_json(_version_meta_path(firmware, v)).get("fingerprint") or "").strip()
+    return fp or None
+
+
+def set_build_fingerprint(firmware_id, root, version, fingerprint):
+    """Record the build fingerprint for one kit version. Only that key is touched, so gate fields and
+    ingest metadata already in version.meta.json survive. Raises ValueError on an unknown id.
+
+    Deliberate, never inferred: a version string resembling a build id ('20260507-165105' vs
+    'AIR_X_user_20260507') is suggestive and is NOT evidence — hash agreement with the OTA's expected
+    source is."""
+    fw = find(firmware_id, root)
+    if fw is None:
+        raise ValueError(f"no firmware '{firmware_id}' in {root}")
+    p = _version_meta_path(fw, version)
+    meta = _read_json(p)
+    meta["fingerprint"] = str(fingerprint or "").strip()
+    _write_json(p, meta)
+    return meta["fingerprint"]
+
+
 # ---------------------------------------------------------------------------
 # Task 10: backfill() — migration without a flag day
 # ---------------------------------------------------------------------------
