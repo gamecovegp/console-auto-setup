@@ -169,16 +169,26 @@ fi
 # every app is installed, so each icon's component resolves and nothing shows as "missing". Capture this
 # AFTER arranging the homescreen on the golden (emulators foldered, ES-DE/launcher outside).
 # Gated by @homescreen (default on); "@homescreen off" skips it (the Save modal's HOME-launcher row).
-FHS=on
+# @homescreen: off disables; a DOTTED value pins the layout-owner package (same override idiom as
+# "@gamelauncher <pkg>"); on/absent means "resolve it". The pin is the escape hatch for a unit whose real
+# launcher is neither the HOME app nor anything in HOME_LAUNCHERS.
+FHS=on; OVHS=""
 if [ -n "${CAS_MANIFEST:-}" ] && [ -f "$CAS_MANIFEST" ]; then
-  [ "$(manifest_flag "$CAS_MANIFEST" homescreen)" = off ] && FHS=off
+  v="$(manifest_flag "$CAS_MANIFEST" homescreen)"
+  case "$v" in "") : ;; off) FHS=off ;; on) : ;; *.*) OVHS="$v" ;; esac
 fi
 if [ "$FHS" = off ]; then
   log "homescreen: capture skipped (@homescreen off)"
 else
   HS="$P/homescreen"; mkdir -p "$HS"
-  LP="$(home_launcher)"
+  # WHO IS HOME vs WHO OWNS THE LAYOUT are different questions. The AYN Thor answers them with different
+  # packages: Mjolnir is HOME (a HOME-key shim with an empty data dir) while com.android.launcher3 holds
+  # the folder grid. Capturing the HOME app's data blindly archived 4608 bytes of nothing.
+  HOMEPKG="$(home_launcher)"
+  LP="$(layout_launcher "$HOMEPKG" "$OVHS")"
   if [ -n "$LP" ] && [ -d "/data/data/$LP" ]; then
+    [ -n "$HOMEPKG" ] && [ "$HOMEPKG" != "$LP" ] && \
+      log "homescreen: HOME app is $HOMEPKG but the arrangement lives in $LP — capturing $LP's layout (HOME choice preserved)"
     # launcher_component (pkg/cls) as well as the package: restore needs the COMPONENT to actually make
     # this the unit's home app via `cmd package set-home-activity`. launcher_pkg alone only gates.
     { echo "launcher_pkg=$LP"; echo "launcher_uid=$(app_uid "$LP")"
@@ -200,7 +210,7 @@ else
       fi
     fi
   else
-    warn "no home launcher resolved (or it has no data dir) — homescreen layout NOT captured"
+    warn "homescreen: no package with an actual layout found (HOME app '$HOMEPKG' holds none, and no HOME_LAUNCHERS fallback qualified) — layout NOT captured. Pin one with '@homescreen <pkg>' if this unit's launcher is unusual."
   fi
   # wallpaper (static image + the which-wallpaper xml; lock-screen variants too) — system-owned, per-user.
   WPDIR=/data/system/users/0

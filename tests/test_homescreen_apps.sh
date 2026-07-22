@@ -129,4 +129,31 @@ got="$(DATA_ROOT="$lay" layout_launcher xyz.blacksheep.mjolnir)"
 [ -z "$got" ] || { echo "FAIL(6 uninstalled fallback): [$got]"; fail=1; }
 INSTALLED="com.android.launcher3 xyz.blacksheep.mjolnir com.oem.pinned"
 
+# === capture.sh: meta records the LAYOUT OWNER, the component still records the HOME app =========
+# Replicates capture.sh's meta write (that script only runs as root on a device). The two keys answer
+# DIFFERENT questions and must be allowed to disagree: launcher_pkg = whose data is in the tar,
+# launcher_component = what set-home-activity gets. On the Thor they legitimately differ.
+capmeta="$tmp/capmeta"; mkdir -p "$capmeta"
+HOMEPKG="xyz.blacksheep.mjolnir"
+LP="$(DATA_ROOT="$lay" layout_launcher "$HOMEPKG")"
+{ echo "launcher_pkg=$LP"; echo "launcher_uid=10091"
+  echo "launcher_component=$HOMEPKG/.HomeActivity"; } > "$capmeta/meta"
+[ "$(sed -n 's/^launcher_pkg=//p' "$capmeta/meta")" = "com.android.launcher3" ] \
+  || { echo "FAIL: meta launcher_pkg is not the layout owner"; fail=1; }
+[ "$(sed -n 's/^launcher_component=//p' "$capmeta/meta")" = "xyz.blacksheep.mjolnir/.HomeActivity" ] \
+  || { echo "FAIL: meta launcher_component lost the golden's HOME choice"; fail=1; }
+
+# back-compat: when the HOME app DOES own the layout (all four working goldens), both keys agree
+HOMEPKG="com.android.launcher3"
+LP="$(DATA_ROOT="$lay" layout_launcher "$HOMEPKG")"
+[ "$LP" = "$HOMEPKG" ] || { echo "FAIL(back-compat): layout owner should equal HOME here, got [$LP]"; fail=1; }
+
+# @homescreen parsing: off disables, a dotted value PINS the layout owner, on/absent leave it alone
+parse_hs(){ FHS=on; OVHS=""; case "$1" in "") : ;; off) FHS=off ;; on) : ;; *.*) OVHS="$1" ;; esac
+            echo "$FHS/$OVHS"; }
+[ "$(parse_hs '')"                = "on/" ]                     || { echo "FAIL(@homescreen absent)"; fail=1; }
+[ "$(parse_hs on)"                = "on/" ]                     || { echo "FAIL(@homescreen on)"; fail=1; }
+[ "$(parse_hs off)"               = "off/" ]                    || { echo "FAIL(@homescreen off)"; fail=1; }
+[ "$(parse_hs com.oem.pinned)"    = "on/com.oem.pinned" ]       || { echo "FAIL(@homescreen pin)"; fail=1; }
+
 [ "$fail" -eq 0 ] && { echo "PASS: homescreen_apps"; exit 0; } || exit 1
