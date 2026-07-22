@@ -2269,6 +2269,13 @@ def root_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
     return results
 
 
+def _ota_detail(profile_name, provenance):
+    """Success detail for run history, carrying how the sealed unit's factory image was resolved.
+    Appended to the existing detail string rather than added as a new field, so nothing that reads run
+    history has to change. Values: proven-kit / captured / unverified / waived-ships-rooted."""
+    return f"{profile_name} · ota:{provenance}".strip()
+
+
 def seal_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, log=print, profile=None,
              profile_map=None, force_serials=None, parallel=True, on_critical=None):
     """Batch SEAL: every connected 'device'-state unit, in PARALLEL by default (each un-roots + reboots at
@@ -2318,6 +2325,9 @@ def seal_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
             flasher = None
             ships_rooted = False              # set from the resolved build's `ships_rooted` declaration
             phase = "fastboot_flash"          # coarse recovery hint; the EDL branch below flips it
+            # Pre-bound so the provenance branch below can read them even when the lookup raised (its
+            # except only logs) — otherwise a firmware-lookup failure would turn into a NameError.
+            fw, fwres = None, {}
             try:
                 from . import firmware as FW
                 idn = FW.identity(adb)
@@ -2363,13 +2373,28 @@ def seal_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
             # captured factory image must NOT be substituted here. Doing so would flash the unit's stock
             # kernel, silently un-rooting it and throwing away the very thing the build exists for — the
             # RP5's 905MHz overclock. Capture substitution stays on for every normal build.
+            ota_provenance = "unverified"
             if ships_rooted:
+                ota_provenance = "waived-ships-rooted"
                 _wlog("SHIPS-ROOTED build: keeping its declared image (not substituting a captured "
-                      "factory image, which would un-root the unit and drop the overclock).")
+                      "factory image, which would un-root the unit and drop the overclock). This unit "
+                      "CANNOT take a vendor delta OTA — that is by design, not a fault.")
             elif adb.slot_suffix() in ("_a", "_b"):
                 store_root = _ibs.store_root(FW.firmware_root())
                 _fp = adb.getprop("ro.build.fingerprint")
-                stock_path = resolve_seal_stock(stock_path, _ibs.get(store_root, _fp), _fp, log=_wlog)
+                # A kit is authoritative ONLY when its RECORDED build fingerprint equals this unit's.
+                # RP6/Thor kits are a DIFFERENT build than their units and record "" (unproven), so they
+                # stay on the capture path exactly as they ship today.
+                proven_kit = None
+                try:
+                    if fw is not None and FW.build_fingerprint(fw, fwres.get("version")) == _fp:
+                        sb = fw.stock_boot_image(fwres.get("version"))
+                        proven_kit = str(sb) if sb else None
+                except Exception as e:                 # provenance is additive — never fail the seal
+                    _wlog(f"(kit provenance check skipped: {e})")
+                stock_path, ota_provenance = resolve_factory_init_boot(
+                    stock_path, _ibs.get(store_root, _fp), proven_kit, _fp,
+                    log=_wlog, store_root=store_root)
             ok = seal(adb, fb, stock_path,
                       log=_wlog,
                       model_match=prof.meta.get("model_match"), force=(serial in force_serials),
@@ -2377,7 +2402,7 @@ def seal_all(make_adb, make_fb, devices, profiles_root="profiles", appdir=None, 
             if adb.cancel is not None and adb.cancel.is_set():
                 return ("cancelled", prof.name)
             if ok:
-                return ("ok", prof.name)
+                return ("ok", _ota_detail(prof.name, ota_provenance))
             if any("SEALED" in m for m in msgs):
                 # seal() logged its completion marker, then adb dropped BY DESIGN — this is success, not a
                 # failure; never raise the attention popup for a unit that actually sealed.
