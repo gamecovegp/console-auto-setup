@@ -962,6 +962,29 @@ def patch_init_boot_on_device(adb, stock_init_boot, dest, log=print):
     return True
 
 
+def _update_is_staged(adb):
+    """True when an OTA is in progress or awaiting reboot, False when demonstrably idle, None when
+    neither probe can be read.
+
+    The inactive A/B slot is only a source of the FACTORY image while no update has written to it. A
+    staged or half-applied payload writes the TARGET slot, so a capture taken then stores the wrong
+    image under this build's fingerprint — exactly how the AIR X store was poisoned (captured 18:05,
+    minutes after a day of partial OTA writes to slot B).
+
+    Both probes are ONE command each: adb space-joins argv, so `su -c` must never receive `&&`."""
+    rc, out, _err = adb.su("update_engine_client --status")
+    blob = (out or "").upper()
+    if rc == 0 and "UPDATE_STATUS_" in blob:
+        return "UPDATE_STATUS_IDLE" not in blob
+    slot = (adb.slot_suffix() or "").strip()
+    if slot in ("_a", "_b"):
+        other = "1" if slot == "_a" else "0"
+        rc, out, _err = adb.su(f"bootctl is-slot-marked-successful {other}")
+        if rc == 0 and (out or "").strip() in ("0", "1"):
+            return (out or "").strip() != "1"
+    return None
+
+
 def capture_factory_init_boot(adb, store_root, log=print):
     """Capture this unit's OWN factory init_boot into the per-build store, for seal() to restore later so
     the unit's device OTA still source-verifies. Read the INACTIVE A/B slot — CAS only ever flashes the
@@ -976,6 +999,13 @@ def capture_factory_init_boot(adb, store_root, log=print):
     fp = adb.getprop("ro.build.fingerprint")
     if _ibs.has(store_root, fp):
         return True                                     # already captured for this build
+    staged = _update_is_staged(adb)
+    if staged is not False:
+        why = ("an update is staged/partially applied" if staged
+               else "could not prove no update is staged")
+        log(f"  factory init_boot capture skipped: {why} — the inactive slot may hold OTA-written "
+            "data, not the factory image. Absence of a capture is recoverable; a poisoned one is not.")
+        return False
     part = adb.boot_partition()               # 'init_boot' (A13+) or 'boot' (older/upgraded units)
     dev = "/data/local/tmp/cas_factory_ib.img"
     rc, _out, err = adb.su(f"dd if=/dev/block/by-name/{part}{inactive} of={dev}")

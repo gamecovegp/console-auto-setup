@@ -20,7 +20,16 @@ def _fake_adb(slot="_a", su_rc=0, pull_bytes=b"ANDROID!" + b"\x00" * 1024, fp=FP
     adb.slot_suffix.return_value = slot
     adb.boot_partition.return_value = boot_partition
     adb.getprop.return_value = fp
-    adb.su.return_value = (su_rc, "", "")
+
+    # capture_factory_init_boot now refuses to read the inactive slot unless it can PROVE no update is
+    # staged (a staged payload writes the target slot, which is how the AIR X store got poisoned).
+    # Report a clean IDLE update_engine so these tests exercise the capture path itself.
+    def _su(cmd, timeout=900):
+        if "update_engine_client" in cmd:
+            return (0, "CURRENT_OP=UPDATE_STATUS_IDLE", "")
+        return (su_rc, "", "")
+
+    adb.su.side_effect = _su
 
     def _pull(src, dst):
         if pull_bytes is None:
@@ -30,6 +39,16 @@ def _fake_adb(slot="_a", su_rc=0, pull_bytes=b"ANDROID!" + b"\x00" * 1024, fp=FP
 
     adb.pull.side_effect = _pull
     return adb
+
+
+def _dd_cmd(adb):
+    """The dd command capture issued. Found by CONTENT, not call index: the staged-update probe runs
+    before it, so position is not a stable contract."""
+    for call in adb.su.call_args_list:
+        cmd = call[0][0]
+        if cmd.startswith("dd "):
+            return cmd
+    raise AssertionError(f"no dd command issued; su calls: {[c[0][0] for c in adb.su.call_args_list]}")
 
 
 class TestCapture(unittest.TestCase):
@@ -42,9 +61,8 @@ class TestCapture(unittest.TestCase):
         ok = PV.capture_factory_init_boot(adb, self.store, log=lambda *a: None)
         self.assertTrue(ok)
         self.assertTrue(IBS.has(self.store, FP))
-        # dumped the INACTIVE slot (_b) since active is _a. su is called TWICE (dd, then rm of the temp
-        # dump) — the dd is the FIRST call, not necessarily the last.
-        ddcmd = adb.su.call_args_list[0][0][0]
+        # dumped the INACTIVE slot (_b) since active is _a.
+        ddcmd = _dd_cmd(adb)
         self.assertIn("init_boot_b", ddcmd)
 
     def test_captures_boot_partition_on_pre_init_boot_unit(self):
@@ -53,7 +71,7 @@ class TestCapture(unittest.TestCase):
         adb = _fake_adb(slot="_a", boot_partition="boot")
         ok = PV.capture_factory_init_boot(adb, self.store, log=lambda *a: None)
         self.assertTrue(ok)
-        ddcmd = adb.su.call_args_list[0][0][0]
+        ddcmd = _dd_cmd(adb)
         self.assertIn("boot_b", ddcmd)
         self.assertNotIn("init_boot_b", ddcmd)
 
