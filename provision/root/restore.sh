@@ -385,11 +385,12 @@ settings put global auto_time_zone 0 2>/dev/null
 ok "OOBE skipped; locale=$LOC_SET tz=$TZ_SET cloned from golden (applies on reboot)"
 
 # 8) HOMESCREEN layout (apply LAST — every app from step 1 is now installed, so each icon's component
-#    resolves and nothing shows as "missing"). Restores the launcher's favorites DB (folder/icon/dock
+#    resolves and nothing shows as "missing"). Restores the LAYOUT OWNER's favorites DB (folder/icon/dock
 #    arrangement) + grid prefs, the wallpaper, and the appwidget map (best-effort). Gated by @homescreen
 #    (default ON if the payload carries it). ADDITIVE: problems WARN but do NOT bump FAIL — the clone is
-#    still functionally clean, only the icon arrangement didn't apply. SAME-FAMILY ONLY: the launcher pkg
-#    must match the golden's (identical hardware); a different-launcher unit (e.g. Mangmi) skips itself.
+#    still functionally clean, only the icon arrangement didn't apply. Restored into $LP WHETHER OR NOT
+#    it is the active HOME (an AYN Thor keeps Mjolnir as HOME; the arrangement still lands in launcher3).
+#    The only skip is when $LP itself isn't installed on this unit (e.g. Mangmi, a different family).
 #    Takes effect on the reboot the provision flow performs after restore (launcher/wallpaper/widgets all
 #    reload at cold boot).
 FHOME=on
@@ -400,29 +401,34 @@ if [ "$FHOME" != on ]; then
 elif [ ! -f "$HS/launcher_data.tar" ]; then
   log "homescreen: no layout in payload (capture a golden with the homescreen arranged to enable)"
 else
+  # TWO ROLES, TWO KEYS. launcher_pkg = whose data is inside launcher_data.tar (the LAYOUT OWNER);
+  # launcher_component = what set-home-activity gets (the golden's HOME app). They are the same package
+  # on every golden captured before 2026-07-22 and on every unit whose launcher is its own HOME, but the
+  # AYN Thor separates them: HOME is a Mjolnir shim, the arrangement lives in com.android.launcher3.
   LP="$(sed -n 's/^launcher_pkg=//p' "$HS/meta" 2>/dev/null)"
   LC="$(sed -n 's/^launcher_component=//p' "$HS/meta" 2>/dev/null)"
+  LHOME="${LC%%/*}"                       # the golden's HOME package, derived from its component
   CUR="$(home_launcher)"
-  # Apply the golden's launcher choice FIRST, so the gate below passes on its own terms. Without this,
-  # any unit whose stock launcher differs from the golden's (e.g. a fresh Thor boots com.android.
-  # launcher3, the golden runs xyz.blacksheep.mjolnir) hit "SKIP" and silently lost the layout AND the
-  # wallpaper — the wallpaper restore lives inside this same block. Guarded in set_home_component: it
+  # Apply the golden's HOME choice FIRST (independent of the layout below). Without this, any unit whose
+  # stock HOME differs from the golden's (e.g. a fresh Thor boots com.android.launcher3, the golden's HOME
+  # is xyz.blacksheep.mjolnir) would ship with the wrong app as HOME. Guarded in set_home_component: it
   # refuses a package that isn't installed, so this is safe to attempt unconditionally. Goldens captured
   # before launcher_component existed leave LC empty and behave exactly as before.
-  if [ -n "$LC" ] && [ -n "$LP" ] && [ -n "$CUR" ] && [ "$CUR" != "$LP" ]; then
+  if [ -n "$LC" ] && [ -n "$LHOME" ] && [ -n "$CUR" ] && [ "$CUR" != "$LHOME" ]; then
     if set_home_component "$LC"; then
-      ok "homescreen: default home app $CUR -> $LP"
+      ok "homescreen: default home app $CUR -> $LHOME"
       CUR="$(home_launcher)"
     else
       warn "homescreen: could not set default home app to $LC — layout/wallpaper will be skipped below"
     fi
   fi
+  # The layout is restored into its OWNER whether or not that owner is the active HOME (Mjolnir stays
+  # HOME by design; only the layout SOURCE changes here). No "is this HOME?" gate: the tar contains
+  # exactly $LP/… and it is only extracted once $LP is confirmed installed on this unit.
   if [ -z "$LP" ]; then
     warn "homescreen: payload has no launcher_pkg — skip"
-  elif [ -n "$CUR" ] && [ "$CUR" != "$LP" ]; then
-    warn "homescreen: this unit's launcher ($CUR) != golden's ($LP) — would not apply, SKIP (different family?)"
   elif ! pm path "$LP" >/dev/null 2>&1; then
-    warn "homescreen: launcher $LP not present on this unit — skip"
+    warn "homescreen: layout owner $LP not present on this unit — skip"
   elif ! tar -tf "$HS/launcher_data.tar" >/dev/null 2>&1; then
     warn "homescreen: launcher_data.tar corrupt — skip"
   else

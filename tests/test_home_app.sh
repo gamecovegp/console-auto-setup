@@ -98,15 +98,63 @@ grep -q 'launcher_component=' "$ROOT/provision/root/capture.sh" \
 grep -q 'set_home_component' "$ROOT/provision/root/restore.sh" \
   || { echo "FAIL(6): restore.sh never sets the default home app"; fail=1; }
 
-# ORDER MATTERS: setting home must happen BEFORE the "launcher != golden's -> SKIP" gate, otherwise the
-# gate still skips the block (and with it the wallpaper) before the launcher is ever switched.
+# ORDER MATTERS: setting home must happen BEFORE the "no launcher_pkg -> skip" gate chain, so HOME gets
+# switched to the golden's choice regardless of whether the layout-owner gate below skips the layout.
+# NOTE: there is no more "launcher != golden's -> SKIP" arm (that equality gate was the bug); the
+# surviving chain starts at "payload has no launcher_pkg — skip".
 set_line="$(grep -n 'set_home_component' "$ROOT/provision/root/restore.sh" | head -1 | cut -d: -f1)"
-gate_line="$(grep -n 'would not apply, SKIP' "$ROOT/provision/root/restore.sh" | head -1 | cut -d: -f1)"
+gate_line="$(grep -n 'payload has no launcher_pkg' "$ROOT/provision/root/restore.sh" | head -1 | cut -d: -f1)"
 if [ -n "$set_line" ] && [ -n "$gate_line" ]; then
   [ "$set_line" -lt "$gate_line" ] \
-    || { echo "FAIL(7): set_home_component (line $set_line) must come BEFORE the skip gate (line $gate_line)"; fail=1; }
+    || { echo "FAIL(7): set_home_component (line $set_line) must come BEFORE the layout gate (line $gate_line)"; fail=1; }
 else
-  echo "FAIL(7): could not locate set_home_component and/or the skip gate in restore.sh"; fail=1
+  echo "FAIL(7): could not locate set_home_component and/or the layout gate in restore.sh"; fail=1
 fi
+# THE ACTUAL FIX: the launcher-equality skip arm must be GONE, with NO replacement equality check.
+grep -q 'would not apply, SKIP' "$ROOT/provision/root/restore.sh" \
+  && { echo "FAIL(7b): the CUR != LP equality skip arm is still present in restore.sh"; fail=1; }
+
+# === restore.sh: the layout goes to the LAYOUT OWNER, whoever happens to be HOME ==================
+# Replicates restore.sh's homescreen gate. The old chain skipped the layout unless the unit's CURRENT
+# home app equalled the golden's launcher_pkg. Once those are different roles that test is wrong by
+# construction: on a Thor the unit's HOME becomes Mjolnir while the layout owner is launcher3, so the
+# layout AND the wallpaper (restored inside the same block) were skipped every time.
+INSTALLED="com.android.launcher3 xyz.blacksheep.mjolnir"
+pm(){ case "$1" in path) case " $INSTALLED " in *" $2 "*) return 0;; *) return 1;; esac;; *) return 0;; esac; }
+
+# decide(): the gate as it must now behave. $1=launcher_pkg $2=launcher_component $3=this unit's HOME
+decide(){ _lp="$1"; _lc="$2"; _cur="$3"; _lhome="${_lc%%/*}"
+  _sethome=no
+  [ -n "$_lc" ] && [ -n "$_lhome" ] && [ -n "$_cur" ] && [ "$_cur" != "$_lhome" ] && _sethome=yes
+  if [ -z "$_lp" ]; then echo "$_sethome/skip-no-pkg"; return; fi
+  if ! pm path "$_lp" >/dev/null 2>&1; then echo "$_sethome/skip-absent"; return; fi
+  echo "$_sethome/restore-$_lp"; }
+
+# THE THOR CASE: golden's layout owner is launcher3, its HOME is Mjolnir, the fresh unit boots launcher3.
+# HOME must be switched to Mjolnir AND the layout must still land in launcher3.
+[ "$(decide com.android.launcher3 xyz.blacksheep.mjolnir/.HomeActivity com.android.launcher3)" \
+  = "yes/restore-com.android.launcher3" ] || { echo "FAIL(thor): $(decide com.android.launcher3 xyz.blacksheep.mjolnir/.HomeActivity com.android.launcher3)"; fail=1; }
+
+# …and once HOME is already Mjolnir, the layout STILL restores (the old CUR != LP test broke exactly here)
+[ "$(decide com.android.launcher3 xyz.blacksheep.mjolnir/.HomeActivity xyz.blacksheep.mjolnir)" \
+  = "no/restore-com.android.launcher3" ] || { echo "FAIL(thor 2nd run): $(decide com.android.launcher3 xyz.blacksheep.mjolnir/.HomeActivity xyz.blacksheep.mjolnir)"; fail=1; }
+
+# BACK-COMPAT (the four working goldens): HOME and layout owner are the same package
+[ "$(decide com.android.launcher3 com.android.launcher3/.uioverrides.QuickstepLauncher com.android.launcher3)" \
+  = "no/restore-com.android.launcher3" ] || { echo "FAIL(rp6 back-compat)"; fail=1; }
+
+# a golden with no launcher_component at all (captured before that key existed) still restores its layout
+[ "$(decide com.android.launcher3 '' com.android.launcher3)" = "no/restore-com.android.launcher3" ] \
+  || { echo "FAIL(legacy no-component golden)"; fail=1; }
+
+# layout owner absent from this unit -> skip (nothing to extract into)
+INSTALLED="xyz.blacksheep.mjolnir"
+[ "$(decide com.android.launcher3 xyz.blacksheep.mjolnir/.HomeActivity xyz.blacksheep.mjolnir)" \
+  = "no/skip-absent" ] || { echo "FAIL(absent layout owner)"; fail=1; }
+INSTALLED="com.android.launcher3 xyz.blacksheep.mjolnir"
+
+# payload with no launcher_pkg -> skip
+[ "$(decide '' xyz.blacksheep.mjolnir/.HomeActivity com.android.launcher3)" = "yes/skip-no-pkg" ] \
+  || { echo "FAIL(no launcher_pkg)"; fail=1; }
 
 [ "$fail" = 0 ] && echo "ok: home_component + set_home_component (guarded) + capture/restore wiring" || exit 1
