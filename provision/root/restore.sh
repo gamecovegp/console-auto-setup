@@ -417,7 +417,6 @@ else
   if [ -n "$LC" ] && [ -n "$LHOME" ] && [ -n "$CUR" ] && [ "$CUR" != "$LHOME" ]; then
     if set_home_component "$LC"; then
       ok "homescreen: default home app $CUR -> $LHOME"
-      CUR="$(home_launcher)"
     else
       warn "homescreen: could not set default home app to $LC — HOME stays $CUR; the layout below still targets $LP"
     fi
@@ -437,8 +436,8 @@ else
       warn "homescreen: cannot resolve $LP uid — skip"
     else
       # SELF-CONTAINED LAYOUT: install any placed app that's absent on THIS unit BEFORE re-applying the
-      # favorites DB, so every icon's component resolves. Runs on the same-family success path only (we're
-      # about to apply the layout). Additive — never bumps FAIL.
+      # favorites DB, so every icon's component resolves. Runs once the layout owner is confirmed installed
+      # (regardless of active HOME). Additive — never bumps FAIL.
       homescreen_install_missing "$P"
       am force-stop "$LP" 2>/dev/null
       rm -rf "/data/data/$LP/"* "/data/data/$LP/".[!.]* 2>/dev/null

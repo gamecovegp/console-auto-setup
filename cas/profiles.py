@@ -423,10 +423,14 @@ class Profile:
         return manifest_flags(self.capture_manifest_path)
 
     def launcher_pkg(self):
-        """The golden's HOME launcher package (a device SYSTEM app — never an installable app row; its
-        layout rides @homescreen). Resolved from profile.meta, else the captured homescreen/meta written at
-        capture time. None when no homescreen was captured. SINGLE source of truth so the app list and its
-        launcher-exclusion never disagree."""
+        """The homescreen LAYOUT OWNER — whose /data/data landed in launcher_data.tar — NOT necessarily the
+        active HOME app (that's launcher_component; capture.sh split the two roles 2026-07-22). On every
+        current golden this is com.android.launcher3, a device SYSTEM app never offered as an installable
+        row; its layout rides @homescreen instead. On the AYN Thor the active HOME is a shim
+        (xyz.blacksheep.mjolnir) that owns none of the layout, so the two keys name different packages.
+        Resolved from profile.meta, else the captured homescreen/meta written at capture time. None when no
+        homescreen was captured. SINGLE source of truth so the app list and its launcher-exclusion never
+        disagree."""
         return (self.meta.get("launcher_pkg")
                 or _read_meta(self.payload / "homescreen" / "meta").get("launcher_pkg")
                 or None)
@@ -443,14 +447,17 @@ class Profile:
         return pkgs
 
     def download_pkgs(self):
-        """The app rows the Download modal offers: all_pkgs() minus the HOME launcher ONLY when the golden
-        captured nothing for it — i.e. a SYSTEM launcher (com.android.launcher3 & co), which isn't
-        installable and whose layout rides @homescreen instead.
-        A USER-INSTALLED home app is a different animal: the AYN Thor ships xyz.blacksheep.mjolnir as HOME,
-        Save captures it like any other app (apk/base.apk + data.tar), yet dropping every launcher_pkg here
-        pushed it into the store-only branch — listed "· from store" with Config DISABLED, so its captured
-        config was unreachable. The payload is the ground truth, mirroring Save's rule (which drops only a
-        launcher absent from the device's user-app scan)."""
+        """The app rows the Download modal offers: all_pkgs() minus launcher_pkg (the homescreen LAYOUT
+        OWNER — see launcher_pkg()'s docstring) ONLY when the golden captured nothing for it — i.e. a
+        SYSTEM launcher (com.android.launcher3 & co), which isn't installable and whose layout rides
+        @homescreen instead.
+        A package the golden DID capture is a different animal, whether or not it happens to be the active
+        HOME: the AYN Thor ships xyz.blacksheep.mjolnir as HOME, but since the layout-owner split it is no
+        longer launcher_pkg at all — it is just an ordinary entry in all_pkgs() (from pkglist.txt) with its
+        own apk/base.apk + data.tar, exactly like any other captured app. Before that split, dropping every
+        launcher_pkg here pushed a captured HOME app into the store-only branch — listed "· from store" with
+        Config DISABLED, so its captured config was unreachable. The payload is still the ground truth,
+        mirroring Save's rule (which drops only a launcher absent from the device's user-app scan)."""
         lp = self.launcher_pkg()
         if lp and not (self.has_captured_apk(lp) or self.has_captured_config(lp)):
             return [p for p in self.all_pkgs() if p != lp]

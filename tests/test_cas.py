@@ -4545,6 +4545,29 @@ class TestProfileLauncherAndAxes(unittest.TestCase):
         prof = P.Profile(d)
         self.assertEqual(prof.download_pkgs(), ["com.foo"])
 
+    def test_download_pkgs_re_saved_thor_drops_launcher3_keeps_mjolnir(self):
+        # Pins the post-2026-07-22 meaning of launcher_pkg (the homescreen LAYOUT OWNER, capture.sh
+        # c5d6cc4) end-to-end on the case the split exists for: a RE-SAVED AYN Thor golden. launcher_pkg is
+        # now com.android.launcher3 (a system app, no payload of its own) — dropped, same as any other
+        # uncaptured system launcher. xyz.blacksheep.mjolnir is the active HOME (recorded separately as
+        # launcher_component, not read by download_pkgs()) but is ALSO an ordinary captured app here — it
+        # has its own apk+data.tar in pkglist.txt, so it must stay in the Download rows with Config enabled,
+        # exactly like any other captured package, not treated as "the launcher".
+        d = pathlib.Path(tempfile.mkdtemp())
+        pay = d / "golden_root_payload"
+        (pay / "homescreen").mkdir(parents=True)
+        (pay / "xyz.blacksheep.mjolnir" / "apk").mkdir(parents=True)
+        (pay / "xyz.blacksheep.mjolnir" / "apk" / "base.apk").write_text("x")
+        (pay / "xyz.blacksheep.mjolnir" / "data.tar").write_text("x")
+        (pay / "pkglist.txt").write_text("com.foo\nxyz.blacksheep.mjolnir\n")
+        (pay / "homescreen" / "meta").write_text(
+            "launcher_pkg=com.android.launcher3\n"
+            "launcher_component=xyz.blacksheep.mjolnir/.HomeActivity\n")
+        prof = P.Profile(d)
+        dl = prof.download_pkgs()
+        self.assertNotIn("com.android.launcher3", dl)
+        self.assertIn("xyz.blacksheep.mjolnir", dl)
+
     def test_axes_reads_manifest_tokens(self):
         d = pathlib.Path(tempfile.mkdtemp())
         (d / "manifest").write_text("com.foo\nxyz.aethersx2.android config\n")
