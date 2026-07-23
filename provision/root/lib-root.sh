@@ -152,6 +152,22 @@ log(){  printf '   %s\n' "$*"; }
 ok(){   printf ' [ok]   %s\n' "$*"; }
 warn(){ printf ' [warn] %s\n' "$*"; }
 is_root(){ id 2>/dev/null | grep -q 'uid=0'; }
+# tar a dir tree with EXCLUDES, robustly. On a LIVE filesystem `tar` exits NON-ZERO when a file changes or
+# vanishes mid-archive — benign here, so success is judged by whether the archive is READABLE (tar -tf),
+# NOT by the exit code. Only a genuinely UNREADABLE archive falls back to a no-exclude retry.
+# CREATES THE OUTPUT'S PARENT DIR FIRST: a config-only app (manifest "<pkg> config") never hits capture.sh's
+# apk branch that mkdir'd "$P/$pkg", so tar was told to write "$P/$pkg/data.tar" into a missing dir and the
+# archive read as corrupt — the whole golden then failed rc=1 (xyz.aethersx2.android on mangmi-air-x-256).
+# Args: <out.tar> <-C dir> <member> <exclude-path…>   (exclude paths are member-relative, e.g. "$pkg/cache")
+mk_tar(){ out="$1"; cdir="$2"; member="$3"; shift 3
+  mkdir -p "$(dirname "$out")"
+  exc=""; for e in "$@"; do exc="$exc --exclude=$e"; done
+  tar -cf "$out" -C "$cdir" $exc "$member" 2>/dev/null
+  tar -tf "$out" >/dev/null 2>&1 && return 0
+  warn "archive unreadable WITH excludes ($member) — retrying without excludes (will be larger)"
+  tar -cf "$out" -C "$cdir" "$member" 2>/dev/null
+  tar -tf "$out" >/dev/null 2>&1
+}
 # First external /storage volume, in ANY volume-id format (FAT 'XXXX-XXXX', exFAT 16-hex, OTG UUID) —
 # list every mounted volume and skip only the internal 'emulated'/'self', never assume a hyphen.
 detect_sd(){ for d in /storage/*/; do d=${d%/}; n=${d##*/}; [ "$n" = emulated ] || [ "$n" = self ] || { [ -d "$d" ] && { echo "$d"; return; }; }; done; }

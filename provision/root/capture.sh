@@ -10,20 +10,8 @@ SD="$(detect_sd)"
 P="${CAS_OUT:-$SD/golden_root_payload}"
 mkdir -p "$P"
 CFAIL=0   # count capture problems; exit non-zero at the end so a corrupt/empty payload is never trusted
-# tar a dir tree with EXCLUDES, robustly. On a LIVE filesystem `tar` exits NON-ZERO when a file changes or
-# vanishes mid-archive — that's BENIGN here, so success is judged by whether the archive is READABLE
-# (tar -tf), NOT by the exit code. (The old code fell back to a NO-exclude tar on ANY non-zero, which on a
-# live /data/data silently re-captured cache/cores/etc. every time — the real cause of oversized goldens.)
-# Only a genuinely UNREADABLE archive falls back to a no-exclude retry, as a last resort.
-# Args: <out.tar> <-C dir> <member> <exclude-path…>   (exclude paths are member-relative, e.g. "$pkg/cache")
-mk_tar(){ out="$1"; cdir="$2"; member="$3"; shift 3
-  exc=""; for e in "$@"; do exc="$exc --exclude=$e"; done
-  tar -cf "$out" -C "$cdir" $exc "$member" 2>/dev/null
-  tar -tf "$out" >/dev/null 2>&1 && return 0
-  warn "archive unreadable WITH excludes ($member) — retrying without excludes (will be larger)"
-  tar -cf "$out" -C "$cdir" "$member" 2>/dev/null
-  tar -tf "$out" >/dev/null 2>&1
-}
+# mk_tar() lives in lib-root.sh (sourced above) — a robust, exclude-aware tar that also creates its
+# output's parent dir, so a config-only app with no apk-branch mkdir still captures cleanly.
 # global.meta: SD serial + the golden's locale/timezone, so restore can CLONE them onto each unit
 # (instead of a hardcoded default). getprop is the source of truth for the persisted tz/locale.
 { echo "golden_serial=${SD##*/}"
@@ -51,6 +39,9 @@ ok "cloning $(grep -c . "$P/pkglist.txt") apps: $(tr '\n' ' ' < "$P/pkglist.txt"
 for pkg in $(cat "$P/pkglist.txt"); do
   [ -d "/data/data/$pkg" ] || { warn "$pkg not installed — skip"; continue; }
   log "capturing $pkg…"   # announce BEFORE the tar so a big app (save states/mods) isn't a silent gap
+  mkdir -p "$P/$pkg"      # the app's payload dir must exist for ALL axes: a config-only app never hits the
+                          # apk branch below, so without this its data.tar AND its `meta` write both fail
+                          # into a missing dir (xyz.aethersx2.android on mangmi-air-x-256, rc=1).
   # capture axes for THIS pkg from the manifest (else BOTH — back-compat). apk -> bundle the installer;
   # config -> bundle its data/settings/BIOS. config-only (no apk) = the app is installed elsewhere (e.g. the
   # OEM launcher) and we only carry its config; apk-only = a clean install with no golden saves.
