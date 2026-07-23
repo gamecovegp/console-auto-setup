@@ -59,6 +59,14 @@ class TestBuildFingerprint(unittest.TestCase):
             with self.assertRaises(ValueError):
                 FW.set_build_fingerprint("nope", td, "v1", FP)
 
+    def test_defaults_to_current_version_when_none_given(self):
+        # firmware.current is a METHOD, not a property — build_fingerprint(fw) with no version must
+        # resolve it correctly, not stringify a bound method into the path.
+        with tempfile.TemporaryDirectory() as td:
+            _make_kit(td, version="20260507-165105", fingerprint=FP)
+            fw = FW.find("air-x", td)
+            self.assertEqual(FW.build_fingerprint(fw), FP)
+
 
 if __name__ == "__main__":
     unittest.main()

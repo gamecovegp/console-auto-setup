@@ -894,7 +894,7 @@ def build_fingerprint(firmware, version=None):
     there would flash a wrong-build init_boot and break the very OTA this is meant to protect."""
     if firmware is None:
         return None
-    v = version or firmware.current
+    v = version or firmware.current()          # current() is a METHOD, not a property
     if not v:
         return None
     fp = str(_read_json(_version_meta_path(firmware, v)).get("fingerprint") or "").strip()
